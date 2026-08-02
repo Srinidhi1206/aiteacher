@@ -1,0 +1,638 @@
+// mAITeacher - Reference Prisma Schema
+// ---------------------------------------------------------------------------
+// This schema is documentation / a future-backend reference. The app
+// currently runs entirely on the mock data layer in lib/mock-data/*, per
+// docs/ARCHITECTURE.md. Nothing here is wired up or executed - it exists so
+// a future Next.js API routes + Prisma + Postgres backend can be built
+// without re-deriving the data model from scratch.
+//
+// Intended stack: Postgres (primary store) + pgvector extension (embeddings
+// for weak-concept clustering / semantic search over lessons) + Redis
+// (sessions, rate limiting, job queues for AI generation).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  STUDENT
+  PARENT
+  TEACHER
+  ADMIN
+}
+
+enum GradeStage {
+  PRIMARY
+  MIDDLE_SCHOOL
+  HIGH_SCHOOL
+  COLLEGE
+  UNIVERSITY
+}
+
+enum Curriculum {
+  CBSE
+  ICSE
+  STATE_BOARD
+  IB
+  IGCSE
+  UNIVERSITY
+}
+
+enum BloomLevel {
+  REMEMBER
+  UNDERSTAND
+  APPLY
+  ANALYZE
+}
+
+enum TopicStatus {
+  WEAK
+  DEVELOPING
+  STRONG
+}
+
+enum QuestionType {
+  MCQ
+  FILL_BLANK
+  TRUE_FALSE
+  SHORT_ANSWER
+  LONG_ANSWER
+  CASE_STUDY
+  DIAGRAM
+}
+
+enum PaperType {
+  CHAPTER_TEST
+  WEEKLY_TEST
+  MONTHLY_TEST
+  MOCK_EXAM
+  PREVIOUS_PATTERN_PAPER
+  FINAL_EXAM
+}
+
+enum AssignmentStatus {
+  PENDING
+  SUBMITTED
+  GRADED
+  OVERDUE
+}
+
+enum MaterialStatus {
+  PROCESSING
+  READY
+  ERROR
+}
+
+enum CalendarEventType {
+  EXAM
+  ASSIGNMENT
+  REVISION
+  MOCK_TEST
+  STUDY_SESSION
+}
+
+enum StudyPlanItemKind {
+  TOPIC
+  REVISION
+  PRACTICE
+  MOCK_TEST
+  BUFFER
+}
+
+enum NotificationType {
+  REMINDER
+  ACHIEVEMENT
+  GRADE
+  STREAK
+  SYSTEM
+  EXAM
+}
+
+enum Priority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String
+  name          String
+  role          Role
+  avatarInitials String?
+  avatarColor    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  student  Student?
+  parent   Parent?
+  teacher  Teacher?
+  admin    Admin?
+
+  notifications Notification[]
+  logs          Log[]
+
+  @@index([role])
+}
+
+model Student {
+  id            String     @id @default(cuid())
+  userId        String     @unique
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grade         String
+  gradeStage    GradeStage
+  curriculum    Curriculum
+  board         String?
+  streakDays    Int        @default(0)
+  xp            Int        @default(0)
+  level         Int        @default(1)
+  xpToNextLevel Int        @default(1000)
+  joinedDate    DateTime   @default(now())
+
+  parentLinks    ParentStudentLink[]
+  classEnrollments ClassEnrollment[]
+  subjectProgress  StudentSubjectProgress[]
+  topicProgress    StudentTopicProgress[]
+  attempts         Attempt[]
+  assignments      Assignment[]
+  achievements     StudentAchievement[]
+  weaknessProfiles WeaknessProfile[]
+  studyPlans       StudyPlan[]
+  examPlans        ExamPlan[]
+  calendarEvents   CalendarEvent[]
+  conversations    Conversation[]
+  dailyGoals       DailyGoal[]
+}
+
+model Parent {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  children ParentStudentLink[]
+}
+
+model ParentStudentLink {
+  id        String  @id @default(cuid())
+  parentId  String
+  parent    Parent  @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([parentId, studentId])
+}
+
+model Teacher {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  classes            Class[]
+  uploadedMaterials  StudyMaterial[]
+}
+
+model Admin {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Curriculum content
+// ---------------------------------------------------------------------------
+
+model Subject {
+  id         String   @id @default(cuid())
+  name       String
+  slug       String
+  board      String
+  grade      String
+  icon       String?
+  colorToken String?
+  createdAt  DateTime @default(now())
+
+  chapters         Chapter[]
+  classes          Class[]
+  studentProgress  StudentSubjectProgress[]
+  papers           Paper[]
+  promptTemplates  PromptTemplate[] @relation("SubjectPrompts")
+
+  @@unique([slug, board, grade])
+}
+
+model Chapter {
+  id        String   @id @default(cuid())
+  subjectId String
+  subject   Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  name      String
+  slug      String
+  order     Int      @default(0)
+
+  topics Topic[]
+
+  @@unique([subjectId, slug])
+}
+
+model Topic {
+  id        String     @id @default(cuid())
+  chapterId String
+  chapter   Chapter    @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  name      String
+  slug      String
+  bloomLevel BloomLevel
+  order     Int        @default(0)
+
+  lessons        Lesson[]
+  studentProgress StudentTopicProgress[]
+  questions       Question[]
+  weaknessProfiles WeaknessProfile[]
+  // pgvector embedding of the topic's canonical description, used for
+  // semantic clustering of weak concepts across a student's attempt history.
+  embedding      Unsupported("vector(1536)")?
+
+  @@unique([chapterId, slug])
+}
+
+model Lesson {
+  id        String   @id @default(cuid())
+  topicId   String
+  topic     Topic    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  recap     Json // string[]
+  examples  Json // WorkedExample[]
+  createdAt DateTime @default(now())
+
+  questions LessonQuestion[]
+}
+
+model LessonQuestion {
+  id            String       @id @default(cuid())
+  lessonId      String
+  lesson        Lesson       @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  bloomLevel    Int
+  type          QuestionType
+  prompt        String
+  options       Json?
+  correctAnswer String
+  explanation   String
+  reteach       String
+  hint          String?
+  xp            Int          @default(10)
+}
+
+// ---------------------------------------------------------------------------
+// Study materials (teacher uploads, AI-extracted)
+// ---------------------------------------------------------------------------
+
+model StudyMaterial {
+  id              String         @id @default(cuid())
+  teacherId       String
+  teacher         Teacher        @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  fileName        String
+  fileUrl         String
+  subject         String
+  sizeKb          Int
+  status          MaterialStatus @default(PROCESSING)
+  extractedTopics Json? // string[] populated once AI extraction completes
+  uploadedAt      DateTime       @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Questions, Papers, Attempts, Scores
+// ---------------------------------------------------------------------------
+
+model Question {
+  id              String       @id @default(cuid())
+  topicId         String
+  topic           Topic        @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  type            QuestionType
+  bloomLevel      Int
+  marks           Int
+  prompt          String
+  scenario        String?
+  diagramCaption  String?
+  options         Json?
+  correctAnswer   String
+  explanation     String
+  improvementTip  String
+  createdAt       DateTime     @default(now())
+
+  paperQuestions PaperQuestion[]
+}
+
+model Paper {
+  id               String    @id @default(cuid())
+  subjectId        String
+  subject          Subject   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  title            String
+  type             PaperType
+  totalMarks       Int
+  durationMinutes  Int
+  difficulty       String
+  isCustom         Boolean   @default(false)
+  createdByUserId  String?
+  createdAt        DateTime  @default(now())
+
+  questions PaperQuestion[]
+  attempts  Attempt[]
+}
+
+model PaperQuestion {
+  id         String   @id @default(cuid())
+  paperId    String
+  paper      Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  order      Int      @default(0)
+}
+
+model Attempt {
+  id                  String   @id @default(cuid())
+  studentId           String
+  student             Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  paperId             String
+  paper               Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  answers             Json // Record<questionId, answer>
+  flagged             Json // string[]
+  startedAt           DateTime
+  timeTakenSeconds    Int
+  scoreObtained        Int
+  totalMarks           Int
+  accuracy             Float
+  conceptUnderstanding Float
+  createdAt            DateTime @default(now())
+
+  scores Score[]
+}
+
+model Score {
+  id            String   @id @default(cuid())
+  attemptId     String
+  attempt       Attempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  topic         String
+  bloomLevel    Int
+  marksScored   Int
+  marksTotal    Int
+  isCorrect     Boolean
+}
+
+// ---------------------------------------------------------------------------
+// Classes (teacher-managed groups of students)
+// ---------------------------------------------------------------------------
+
+model Class {
+  id        String   @id @default(cuid())
+  teacherId String
+  teacher   Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  subjectId String
+  subject   Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  name      String
+  grade     String
+  createdAt DateTime @default(now())
+
+  enrollments ClassEnrollment[]
+}
+
+model ClassEnrollment {
+  id        String  @id @default(cuid())
+  classId   String
+  class     Class   @relation(fields: [classId], references: [id], onDelete: Cascade)
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, studentId])
+}
+
+// ---------------------------------------------------------------------------
+// Assignments
+// ---------------------------------------------------------------------------
+
+model Assignment {
+  id             String           @id @default(cuid())
+  studentId      String
+  student        Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  title          String
+  subject        String
+  dueDate        DateTime
+  status         AssignmentStatus @default(PENDING)
+  score          Int?
+  maxScore       Int?
+  targetConcept  String?
+  bloomLevel     BloomLevel?
+  questionCount  Int?
+  personalized   Boolean          @default(false)
+  createdAt      DateTime         @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Progress, Weakness detection, Analytics
+// ---------------------------------------------------------------------------
+
+model StudentSubjectProgress {
+  id         String  @id @default(cuid())
+  studentId  String
+  student    Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subjectId  String
+  subject    Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  progress   Int     @default(0)
+  averageScore Int   @default(0)
+
+  @@unique([studentId, subjectId])
+}
+
+model StudentTopicProgress {
+  id        String      @id @default(cuid())
+  studentId String
+  student   Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  topicId   String
+  topic     Topic       @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  mastery   Int         @default(0)
+  status    TopicStatus @default(DEVELOPING)
+  lastPracticedAt DateTime?
+
+  @@unique([studentId, topicId])
+}
+
+// Weakness Detection algorithm output - one row per (student, topic) flagged
+// weak. Recomputed after every attempt; reason + trend are derived, not
+// hand-entered. See docs/ARCHITECTURE.md for the mocked vs. real algorithm.
+model WeaknessProfile {
+  id             String   @id @default(cuid())
+  studentId      String
+  student        Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  topicId        String
+  topic          Topic    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  reason         String
+  wrongAnswers   Int
+  totalAttempts  Int
+  mastery        Int
+  trend          String // "improving" | "declining" | "stable"
+  trendHistory   Json // number[]
+  lastPracticed  DateTime
+  updatedAt      DateTime @updatedAt
+
+  @@unique([studentId, topicId])
+}
+
+model StudentAchievement {
+  id          String   @id @default(cuid())
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  achievementKey String
+  unlocked    Boolean  @default(false)
+  unlockedAt  DateTime?
+  progress    Int      @default(0)
+
+  @@unique([studentId, achievementKey])
+}
+
+model DailyGoal {
+  id        String   @id @default(cuid())
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  label     String
+  target    Int
+  current   Int      @default(0)
+  unit      String
+  xpReward  Int
+  date      DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Study Plan Engine + Exam Planner
+// ---------------------------------------------------------------------------
+
+model StudyPlan {
+  id        String   @id @default(cuid())
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  items StudyPlanItem[]
+}
+
+model StudyPlanItem {
+  id              String            @id @default(cuid())
+  studyPlanId     String
+  studyPlan       StudyPlan         @relation(fields: [studyPlanId], references: [id], onDelete: Cascade)
+  day             Int
+  date            DateTime
+  kind            StudyPlanItemKind
+  subject         String
+  title           String
+  durationMinutes Int
+  completed       Boolean           @default(false)
+}
+
+model ExamPlan {
+  id                    String   @id @default(cuid())
+  studentId             String
+  student               Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  examName              String
+  examDate              DateTime
+  subject               String
+  chapters              Json // string[]
+  weightage             Int
+  priority              Priority
+  availableHoursPerDay  Float
+  generatedOutput       Json // ExamPlanOutput snapshot
+  createdAt             DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Calendar
+// ---------------------------------------------------------------------------
+
+model CalendarEvent {
+  id          String            @id @default(cuid())
+  studentId   String
+  student     Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  date        DateTime
+  title       String
+  subject     String
+  type        CalendarEventType
+  time        String?
+  description String?
+}
+
+// ---------------------------------------------------------------------------
+// AI Tutor Chat
+// ---------------------------------------------------------------------------
+
+model Conversation {
+  id        String   @id @default(cuid())
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  title     String
+  subject   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages ChatMessage[]
+}
+
+model ChatMessage {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String // "student" | "ai"
+  content        String
+  createdAt      DateTime     @default(now())
+  // Embedding of this turn's content, used to retrieve relevant prior
+  // context for conversation-memory-aware follow-up answers.
+  embedding      Unsupported("vector(1536)")?
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id      String           @id @default(cuid())
+  userId  String
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type    NotificationType
+  title   String
+  message String
+  read    Boolean          @default(false)
+  createdAt DateTime       @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Admin: Prompt Templates + Logs
+// ---------------------------------------------------------------------------
+
+model PromptTemplate {
+  id          String    @id @default(cuid())
+  name        String
+  description String
+  usedFor     String
+  model       String
+  template     String
+  lastEdited  DateTime  @updatedAt
+  subjects    Subject[] @relation("SubjectPrompts")
+}
+
+model Log {
+  id      String   @id @default(cuid())
+  userId  String?
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  level   String // "info" | "warning" | "error"
+  message String
+  source  String
+  time    DateTime @default(now())
+}
