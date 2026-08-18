@@ -1,0 +1,136 @@
+# TeachAI (mAITeacher)
+
+A personalized AI teacher platform — built to feel like Duolingo's motivation, Khan Academy's clarity, Notion's clean structure, and ChatGPT's conversational polish, all in one product.
+
+The app guides a student through a subject using **Bloom's Revised Taxonomy** (Remember → Understand → Apply → Analyze), tracks strengths/weaknesses, generates personalized assignments and practice papers, and provides separate portals for **Students, Teachers, and Admins** (with an early-stage Parent view). The admin-managed side of the product (Board type, Class 1–10 configuration, exam scheduling) targets K-10 schooling; the pre-existing student self-serve flow (onboarding, lessons, practice papers) additionally supports Class 11/12, college and university personas.
+
+This build runs on a **typed mock-data layer** plus a **demo authentication layer** — there is no live database or LLM API yet. `prisma/schema.prisma` and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) describe how to wire up a real backend (Postgres + Prisma + Redis + an LLM API) later without changing the UI.
+
+```
+Next.js frontend  →  lib/mock-data/* (typed sample data)  →  Demo auth / session (lib/auth, middleware.ts)
+```
+
+## Tech stack
+
+- Next.js 14 (App Router) + React + TypeScript
+- Tailwind CSS (indigo/violet + green/amber tokens, full dark mode)
+- `recharts` (charts), `framer-motion` (animation), `lucide-react` (icons), `next-themes` (dark mode)
+- `clsx` / `tailwind-merge` (class merging), `date-fns` (dates)
+
+## Current status
+
+**Step 1 — Demo authentication & role-based routing: COMPLETE**
+- Role-selection-first login (`/login`): pick Student / Teacher / Admin, then sign in.
+- Session is a signed (HMAC-SHA256), httpOnly cookie (`lib/auth/session.ts`) — no external auth provider yet.
+- `middleware.ts` enforces route protection server-side: unauthenticated visitors are redirected to `/login`; each role is confined to its own area (`/admin`, `/teacher`, or the student pages) and bounced back to its own dashboard on a mismatch; a returning user with a valid session who hits `/login` is sent straight to their dashboard instead of re-selecting a role.
+- Logout (`POST /api/auth/logout`) clears the session.
+- Centralized `Role` type (`lib/auth/users.ts`) and centralized `Class 1–10` config (`lib/classes.ts`) — no scattered role/class string literals.
+
+**Step 2 — Role dashboards: COMPLETE**
+- **Student** (`/dashboard` + full nav) — tasks, exam countdowns, study plan, subject progress, weak/strong topics, streak, Bloom-level progress, weekly/monthly charts, heatmap, notifications, plus the full Subjects → Chapters → Topics → Lesson flow, AI Tutor Chat, Practice Papers, Performance, Weak Areas, Achievements, Calendar, Assignments and Settings pages described below.
+- **Teacher** (`/teacher`) — class/subject selector, class management, AI-assisted exam builder, material upload (with simulated topic extraction), class-wide weak-concept summary, a marks-entry **Grade Submissions** foundation, and per-student analytics.
+- **Admin** (`/admin`) — platform analytics, **Board Type** (CBSE/ICSE/State Board) + **Class 1–10** toggles, a **Study Materials** upload foundation, an **Exam Schedule** builder (subject/chapter/date/marks), plus pre-existing Users, Subjects & Curriculum, Prompt Templates, System Settings and Logs tabs.
+
+All of the above (marks, uploads, scheduled exams, toggled settings) is React state scoped to the current session — nothing is persisted to a database yet, by design.
+
+## Demo accounts
+
+7 demo users (5 students, 1 teacher, 1 admin) are hardcoded for local/dev use — **development/demo only, not production credentials.** See [`docs/DEMO_CREDENTIALS.md`](docs/DEMO_CREDENTIALS.md) for the full username/password table and how login works under the hood.
+
+## Getting started
+
+```bash
+npm install
+npm run dev
+```
+
+Open http://localhost:3000 and sign in from `/login` using a demo account from `docs/DEMO_CREDENTIALS.md`.
+
+Other available commands (from `package.json`):
+
+```bash
+npm run build   # production build
+npm run start   # run a production build
+npm run lint    # ESLint (next lint)
+```
+
+There is no dedicated `typecheck` or `test` script yet; run `npx tsc --noEmit` to type-check the project.
+
+## Environment variables
+
+See [`.env.example`](.env.example). For the current demo auth layer:
+
+- `SESSION_SECRET` — signs the session cookie; set a long random value for any real deployment.
+- `ADMIN_PASSWORD`, `TEACHER_PASSWORD`, `STUDENT1_PASSWORD`…`STUDENT5_PASSWORD` — optional overrides for the demo account passwords.
+- `DATABASE_URL` — reserved for the future Postgres/Prisma backend; unused today.
+
+No real secrets are committed to the repo.
+
+## What's built (feature detail)
+
+- **Landing page** (`/`) — hero, features, how it works, AI demo transcript, testimonials, Bloom's-taxonomy journey, pricing, FAQ, footer.
+- **Onboarding** (`/onboarding`) — grade, curriculum, board, subjects (pre-existing self-serve flow, separate from the role-login portal above).
+- **Subjects → Chapters → Topics → Lesson** (`/subjects`) — topic pages (theory, examples, formulae, flashcards, revision notes) and an interactive lesson flow that walks through all 4 Bloom levels with instant feedback and reteach-on-struggle.
+- **AI Tutor Chat** (`/ai-tutor`) — Socratic chat that never gives direct answers, only guiding questions and hints (canned logic, not a real LLM — see Limitations).
+- **Practice Papers** (`/practice-papers`) — chapter/weekly/monthly tests, mock exams, a custom paper generator, a full attempt flow (7 question types + timer + navigator), and a detailed results/evaluation page.
+- **Performance, Weak Areas, Achievements, Calendar, Study Plan + Exam Planner, Assignments, Settings** — fully built with real charts and working interactions.
+
+## Project structure
+
+```
+app/
+  (marketing)/            landing page at "/"
+  onboarding/              self-serve onboarding flow -> /dashboard
+  login/                   role-selection + credentials login page
+  api/auth/                login/logout route handlers (session cookie)
+  (app)/                   authenticated shell (sidebar + topbar), gated by middleware.ts
+    dashboard/ subjects/ study-plan/ assignments/ practice-papers/
+    performance/ weak-areas/ achievements/ calendar/ ai-tutor/ settings/
+    parent/ teacher/ admin/
+middleware.ts              session check + role-based route protection
+components/
+  ui/            hand-built shadcn-style primitives
+  layout/        sidebar, topbar, mobile nav, toast provider
+  charts/        recharts wrappers (weekly/monthly, radar, bloom, heatmap)
+  admin/ teacher/ dashboard/ marketing/ lesson/ ai-tutor/ practice-papers/
+  performance/ weak-areas/ achievements/ calendar/ study-plan/
+  assignments/ settings/ parent/ onboarding/
+lib/
+  auth/          demo session (session.ts) + hardcoded user directory (users.ts)
+  types.ts       shared domain types
+  classes.ts     centralized Class 1-10 + board-type config
+  mock-data/     typed sample data (21 files: students, teacher, admin, subjects, etc.)
+  socratic-engine.ts   mock Socratic response engine for AI Tutor
+  nav.ts icon-map.tsx utils.ts
+prisma/schema.prisma   reference relational schema for a future real backend (not connected)
+docs/
+  ARCHITECTURE.md      how mock data maps to a real backend + the 4 core algorithms
+  DEMO_CREDENTIALS.md  demo login table + how the auth layer works
+```
+
+## Current limitations
+
+Not yet implemented — explicitly out of scope until a real backend exists:
+
+- Production authentication provider (this is a hand-rolled demo session, not NextAuth/OAuth/etc.)
+- PostgreSQL database and Prisma persistence (`prisma/schema.prisma` is a structural reference only, not connected to a running database)
+- Persistent user management (invites, password reset, account creation)
+- Real file storage for uploaded materials/worksheets/exam papers
+- Persistent study materials, exam schedules, marks, and settings (all reset when the session ends)
+- Real exam evaluation (grading UI exists; scoring is manual/mock)
+- Persistent student progress across sessions
+- A real GenAI API behind the AI Tutor, lesson generation, and weakness detection (all mocked with canned/deterministic logic today — see `docs/ARCHITECTURE.md` for the intended prompt-based design)
+- Production-grade user administration and audit logging
+
+## Future roadmap
+
+- **Step 3 — Backend + Database + Persistent Data.** Stand up Postgres + Prisma from `prisma/schema.prisma`, add API routes mirroring `lib/mock-data/*`, move session-only state (uploads, marks, exam schedule, settings) into real tables.
+- **Step 4 — Real AI / GenAI Tutor + Evaluation.** Wire an LLM provider behind the AI Tutor, lesson generation, question generation, and automated exam evaluation using the prompt templates already sketched in the Admin panel and `docs/ARCHITECTURE.md`.
+- **Step 5 — Production User Management + Advanced Learning Features.** Real auth provider (NextAuth/OAuth), account invites/password reset, persistent adaptive learning and study-plan generation, real-time progress tracking, and production-grade admin/audit tooling.
+
+## Known gaps in the mocked UI
+
+- All AI behavior (lesson explanations, Socratic tutor, evaluation, weakness detection) is mocked with realistic canned logic — swap in a real LLM once you have an API key (see `docs/ARCHITECTURE.md`).
+- `app/layout.tsx` uses a system font stack instead of `next/font/google` Inter (this build environment couldn't reach Google Fonts) — swap it in once deployed with normal internet access.
+- Custom-generated practice papers/attempts persist to `sessionStorage` only, not a real database.
+- A handful of non-flagship topics use templated (not hand-authored) lesson content.
