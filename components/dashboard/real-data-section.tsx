@@ -122,6 +122,12 @@ export async function RealDataSection() {
                   </div>
                   <p className="text-xs text-gray-400">{w.topic.chapter.subject.name}</p>
                   <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{w.reason}</p>
+                  <Link
+                    href={`/ai-tutor?topicId=${w.topicId}&prefill=${encodeURIComponent(`Help me improve in ${w.topic.name}. Explain the concept first, then give me 3 practice questions.`)}`}
+                    className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400"
+                  >
+                    <Sparkles className="h-3 w-3" /> Ask Tutor
+                  </Link>
                 </div>
               ))
             )}
@@ -171,12 +177,20 @@ export async function RealDataSection() {
             ) : (
               <div className="space-y-2">
                 {learningPath.items.slice(0, 6).map((item) => (
-                  <div key={item.id} className="flex items-center justify-between rounded-xl border border-gray-100 p-2.5 text-sm dark:border-gray-800">
-                    <div>
+                  <div key={item.id} className="flex items-center justify-between gap-2 rounded-xl border border-gray-100 p-2.5 text-sm dark:border-gray-800">
+                    <div className="min-w-0">
                       <span className="text-xs font-semibold text-gray-400">Day {item.day}</span>{" "}
                       <span className="text-gray-800 dark:text-gray-100">{item.title}</span>
                     </div>
-                    <Badge variant={item.completed ? "success" : "outline"}>{item.completed ? "Done" : item.kind}</Badge>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Link
+                        href={`/ai-tutor?prefill=${encodeURIComponent(`Help me with: ${item.title} (${item.subject}).`)}`}
+                        className="flex items-center gap-1 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400"
+                      >
+                        <Sparkles className="h-3 w-3" /> Ask Tutor
+                      </Link>
+                      <Badge variant={item.completed ? "success" : "outline"}>{item.completed ? "Done" : item.kind}</Badge>
+                    </div>
                   </div>
                 ))}
               </div>

@@ -90,7 +90,7 @@ For file storage (Stage C — study materials, worksheets, exam papers):
 
 - `BLOB_READ_WRITE_TOKEN` — Vercel Blob token. Without it, uploads return a clear "storage not configured" error instead of failing silently; the app still builds and runs.
 
-Reserved for a future stage, not used yet: `OPENAI_API_KEY`/`GEMINI_API_KEY`/`ANTHROPIC_API_KEY` (AI tutor — only one would ever be set, matching whichever provider is activated).
+AI Tutor (Stage G, `lib/ai/*`): `AI_PROVIDER` selects the active provider (`gemini` is the only real one implemented; `openai` is reserved for later; `mock` is local-dev-only and refused in production). `GEMINI_API_KEY` (and optional `GEMINI_MODEL`) is read only when `AI_PROVIDER=gemini`. `OPENAI_API_KEY` is reserved, not read by any code yet. Leaving `AI_PROVIDER` unset is fully supported — the app builds and runs, and `/ai-tutor` shows a "not configured yet" state instead of crashing.
 
 No real secrets are committed to the repo.
 
@@ -99,7 +99,7 @@ No real secrets are committed to the repo.
 - **Landing page** (`/`) — hero, features, how it works, AI demo transcript, testimonials, Bloom's-taxonomy journey, pricing, FAQ, footer.
 - **Onboarding** (`/onboarding`) — grade, curriculum, board, subjects (pre-existing self-serve flow, separate from the role-login portal above).
 - **Subjects → Chapters → Topics → Lesson** (`/subjects`) — topic pages (theory, examples, formulae, flashcards, revision notes) and an interactive lesson flow that walks through all 4 Bloom levels with instant feedback and reteach-on-struggle.
-- **AI Tutor Chat** (`/ai-tutor`) — Socratic chat that never gives direct answers, only guiding questions and hints (canned logic, not a real LLM — see Limitations).
+- **AI Tutor Chat** (`/ai-tutor`) — originally canned Socratic-style logic (Step 1/2); upgraded in Stage G to a real, database-backed, multi-conversation tutor behind a provider-agnostic abstraction (Gemini first) — see "Stage G" below.
 - **Practice Papers** (`/practice-papers`) — chapter/weekly/monthly tests, mock exams, a custom paper generator, a full attempt flow (7 question types + timer + navigator), and a detailed results/evaluation page.
 - **Performance, Weak Areas, Achievements, Calendar, Study Plan + Exam Planner, Assignments, Settings** — fully built with real charts and working interactions.
 
@@ -129,7 +129,9 @@ lib/
   types.ts       shared domain types
   classes.ts     centralized Class 1-10 + board-type config (superseded progressively by prisma/schema.prisma's Board/SchoolClass)
   mock-data/     typed sample data (21 files: students, teacher, admin, subjects, etc.)
-  socratic-engine.ts   mock Socratic response engine for AI Tutor
+  socratic-engine.ts   Socratic response engine - now reused as the AI Tutor's opt-in `mock` provider (Stage G)
+  ai/            AI Tutor provider abstraction (Stage G) - types/provider/errors/prompts/context/rate-limit
+  actions/tutor.ts     AI Tutor conversation server actions (Stage G)
   nav.ts icon-map.tsx utils.ts
 prisma/
   schema.prisma  full relational schema (Stage A - validated/generates, not connected to a live DB yet)
@@ -153,7 +155,7 @@ Not yet implemented — explicitly out of scope until a real backend exists:
 - Persistent study materials, exam schedules, marks, and settings (all reset when the session ends)
 - Real exam evaluation (grading UI exists; scoring is manual/mock)
 - Persistent student progress across sessions
-- A real GenAI API behind the AI Tutor, lesson generation, and weakness detection (all mocked with canned/deterministic logic today — see `docs/ARCHITECTURE.md` for the intended prompt-based design)
+- A real GenAI API behind the AI Tutor is implemented (Stage G, Gemini via `lib/ai/*` — see below), but not yet connected (no `GEMINI_API_KEY` configured anywhere).
 - Production-grade user administration and audit logging
 
 ## Future roadmap
@@ -161,7 +163,7 @@ Not yet implemented — explicitly out of scope until a real backend exists:
 Steps 3-5 are underway as nine reviewed stages (A-I) — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for current status of each:
 
 - **Step 3 — Backend + Database + Persistent Data.** Stages A-F (database schema, real auth, study materials, exam creation/taking/grading, progress/learning-path engines, registration + account approval) are all code-complete and type-checked against the real Prisma client, but none has ever executed against a live database — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for the stage-by-stage detail.
-- **Step 4 — Real AI / GenAI Tutor + Evaluation.** Stage G — wire an LLM provider behind the AI Tutor using the prompt templates already sketched in the Admin panel and `docs/ARCHITECTURE.md`. Not started.
+- **Step 4 — Real AI / GenAI Tutor + Evaluation.** Stage G is code-complete, not yet connected — provider-agnostic abstraction (`lib/ai/*`), Gemini as the first real provider, conversation persistence, and a real `/ai-tutor` UI. See [`docs/STEP_3_5.md`](docs/STEP_3_5.md#stage-g-detail).
 - **Step 5 — Production User Management + Advanced Learning Features.** Stages H-I — real auth provider, notifications/audit logs, production hardening (validation, rate limiting, loading/error/empty states). Not started.
 
 ## Known gaps in the mocked UI

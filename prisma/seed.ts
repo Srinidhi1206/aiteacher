@@ -114,6 +114,57 @@ const SYSTEM_SETTINGS = [
   { key: "leaderboards", label: "Class leaderboards", description: "Enable the optional leaderboard feature for all students", enabled: true },
 ];
 
+// Stage G: AI Tutor prompt templates. Mirrors the FALLBACK_PROMPTS in
+// lib/ai/prompts.ts (kept in sync by hand, not imported - that module has
+// `import "server-only"`, which throws under plain Node/tsx, same reason
+// lib/auth/password.ts can't be imported here either). An admin can edit
+// these rows later via the PromptTemplate model; the app falls back to the
+// built-in copies whenever the database is unavailable or a row is missing.
+const TUTOR_PROMPT_TEMPLATES = [
+  {
+    name: "TUTOR_SYSTEM",
+    description: "Core AI Tutor system prompt - teaching behavior, tone, and subject-specific style rules.",
+    usedFor: "AI Tutor Chat",
+    template: `You are the AI Tutor inside TeachAI, an educational assistant for school students - not a generic chatbot.
+
+How to teach:
+- Explain concepts clearly, starting with simple language before adding depth. Offer a deeper explanation only when asked or when the student seems ready for it.
+- Adapt your explanation to the student's class level and curriculum (board/class/subject) when that context is provided.
+- Use concrete examples, and break complex ideas into small, ordered steps.
+- If a question is genuinely ambiguous, ask one short clarifying question before answering at length - don't guess silently.
+- Prefer teaching over dumping a final answer, especially for homework-shaped questions: guide the student's reasoning, then confirm or correct their attempt.
+- Encourage the student to reason and attempt an answer before you give one.
+- Offer practice questions when they would help reinforce the concept.
+- Gently point out likely misconceptions when you notice one.
+- Clearly distinguish established facts from things you are uncertain about. Never claim to have looked something up, accessed a file, or seen the student's other work if you were not actually given that information in this conversation's context.
+
+Subject-specific style:
+- Mathematics/Science: show your reasoning, label formulas clearly, and explain each intermediate step rather than jumping to the result.
+- Languages (e.g. English, Hindi): give examples and gently correct grammar/usage mistakes when relevant.
+- Exam preparation: prioritize the student's actual syllabus and any weak areas provided in context over generic content.
+
+Keep responses focused and appropriately concise for a school student - avoid long, unstructured walls of text.`,
+  },
+  {
+    name: "TUTOR_EXPLAIN",
+    description: "Appended when the student is asking for an explanation of a concept.",
+    usedFor: "AI Tutor Chat",
+    template: "The student wants a clear explanation of this topic. Start simple, then build up, and check understanding with a short question before moving on.",
+  },
+  {
+    name: "TUTOR_PRACTICE",
+    description: "Appended when the student is asking for practice questions.",
+    usedFor: "AI Tutor Chat",
+    template: "The student wants practice questions. Generate a small set appropriate to their class level, ordered from easier to harder, without answers unless asked.",
+  },
+  {
+    name: "TUTOR_WEAK_AREA",
+    description: "Appended when the conversation's topic is a known weak area for the student.",
+    usedFor: "AI Tutor Chat",
+    template: "This topic is flagged as a weak area for the student (mastery: {masteryPct}%). Rebuild the fundamentals first before moving to harder practice, and be extra patient with step-by-step reasoning.",
+  },
+];
+
 async function main() {
   console.log("Seeding States + Union Territories...");
   const stateByCode = new Map<string, string>(); // code -> State.id
@@ -215,6 +266,24 @@ async function main() {
       update: { label: s.label, description: s.description },
       create: s,
     });
+  }
+
+  console.log("Seeding AI Tutor prompt templates...");
+  // Not using upsert: PromptTemplate has no unique field to key on (only
+  // `id`, a generated cuid) - same find-then-create/update approach used
+  // for the core subjects above.
+  for (const t of TUTOR_PROMPT_TEMPLATES) {
+    const existing = await prisma.promptTemplate.findFirst({ where: { name: t.name } });
+    if (existing) {
+      await prisma.promptTemplate.update({
+        where: { id: existing.id },
+        data: { description: t.description, usedFor: t.usedFor, template: t.template },
+      });
+    } else {
+      await prisma.promptTemplate.create({
+        data: { name: t.name, description: t.description, usedFor: t.usedFor, model: "gemini-2.5-flash", template: t.template },
+      });
+    }
   }
 
   // ---------------------------------------------------------------------

@@ -21,7 +21,7 @@ stage is applied to `main`/production without an explicit go-ahead.
 | D | Exam + grading system | **Complete, end-to-end.** Teacher exam creation + question builder + publish/unpublish (`/teacher/exams`), student exam-taking with timer/navigation/flagging (`/exams/[id]/attempt`), server-authoritative MCQ/TRUE_FALSE auto-evaluation, teacher subjective grading + finalize (`/teacher/exams/[id]`), student results (`/exams/[id]/results`, `/results`). |
 | E | Progress + learning path + planner | **Complete.** Deterministic progress/weakness/strength engines (`lib/analytics/*`), learning path generation reusing `StudyPlan`, daily planner, all wired into the student dashboard with graceful "database not connected" fallback (not a crash) when unreachable. |
 | F | Registration + account approval | **Code complete, locally validated where possible, not yet connected.** Student/teacher/admin-request registration, `AccountStatus`/`RegistrationRequest` model, super-admin-gated approval workflow, suspend/reactivate, audit logging - see "Stage F detail" below. Same DB-connection blocker as Stages A/B: nothing here has executed against a live database. (Note: an earlier, unrelated "exam evaluation" item was previously tracked under the letter F; it was folded into Stage D and is documented there instead - this F is the registration/approval work described below.) |
-| G | AI tutor (provider abstraction + real provider wiring) | Not started |
+| G | AI tutor (provider abstraction + real provider wiring) | **Code complete, locally validated where possible, not yet connected.** Provider-agnostic abstraction (`lib/ai/*`), Gemini implementation, conversation persistence reusing `AIConversation`/`AIMessage`, `/ai-tutor` upgraded from a canned mock to a real (database-backed) tutor with graceful "no database"/"AI not configured" states - see "Stage G detail" below. No `DATABASE_URL` and no `GEMINI_API_KEY` exist yet, so no real generation has ever executed. |
 | H | Analytics (notifications, audit logs, dashboards) | Partially - AuditLog is written to on key admin/material actions; full admin Logs UI wiring and Notification generation not done. |
 | I | Production hardening (validation, rate limiting, loading/error/empty states, a11y, mobile polish) | Partial - Zod validation and graceful empty/error states exist throughout Stage C/D/E; rate limiting and full a11y pass not done. |
 
@@ -601,3 +601,241 @@ generated Prisma client, and the authorization logic is verified by
 code-level walkthrough above, but no registration has ever actually been
 approved or rejected against a real row, because there is still no
 `DATABASE_URL`.
+
+## Stage G detail
+
+**Goal:** a real AI Tutor - persisted, multi-conversation, curriculum-aware
+- built behind a provider-agnostic abstraction so the first real vendor
+(Gemini) is a plug-in, not baked into the app, and the system degrades
+visibly rather than fabricating a response whenever the database or the AI
+provider isn't available.
+
+**Provider abstraction (`lib/ai/`):**
+- `types.ts` - `AIProvider` interface (`generateResponse`), request/result
+  shapes, and `AIStudentContext` (data-minimized, see below). Nothing
+  outside `lib/ai/provider.ts` knows which vendor is active.
+- `provider.ts` - `getAIProvider()` reads `AI_PROVIDER` and returns the
+  matching implementation, or `null` if unconfigured - it never throws,
+  so a missing key is a state the caller checks for, not an exception to
+  catch. Three branches today: `gemini` (real, via `@google/genai`),
+  `mock` (dev-only, reuses the existing `lib/socratic-engine.ts` Socratic
+  responder that used to back the mock `/ai-tutor` page - explicitly
+  refused when `NODE_ENV=production`, so a deployment can never silently
+  serve canned responses instead of a real error), and anything else
+  (including `openai`, reserved but not implemented) falls through to
+  "not configured." Adding OpenAI later means adding one more branch here
+  - no other file changes.
+- `errors.ts` - typed `AIError` with the exact codes required:
+  `AI_NOT_CONFIGURED`, `AI_PROVIDER_ERROR`, `AI_RATE_LIMITED`,
+  `AI_INVALID_REQUEST`, `AI_CONTEXT_ERROR`, `UNAUTHORIZED`,
+  `CONVERSATION_NOT_FOUND`. The Gemini provider logs only the HTTP status
+  and error message server-side on failure (`console.error`) - never the
+  request/prompt content - and only ever throws one of these typed codes
+  to its caller; the raw provider exception never reaches the browser.
+- `prompts.ts` - reuses the existing `PromptTemplate` model rather than
+  hardcoding prompts permanently: `getPromptTemplate(name)` tries the
+  database first, falls back to a built-in constant on any failure
+  (missing database, missing row) so a prompt lookup can never break the
+  tutor. Four templates, matching the spec: `TUTOR_SYSTEM` (the main
+  teaching-behavior prompt - explain simply first, adapt to class level,
+  examples and step-by-step reasoning, ask a clarifying question when
+  genuinely ambiguous, teach rather than dump homework answers, encourage
+  the student's own reasoning, offer practice questions, flag likely
+  misconceptions, distinguish fact from uncertainty and never claim to
+  have accessed data it wasn't given; separate style notes for
+  math/science - show reasoning, label formulas - vs. languages - examples
+  and corrections - vs. exam prep - prioritize syllabus/weak areas),
+  `TUTOR_EXPLAIN`/`TUTOR_PRACTICE` (small mode-specific notes), and
+  `TUTOR_WEAK_AREA` (appended only when the conversation's topic is a
+  known weak area, with the mastery percentage interpolated in).
+- `context.ts` - `buildStudentContext(studentId, topicId?)` assembles the
+  bounded, data-minimized context described below. Every query in this
+  file is scoped to the `studentId` its caller passes in - it has no
+  parameter that accepts a raw `userId` or an unscoped lookup, so it has
+  no way to return another student's data even by mistake.
+- `rate-limit.ts` - `checkTutorRateLimit(studentId)`, a minimal in-memory
+  per-student counter (12 requests/60s). **Documented limitation:** this
+  is per-process and not shared across multiple server instances - there
+  is no Redis or other shared store in this project. The function is the
+  only integration point `lib/actions/tutor.ts` calls, so swapping the
+  body for a shared-store implementation later doesn't touch any caller.
+
+**Data minimization - exactly what is sent to the AI provider:**
+`AIStudentContext` only ever contains: state name, board short name
+(e.g. "CBSE"), class label (e.g. "Class 8"), subject/chapter/topic name
+(only when a specific topic is in play), a mastery percentage, and up to
+5 weak-topic names and 5 strength-topic names. It never contains the
+student's real name, email, phone, password/passwordHash, session
+secrets, school administrative data, parent data, or any other student's
+information - `context.ts` has no code path that could include any of
+these, since it never selects those columns in the first place.
+
+**Conversation persistence (`lib/actions/tutor.ts`, reusing the existing
+`AIConversation`/`AIMessage` models - no new/duplicate models):**
+- `createConversation(topicId?)`, `listMyConversations()`,
+  `getMyConversation(id)`, `sendMessage(id, content)`,
+  `retryLastReply(id)` (see below), `deleteConversation(id)`,
+  `getAITutorStatus()`, `getMyCurriculumScope()`.
+- Every one of these calls `requireOwnStudentId()` first (session ->
+  student role -> that user's own `Student` row) - the same pattern
+  already used by `lib/actions/analytics.ts`, not a new one. Ownership of
+  a conversation is enforced structurally: every query is
+  `{ id: conversationId, studentId }`, so a conversationId belonging to
+  another student (or a malformed/garbage id) simply matches nothing and
+  returns "not found" - there is no separate code path that could leak
+  *why* it wasn't found, so a student can't use error differences to
+  probe for other students' conversation IDs.
+- `sendMessage` follows the required sequence exactly: authenticate ->
+  verify ownership -> validate the message (non-empty, <= 4000 characters,
+  conversation under a 200-message cap) -> rate-limit check -> persist the
+  student's message -> load the conversation's `contextSnapshot` (captured
+  once at `createConversation` time, per the schema's own comment - never
+  rebuilt on every message, which is what keeps context bounded) -> build
+  the system prompt -> call the provider -> validate the response is
+  non-empty -> persist the assistant message -> bump `updatedAt` -> return.
+  If generation fails (`AI_NOT_CONFIGURED`/`AI_PROVIDER_ERROR`/rate limit),
+  no assistant message is fabricated; whatever was already persisted stays
+  persisted.
+- **Retry without duplication:** because rate-limiting and validation
+  happen *before* the student's message is persisted, but provider
+  failures happen *after* it's persisted, a naive "just call sendMessage
+  again" retry would sometimes duplicate the student's message and
+  sometimes not, depending on which failure occurred. `retryLastReply(id)`
+  avoids this by checking that the conversation's last message is still
+  an un-replied `STUDENT` turn and then only re-running the
+  generate-and-persist step - never a second user message. The UI
+  (`components/ai-tutor/real-tutor-view.tsx`) re-fetches the conversation
+  from the server after any failure rather than guessing locally what was
+  saved, so it can never show a message as "sent" that wasn't.
+- Conversation titles start as "New conversation" and are set from the
+  first student message (truncated) the first time one is sent - no
+  separate "rename" UI in this pass.
+
+**Gemini provider - what was actually verified:** no SDK existed in this
+project before this stage. `@google/genai` (the current official Google
+Gen AI SDK, `googleapis/js-genai`, v2.18.0) was confirmed via the npm
+registry and then installed; the exact request/response shape used in
+`lib/ai/provider.ts` (`new GoogleGenAI({apiKey})`,
+`ai.models.generateContent({model, contents, config: {systemInstruction,
+temperature, maxOutputTokens}})`, `response.text`, `ApiError` with a
+`.status` field) was read directly from the installed package's own
+shipped `.d.ts` type definitions, not guessed or copied from an
+unverified example. The SDK is only ever `import()`-ed dynamically inside
+`GeminiProvider.generateResponse` - never at module load - so its absence
+or a missing key has zero effect on `next build` or on any code path that
+doesn't actually try to generate a reply.
+
+**UI (`/ai-tutor` - reused, not duplicated as a new `/tutor` route; it was
+already the mock AI Tutor Chat page from Step 1/2, already in
+`middleware.ts`'s `STUDENT_PATHS` and `lib/nav.ts`):**
+- `components/ai-tutor/real-tutor-view.tsx` replaces the old mock
+  `AiTutorView` at this route. Conversation sidebar (new chat, list,
+  per-item delete with an inline confirm step), message list with
+  student/assistant bubbles, an empty state with the 5 suggested prompts
+  from the spec (populate the input, never auto-send), Enter-to-send /
+  Shift+Enter-for-newline, disabled composer while sending, and a
+  Retry action that appears only when the last turn is an unanswered
+  student message.
+- `components/ai-tutor/curriculum-picker.tsx` - optional, collapsed by
+  default, Subject -> Chapter -> Topic selector reusing the existing
+  `lib/actions/curriculum.ts` reads (`listSubjectsForClass`,
+  `listChaptersForSubject`) - no new curriculum queries. Picking a topic
+  starts a new, context-attached conversation; the tutor works perfectly
+  well with general questions if this is never touched.
+- The old mock `AiTutorView`/`ChatBubble`/`ConversationSidebar` and
+  `lib/mock-data/ai-tutor.ts` are left in place but no longer referenced
+  from any route - `lib/socratic-engine.ts` is still live, reused as the
+  `mock` provider's actual logic rather than being duplicated.
+- **Two distinct graceful states**, per the spec: `components/
+  database-unavailable.tsx` (reused, unchanged) when the database itself
+  is unreachable ("Tutor data needs a connected database..."), and a
+  separate banner - only reachable once the database *is* available -
+  reading "AI Tutor is not configured yet. Please configure the AI
+  provider to start chatting." when `AI_PROVIDER`/`GEMINI_API_KEY` aren't
+  set. The two are checked independently (`getAITutorStatus()` for the
+  second one) so the UI never conflates "no database" with "no AI key."
+
+**"Ask Tutor" integration (spec #18/#19) - deliberately placed on the
+dashboard's *real* data cards, not the still-mock `/weak-areas` page:**
+the mock `/weak-areas` page (`lib/mock-data/weak-areas.ts`) has no real
+database topic IDs to link with, so a shortcut there could only pass a
+free-text guess, not real context - the spec is explicit about using the
+actual database topic ID. `components/dashboard/real-data-section.tsx`'s
+Weak Areas card (Stage E6, already database-backed) already has a real
+`topicId` per row, so its "Ask Tutor" link opens `/ai-tutor?topicId=...`
+(attaches real curriculum/mastery context server-side) with the input
+pre-filled with the spec's exact example phrasing ("Help me improve in
+{Topic}. Explain the concept first, then give me 3 practice questions.").
+The Learning Path card's items (`StudyPlanItem`) have no `topicId` in the
+schema, only free-text `subject`/`title`, so their "Ask Tutor" link only
+pre-fills the input (`?prefill=...`) rather than attaching database
+context - reusing the existing learning-path data as-is, not inventing a
+topic link that doesn't exist.
+
+**Security - server-side, not middleware-only** (every claim below is
+enforced inside `lib/actions/tutor.ts` itself, not just by
+`middleware.ts`'s route gate):
+1. Only authenticated students reach `/ai-tutor`'s data -
+   `requireOwnStudentId()` throws `UnauthorizedError`/`ForbiddenError` for
+   anyone else, independent of the route-level block.
+2. A teacher/admin session calling a tutor action directly (bypassing the
+   UI) hits the same `requireRole("student")` check and is rejected.
+3. Student A can't read Student B's conversation: every read/write is
+   `{ id, studentId: <own> }` - see "Conversation persistence" above.
+4. Prompt templates are read-only from this subsystem's perspective -
+   nothing in `lib/actions/tutor.ts` or `lib/ai/*` ever writes to
+   `PromptTemplate`; only a (not-yet-built) admin UI could, and no such
+   UI was added in this stage.
+5. No action accepts a `studentId`/`userId`/role as a parameter - it is
+   always derived from the session, so there is nothing for a crafted
+   payload to override.
+6. Provider API keys are read only inside `lib/ai/provider.ts` (a
+   `server-only`-guarded module) and passed only to the dynamically
+   imported SDK - never returned from any action, never serialized into
+   any client-visible prop or response.
+
+**Testing - verification suite:**
+
+```
+TypeScript (npx tsc --noEmit): PASS
+Lint (npm run lint):           PASS (no warnings)
+Build (npm run build):         PASS - /ai-tutor and all routes build with
+                                no DATABASE_URL and no GEMINI_API_KEY set,
+                                confirming the SDK's dynamic import keeps
+                                the build key-independent
+Prisma validate:                PASS (placeholder DATABASE_URL/DIRECT_URL -
+                                neither command needs a reachable database)
+Prisma generate:                PASS
+```
+
+Browser-verified (fallback-auth accounts, no live database):
+`/ai-tutor` redirects an unauthenticated visitor to `/login`; an admin
+session hitting `/ai-tutor` is bounced to `/admin` and a teacher session
+to `/teacher` (both via the pre-existing `middleware.ts` role gate,
+unchanged by this stage); a student session (fallback auth) reaches
+`/ai-tutor` and it renders the `DatabaseUnavailable` card cleanly - no
+blank page, no unhandled exception - with the exact "Tutor data needs a
+connected database..." copy; `/dashboard` still renders normally for a
+student with the new "Ask Tutor" links compiled into
+`real-data-section.tsx` (unexercised in this run only because the whole
+real-data section itself falls back to its own database-unavailable card
+first, same as every other Stage E widget).
+
+**Not executed (no database, no AI provider key):** every conversation/
+message create-read-update-delete against a real row; an actual Gemini
+`generateContent` call (so the exact wording, latency, and error
+responses of a real Gemini response were never observed - only the
+request/response *shape* was verified against the SDK's own type
+definitions); the "AI Tutor is not configured yet" banner has not been
+seen rendered in a live browser, because reaching it requires a database
+connection this environment doesn't have (the code path itself - `
+getAIProvider() === null` when `AI_PROVIDER` is unset - was exercised via
+`npx tsc --noEmit` and direct reading, not a browser render); the
+`mock` provider (`AI_PROVIDER=mock`) was not exercised end-to-end either,
+for the same reason. No automated unit tests were added: this repository
+has no test runner configured (no jest/vitest/`test` script anywhere),
+and adding one purely for this stage was judged to be more
+infrastructure than the "don't overbuild" instruction calls for: instead,
+`npx tsc --noEmit` (which catches most structural/type errors across
+`lib/ai/*`) plus the browser checks above are the verification actually
+performed.

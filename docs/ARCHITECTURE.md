@@ -95,6 +95,14 @@ Next.js API Routes (or a separate Node/Nest service)
                                            question generation, weakness detection
 ```
 
+(This sketch predates Stage G. What actually got built for the AI Tutor
+piece - see section 4 below - is a provider-agnostic abstraction whose
+first real implementation is Gemini, not Claude, and no pgvector/Redis:
+context is bounded by capturing it once per conversation rather than by
+embeddings/retrieval, and rate limiting is an in-memory per-process
+counter, not a Redis-backed one. Both remain valid, swappable future
+upgrades - see `lib/ai/provider.ts` and `lib/ai/rate-limit.ts`.)
+
 `lib/mock-data/*.ts` files map almost 1:1 to Prisma models in
 `prisma/schema.prisma` (e.g. `subjects.ts` -> `Subject`/`Chapter`/`Topic`,
 `weak-areas.ts` -> `WeaknessProfile`, `study-plan.ts` -> `StudyPlan` +
@@ -167,17 +175,39 @@ already import from the shared `lib/types.ts` interfaces.
   batch of questions at the new Bloom level, keeping the question bank
   personalized rather than static.
 
-## 4. Conversation Memory & Embeddings (AI Tutor Chat)
+## 4. AI Tutor (Stage G, see `docs/STEP_3_5.md` "Stage G detail" for the full writeup)
 
-- **Mocked as:** a fixed transcript per conversation in
-  `lib/mock-data/ai-tutor.ts` plus `lib/socratic-engine.ts` for canned
-  Socratic-style responses.
-- **Real version:** each `ChatMessage` is embedded (pgvector) on write; when
-  the student sends a new message, the API route retrieves the top-k most
-  relevant prior turns (across the current and past conversations on that
-  topic) instead of naively replaying the full history, then chains that
-  retrieved context into the "Socratic Tutor Prompt" so the tutor "remembers"
-  earlier misconceptions without an unbounded context window.
+`/ai-tutor` was upgraded in place from the Step 1/2 mock (a fixed
+transcript in `lib/mock-data/ai-tutor.ts` plus `lib/socratic-engine.ts`'s
+canned Socratic responses) to a real, database-backed tutor - same route,
+no duplicate page.
+
+- **Provider abstraction (`lib/ai/*`):** an `AIProvider` interface
+  (`generateResponse`) with a Gemini implementation (`@google/genai`) and
+  an opt-in, production-refused `mock` implementation that reuses
+  `lib/socratic-engine.ts` rather than duplicating its logic. Provider
+  choice is entirely `AI_PROVIDER`-env-driven, so adding OpenAI later is a
+  new branch in `lib/ai/provider.ts`, not a rewrite.
+- **Persistence:** reuses the existing `AIConversation`/`AIMessage`
+  models (no new/duplicate models) via `lib/actions/tutor.ts`. Every
+  action re-derives the student from the session and scopes every query
+  by that student's own id - see the Security section of "Stage G detail"
+  in `docs/STEP_3_5.md` for the full authorization walkthrough.
+- **Context, bounded and data-minimized (`lib/ai/context.ts`):** a
+  conversation's curriculum/performance context is captured once at
+  creation (`AIConversation.contextSnapshot`, a field that already
+  existed for exactly this) and reused for every message in it, rather
+  than re-derived or grown per turn - this is what keeps context bounded,
+  not embeddings or retrieval. Only state/board/class/subject/chapter/
+  topic names, a mastery percentage, and up to 5 weak/strong topic names
+  are ever included - never the student's name, email, or any other PII.
+  No vector database, embeddings, or RAG pipeline was built for this
+  stage (explicitly out of scope) - `Topic.embedding`/`AIMessage.embedding`
+  remain unused `Json?` placeholders for a possible future stage.
+- **Prompts:** reuses the existing `PromptTemplate` model
+  (`TUTOR_SYSTEM`/`TUTOR_EXPLAIN`/`TUTOR_PRACTICE`/`TUTOR_WEAK_AREA`),
+  with a built-in fallback constant per template so a missing database or
+  row can never break the tutor.
 
 ## 5. Known Gaps in This Build
 
