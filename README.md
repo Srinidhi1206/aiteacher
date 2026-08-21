@@ -16,6 +16,7 @@ Next.js frontend  →  lib/mock-data/* (typed sample data)  →  Demo auth / ses
 - Tailwind CSS (indigo/violet + green/amber tokens, full dark mode)
 - `recharts` (charts), `framer-motion` (animation), `lucide-react` (icons), `next-themes` (dark mode)
 - `clsx` / `tailwind-merge` (class merging), `date-fns` (dates)
+- Prisma 6.x + PostgreSQL — schema/tooling written (Stage A, see below), not yet connected or queried by any page
 
 ## Current status
 
@@ -32,6 +33,9 @@ Next.js frontend  →  lib/mock-data/* (typed sample data)  →  Demo auth / ses
 - **Admin** (`/admin`) — platform analytics, **Board Type** (CBSE/ICSE/State Board) + **Class 1–10** toggles, a **Study Materials** upload foundation, an **Exam Schedule** builder (subject/chapter/date/marks), plus pre-existing Users, Subjects & Curriculum, Prompt Templates, System Settings and Logs tabs.
 
 All of the above (marks, uploads, scheduled exams, toggled settings) is React state scoped to the current session — nothing is persisted to a database yet, by design.
+
+**Step 3-5 — real backend, academic workflows, AI tutor, production hardening: IN PROGRESS.**
+Being built as reviewed, sequential stages (A through I) rather than one large change — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for the full stage-by-stage tracker. Stage A (database schema + Prisma tooling) is code-complete and verified but not yet connected to a live database or wired into any page — see [`docs/DATABASE.md`](docs/DATABASE.md).
 
 ## Demo accounts
 
@@ -56,13 +60,28 @@ npm run lint    # ESLint (next lint)
 
 There is no dedicated `typecheck` or `test` script yet; run `npx tsc --noEmit` to type-check the project.
 
+Database commands (see [`docs/DATABASE.md`](docs/DATABASE.md) — require `DATABASE_URL`/`DIRECT_URL` to be set, which isn't the case yet on this deployment):
+
+```bash
+npm run db:migrate   # apply schema changes locally (creates migration history)
+npm run db:deploy    # apply existing migrations in production
+npm run db:seed      # seed states/boards/classes/subjects (see docs/BOARDS.md)
+npm run db:studio    # browse the database visually
+```
+
 ## Environment variables
 
 See [`.env.example`](.env.example). For the current demo auth layer:
 
 - `SESSION_SECRET` — signs the session cookie; set a long random value for any real deployment.
 - `ADMIN_PASSWORD`, `TEACHER_PASSWORD`, `STUDENT1_PASSWORD`…`STUDENT5_PASSWORD` — optional overrides for the demo account passwords.
-- `DATABASE_URL` — reserved for the future Postgres/Prisma backend; unused today.
+
+For the database (Stage A — not connected yet, see `docs/DATABASE.md`):
+
+- `DATABASE_URL` — pooled Postgres connection string, used by the app at runtime.
+- `DIRECT_URL` — non-pooled connection string, used only by migrations/seeding.
+
+Reserved for future stages, not used yet: `BLOB_READ_WRITE_TOKEN` (file storage), `OPENAI_API_KEY`/`GEMINI_API_KEY`/`ANTHROPIC_API_KEY` (AI tutor — only one would ever be set, matching whichever provider is activated).
 
 No real secrets are committed to the repo.
 
@@ -97,15 +116,21 @@ components/
   assignments/ settings/ parent/ onboarding/
 lib/
   auth/          demo session (session.ts) + hardcoded user directory (users.ts)
+  prisma.ts      Prisma Client singleton (Stage A - not imported anywhere yet)
   types.ts       shared domain types
-  classes.ts     centralized Class 1-10 + board-type config
+  classes.ts     centralized Class 1-10 + board-type config (superseded progressively by prisma/schema.prisma's Board/SchoolClass)
   mock-data/     typed sample data (21 files: students, teacher, admin, subjects, etc.)
   socratic-engine.ts   mock Socratic response engine for AI Tutor
   nav.ts icon-map.tsx utils.ts
-prisma/schema.prisma   reference relational schema for a future real backend (not connected)
+prisma/
+  schema.prisma  full relational schema (Stage A - validated/generates, not connected to a live DB yet)
+  seed.ts        seeds states/boards/classes/subjects/achievements/settings (no user accounts - see docs/DATABASE.md)
 docs/
   ARCHITECTURE.md      how mock data maps to a real backend + the 4 core algorithms
   DEMO_CREDENTIALS.md  demo login table + how the auth layer works
+  STEP_3_5.md          Step 3-5 stage-by-stage status tracker
+  DATABASE.md          database setup, migration, and seeding steps
+  BOARDS.md            Indian states/boards reference data
 ```
 
 ## Current limitations
@@ -113,7 +138,7 @@ docs/
 Not yet implemented — explicitly out of scope until a real backend exists:
 
 - Production authentication provider (this is a hand-rolled demo session, not NextAuth/OAuth/etc.)
-- PostgreSQL database and Prisma persistence (`prisma/schema.prisma` is a structural reference only, not connected to a running database)
+- PostgreSQL database and Prisma persistence (`prisma/schema.prisma` is written and validated as of Stage A, but not connected to a running database or queried by any page yet — see `docs/DATABASE.md`)
 - Persistent user management (invites, password reset, account creation)
 - Real file storage for uploaded materials/worksheets/exam papers
 - Persistent study materials, exam schedules, marks, and settings (all reset when the session ends)
@@ -124,9 +149,11 @@ Not yet implemented — explicitly out of scope until a real backend exists:
 
 ## Future roadmap
 
-- **Step 3 — Backend + Database + Persistent Data.** Stand up Postgres + Prisma from `prisma/schema.prisma`, add API routes mirroring `lib/mock-data/*`, move session-only state (uploads, marks, exam schedule, settings) into real tables.
-- **Step 4 — Real AI / GenAI Tutor + Evaluation.** Wire an LLM provider behind the AI Tutor, lesson generation, question generation, and automated exam evaluation using the prompt templates already sketched in the Admin panel and `docs/ARCHITECTURE.md`.
-- **Step 5 — Production User Management + Advanced Learning Features.** Real auth provider (NextAuth/OAuth), account invites/password reset, persistent adaptive learning and study-plan generation, real-time progress tracking, and production-grade admin/audit tooling.
+Steps 3-5 are underway as nine reviewed stages (A-I) — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for current status of each:
+
+- **Step 3 — Backend + Database + Persistent Data.** Stage A (database schema + Prisma tooling) is code-complete; Stages B-F (real auth, admin/teacher/student persistence, exam evaluation) are not started.
+- **Step 4 — Real AI / GenAI Tutor + Evaluation.** Stage G — wire an LLM provider behind the AI Tutor using the prompt templates already sketched in the Admin panel and `docs/ARCHITECTURE.md`. Not started.
+- **Step 5 — Production User Management + Advanced Learning Features.** Stages H-I — real auth provider, notifications/audit logs, production hardening (validation, rate limiting, loading/error/empty states). Not started.
 
 ## Known gaps in the mocked UI
 

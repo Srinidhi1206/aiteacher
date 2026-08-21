@@ -49,6 +49,15 @@ real exam evaluation, persistent student progress across sessions, a real
 GenAI API behind the AI Tutor, real-time data, and production user
 management (invites, password reset, etc.). See "Known Gaps" below.
 
+**Step 3-5 - real backend, academic workflows, AI tutor, production
+hardening: IN PROGRESS, staged.** Full status, stage-by-stage, lives in
+[STEP_3_5.md](./STEP_3_5.md). Short version: Stage A (database schema +
+Prisma tooling) is written and verified but not yet connected to a live
+database or to any page - the app still runs entirely on `lib/mock-data/*`
+as described below, unchanged. See [DATABASE.md](./DATABASE.md) for the
+schema/migration/seed details and [BOARDS.md](./BOARDS.md) for the Indian
+states/boards reference data.
+
 ## 1. System Overview
 
 **Today (this build):**
@@ -182,8 +191,9 @@ already import from the shared `lib/types.ts` interfaces.
   checkboxes, generated exam plans, uploaded materials, entered marks,
   scheduled exams) beyond the current session - by design, since there is
   no backend yet.
-- `prisma/schema.prisma` is not connected to a running database; it is a
-  structural reference for the migration described above. It does not yet
-  model `Class` as a flat "Class 1-10" enum (see `lib/classes.ts`) or the
-  admin `ScheduledExam`/board-type settings added in Step 2 - extend the
-  schema to match `lib/types.ts` when the real backend is built.
+- `prisma/schema.prisma` is not connected to a running database yet, but as
+  of the Stage A work (see [STEP_3_5.md](./STEP_3_5.md)) it now fully
+  models `SchoolClass` (Class 1-10, per-board), `Board`/`State` (the Indian
+  board/state hierarchy - see [BOARDS.md](./BOARDS.md)), and
+  `ExamSchedule`, superseding the string-only versions in `lib/classes.ts`/
+  `lib/types.ts` once pages actually migrate over to it stage-by-stage.

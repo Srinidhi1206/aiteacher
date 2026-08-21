@@ -1,23 +1,42 @@
-// mAITeacher - Reference Prisma Schema
+// mAITeacher (TeachAI) - Prisma Schema
 // ---------------------------------------------------------------------------
-// This schema is documentation / a future-backend reference. The app
-// currently runs entirely on the mock data layer in lib/mock-data/*, per
-// docs/ARCHITECTURE.md. Nothing here is wired up or executed - it exists so
-// a future Next.js API routes + Prisma + Postgres backend can be built
-// without re-deriving the data model from scratch.
+// STAGE A of the Step 3-5 migration (see docs/STEP_3_5.md and
+// docs/DATABASE.md). This schema is written and the client can be generated
+// (`npx prisma generate`) without a live database, but nothing in the app
+// reads/writes through it yet - the UI still runs on lib/mock-data/* until
+// later stages progressively wire pages to real queries. Running migrations
+// requires a real DATABASE_URL (see docs/DATABASE.md); until you provide
+// one, this file is reviewable code, not a live schema.
+//
+// Naming note: the pre-existing schema used a single `Class` model to mean
+// a teacher's roster (e.g. "Class 11 - Section A, Mathematics"). The new
+// Board/State/Class-1-10 hierarchy needs "Class" to mean a grade level
+// (Class 1..Class 10), which collides with that meaning. Resolved by:
+//   - `SchoolClass`  = the grade-level concept (Class 1..Class 10), scoped
+//                      to a Board, admin-enable/disable-able.
+//   - `ClassSection` = the old `Class` model, renamed - a teacher's actual
+//                      roster/section for one subject within a SchoolClass.
 //
 // Intended stack: Postgres (primary store) + pgvector extension (embeddings
-// for weak-concept clustering / semantic search over lessons) + Redis
-// (sessions, rate limiting, job queues for AI generation).
+// for weak-concept clustering / semantic search over lessons) - see the
+// commented-out `extensions = [vector]` line below; enable it once your
+// Postgres provider supports the `vector` extension (Vercel Postgres does
+// not yet as of this writing - see docs/DATABASE.md).
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider   = "postgresql"
-  url        = env("DATABASE_URL")
-  extensions = [vector]
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Vercel Postgres / Neon connections are pooled (pgbouncer) by default,
+  // which `prisma migrate` cannot run schema changes through - point
+  // DIRECT_URL at the same database's non-pooled connection string. If your
+  // provider only gives you one connection string, set DIRECT_URL to the
+  // same value as DATABASE_URL. See docs/DATABASE.md.
+  directUrl = env("DIRECT_URL")
+  // extensions = [vector] // enable once the target Postgres provider supports pgvector
 }
 
 // ---------------------------------------------------------------------------
@@ -31,6 +50,18 @@ enum Role {
   ADMIN
 }
 
+// Legacy/broad self-serve onboarding curriculum (pre-existing, kept for the
+// non-K-10 onboarding flow - college/university personas). The K-10
+// role-based portal uses the new Board/State models instead; see Student.
+enum Curriculum {
+  CBSE
+  ICSE
+  STATE_BOARD
+  IB
+  IGCSE
+  UNIVERSITY
+}
+
 enum GradeStage {
   PRIMARY
   MIDDLE_SCHOOL
@@ -39,13 +70,14 @@ enum GradeStage {
   UNIVERSITY
 }
 
-enum Curriculum {
-  CBSE
-  ICSE
-  STATE_BOARD
-  IB
-  IGCSE
-  UNIVERSITY
+enum BoardType {
+  NATIONAL // CBSE, CISCE/ICSE, NIOS - not tied to one state
+  STATE // a specific state's own board
+}
+
+enum RegionType {
+  STATE
+  UNION_TERRITORY
 }
 
 enum BloomLevel {
@@ -93,6 +125,28 @@ enum MaterialStatus {
   ERROR
 }
 
+enum MaterialType {
+  PDF
+  DOC
+  PPT
+  IMAGE
+  OTHER
+}
+
+enum ExamStatus {
+  DRAFT
+  PUBLISHED
+  UNPUBLISHED
+  CLOSED
+}
+
+enum SubmissionStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  SUBMITTED
+  GRADED
+}
+
 enum CalendarEventType {
   EXAM
   ASSIGNMENT
@@ -109,6 +163,12 @@ enum StudyPlanItemKind {
   BUFFER
 }
 
+enum PlannerTaskStatus {
+  PENDING
+  COMPLETED
+  SKIPPED
+}
+
 enum NotificationType {
   REMINDER
   ACHIEVEMENT
@@ -116,6 +176,9 @@ enum NotificationType {
   STREAK
   SYSTEM
   EXAM
+  ASSIGNMENT
+  MATERIAL
+  FEEDBACK
 }
 
 enum Priority {
@@ -124,59 +187,216 @@ enum Priority {
   LOW
 }
 
+enum WeakStrengthTrend {
+  IMPROVING
+  DECLINING
+  STABLE
+}
+
+enum AIMessageRole {
+  STUDENT
+  AI
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  USER_CREATE
+  USER_UPDATE
+  USER_DEACTIVATE
+  PASSWORD_RESET
+  MATERIAL_UPLOAD
+  MATERIAL_DELETE
+  EXAM_CREATE
+  EXAM_PUBLISH
+  EXAM_UNPUBLISH
+  GRADE_CHANGE
+  BOARD_CHANGE
+  CLASS_CHANGE
+}
+
+// ---------------------------------------------------------------------------
+// Geography & Boards - admin-manageable, not hard-coded enums, so an admin
+// can add/edit/deactivate boards without a code change. Seed data for all
+// 28 states + union territories + the 3 national boards lives in
+// prisma/seed.ts (see docs/BOARDS.md for the full reference list).
+// ---------------------------------------------------------------------------
+
+model State {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  code      String     @unique // e.g. "MH", "KA", "DL"
+  type      RegionType @default(STATE)
+  isEnabled Boolean    @default(true)
+  createdAt DateTime   @default(now())
+
+  boards   Board[]
+  students Student[]
+  schools  School[]
+}
+
+model Board {
+  id        String    @id @default(cuid())
+  name      String // e.g. "Maharashtra State Board of Secondary and Higher Secondary Education"
+  // Globally unique rather than unique-per-state: Postgres treats NULL != NULL
+  // in unique indexes, so a compound (shortName, stateId) constraint would let
+  // national boards (stateId = null) duplicate on every re-seed. Board short
+  // names don't collide across states/national boards in practice anyway.
+  shortName String    @unique // e.g. "CBSE", "MSBSHSE"
+  type      BoardType
+  stateId   String? // null for national boards
+  // Restrict, not Cascade: a State sits at the top of a huge dependency tree
+  // (Boards -> SchoolClasses -> Students/Materials/Exams/...). Cascading
+  // would let one accidental State delete silently wipe out every student
+  // and record under every board in that state. States/boards are meant to
+  // be soft-disabled (isEnabled = false), not hard-deleted in normal use;
+  // Restrict forces a deliberate, explicit cleanup instead of a silent one.
+  state     State?    @relation(fields: [stateId], references: [id], onDelete: Restrict)
+  isEnabled Boolean   @default(true)
+  createdAt DateTime  @default(now())
+
+  schoolClasses  SchoolClass[]
+  subjects       Subject[]
+  students       Student[]
+  examSchedules  ExamSchedule[]
+  studyMaterials StudyMaterial[]
+
+  @@index([stateId])
+}
+
+// A school/institution. Kept simple (single-tenant friendly - one seeded
+// "default" school is enough for the current deployment) but modeled
+// properly so multi-school SaaS (Step 5) doesn't need a schema rewrite.
+model School {
+  id        String   @id @default(cuid())
+  name      String
+  stateId   String?
+  state     State?   @relation(fields: [stateId], references: [id], onDelete: SetNull)
+  isEnabled Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  students Student[]
+  teachers Teacher[]
+}
+
+// Grade level (Class 1..Class 10), scoped to a board so an admin can enable
+// e.g. "Class 9" for CBSE without affecting a different board's offering.
+model SchoolClass {
+  id        String   @id @default(cuid())
+  boardId   String
+  // Restrict, not Cascade - see the comment on Board.state above; deleting a
+  // Board should force you to deal with its classes/rosters/enrollments
+  // explicitly, not silently vaporize them.
+  board     Board    @relation(fields: [boardId], references: [id], onDelete: Restrict)
+  grade     Int // 1..10
+  label     String // e.g. "Class 8"
+  isEnabled Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  subjects           SchoolClassSubject[]
+  students           Student[]
+  sections           ClassSection[]
+  materials          StudyMaterial[]
+  worksheets         Worksheet[]
+  exams              Exam[]
+  schedules          ExamSchedule[]
+  teacherAssignments TeacherAssignment[]
+
+  @@unique([boardId, grade])
+}
+
+// Which subjects an admin has enabled for a given board+grade.
+model SchoolClassSubject {
+  id            String      @id @default(cuid())
+  schoolClassId String
+  schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Cascade)
+  subjectId     String
+  subject       Subject     @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  isEnabled     Boolean     @default(true)
+
+  @@unique([schoolClassId, subjectId])
+}
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
 
 model User {
-  id            String   @id @default(cuid())
-  email         String   @unique
-  passwordHash  String
-  name          String
-  role          Role
+  id             String   @id @default(cuid())
+  email          String   @unique
+  passwordHash   String // bcrypt hash - see Stage B (docs/STEP_3_5.md); never plaintext
+  name           String
+  role           Role
+  isActive       Boolean  @default(true)
   avatarInitials String?
   avatarColor    String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  student  Student?
-  parent   Parent?
-  teacher  Teacher?
-  admin    Admin?
+  student Student?
+  parent  Parent?
+  teacher Teacher?
+  admin   Admin?
 
-  notifications Notification[]
-  logs          Log[]
+  notifications          Notification[]
+  auditLogs              AuditLog[]
+  createdExamSchedules   ExamSchedule[]
+  uploadedStudyMaterials StudyMaterial[]
 
   @@index([role])
 }
 
 model Student {
-  id            String     @id @default(cuid())
-  userId        String     @unique
-  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  grade         String
-  gradeStage    GradeStage
-  curriculum    Curriculum
-  board         String?
-  streakDays    Int        @default(0)
-  xp            Int        @default(0)
-  level         Int        @default(1)
-  xpToNextLevel Int        @default(1000)
-  joinedDate    DateTime   @default(now())
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  parentLinks    ParentStudentLink[]
-  classEnrollments ClassEnrollment[]
-  subjectProgress  StudentSubjectProgress[]
-  topicProgress    StudentTopicProgress[]
-  attempts         Attempt[]
-  assignments      Assignment[]
-  achievements     StudentAchievement[]
-  weaknessProfiles WeaknessProfile[]
-  studyPlans       StudyPlan[]
-  examPlans        ExamPlan[]
-  calendarEvents   CalendarEvent[]
-  conversations    Conversation[]
-  dailyGoals       DailyGoal[]
+  // New K-10 hierarchy used by the role-based portal.
+  schoolId      String?
+  school        School?      @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  stateId       String?
+  state         State?       @relation(fields: [stateId], references: [id], onDelete: SetNull)
+  boardId       String?
+  board         Board?       @relation(fields: [boardId], references: [id], onDelete: SetNull)
+  schoolClassId String?
+  schoolClass   SchoolClass? @relation(fields: [schoolClassId], references: [id], onDelete: SetNull)
+
+  // Legacy/broad self-serve fields (pre-existing onboarding flow).
+  grade      String
+  gradeStage GradeStage
+  curriculum Curriculum
+  boardLabel String? // free-text board name, superseded by boardId above
+
+  streakDays    Int      @default(0)
+  xp            Int      @default(0)
+  level         Int      @default(1)
+  xpToNextLevel Int      @default(1000)
+  joinedDate    DateTime @default(now())
+
+  parentLinks          ParentStudentLink[]
+  sectionEnrollments   ClassSectionEnrollment[]
+  subjectProgress      StudentSubjectProgress[]
+  topicProgress        StudentTopicProgress[]
+  attempts             Attempt[]
+  assignments          Assignment[]
+  studentAchievements  StudentAchievement[]
+  weaknessProfiles     WeaknessProfile[]
+  strengthProfiles     StrengthProfile[]
+  studyPlans           StudyPlan[]
+  examPlans            ExamPlan[]
+  calendarEvents       CalendarEvent[]
+  plannerTasks         DailyPlannerTask[]
+  conversations        AIConversation[]
+  dailyGoals           DailyGoal[]
+  examSubmissions      ExamSubmission[]
+  worksheetSubmissions WorksheetSubmission[]
+
+  // Foreign key scalars aren't auto-indexed by Prisma unless they're part of
+  // a @unique/@@unique - these back real, frequent queries ("all students in
+  // this class", roster filters), so they need explicit indexes.
+  @@index([schoolClassId])
+  @@index([boardId])
+  @@index([stateId])
 }
 
 model Parent {
@@ -195,15 +415,40 @@ model ParentStudentLink {
   student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@unique([parentId, studentId])
+  @@index([studentId])
 }
 
 model Teacher {
-  id     String @id @default(cuid())
-  userId String @unique
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id       String  @id @default(cuid())
+  userId   String  @unique
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schoolId String?
+  school   School? @relation(fields: [schoolId], references: [id], onDelete: SetNull)
 
-  classes            Class[]
-  uploadedMaterials  StudyMaterial[]
+  assignments       TeacherAssignment[]
+  sections          ClassSection[]
+  uploadedMaterials StudyMaterial[]
+  worksheets        Worksheet[]
+  exams             Exam[]
+  gradesGiven       Grade[]
+}
+
+// Explicit "which classes/subjects is this teacher assigned to" - drives the
+// Class/Subject selector on the teacher dashboard (only assigned combos are
+// selectable) and authorization checks (a teacher may only act on their own
+// assignments, not another teacher's).
+model TeacherAssignment {
+  id            String      @id @default(cuid())
+  teacherId     String
+  teacher       Teacher     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  schoolClassId String
+  schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Cascade)
+  subjectId     String
+  subject       Subject     @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+
+  @@unique([teacherId, schoolClassId, subjectId])
+  @@index([schoolClassId, subjectId])
 }
 
 model Admin {
@@ -220,28 +465,45 @@ model Subject {
   id         String   @id @default(cuid())
   name       String
   slug       String
-  board      String
-  grade      String
+  boardId    String?
+  board      Board?   @relation(fields: [boardId], references: [id], onDelete: SetNull)
+  // Legacy free-text fields (pre-existing onboarding flow / mock data).
+  boardLabel String?
+  grade      String?
   icon       String?
   colorToken String?
   createdAt  DateTime @default(now())
 
-  chapters         Chapter[]
-  classes          Class[]
-  studentProgress  StudentSubjectProgress[]
-  papers           Paper[]
-  promptTemplates  PromptTemplate[] @relation("SubjectPrompts")
+  chapters           Chapter[]
+  schoolClassLinks   SchoolClassSubject[]
+  teacherAssignments TeacherAssignment[]
+  sections           ClassSection[]
+  studentProgress    StudentSubjectProgress[]
+  papers             Paper[]
+  promptTemplates    PromptTemplate[]         @relation("SubjectPrompts")
+  studyMaterials     StudyMaterial[]
+  worksheets         Worksheet[]
+  exams              Exam[]
 
-  @@unique([slug, board, grade])
+  // CAVEAT: boardId/grade are nullable, and Postgres treats NULL != NULL in
+  // unique indexes - this constraint only actually enforces uniqueness
+  // among rows where BOTH are non-null. The generic/shared subject catalog
+  // (boardId = null, grade = null - see prisma/seed.ts's CORE_SUBJECTS) is
+  // NOT protected by this index; duplicate-prevention for that case is done
+  // in application code (findFirst-then-create, as seed.ts already does),
+  // not at the database level. Keep that pattern for any future code that
+  // creates generic subjects.
+  @@unique([slug, boardId, grade])
+  @@index([boardId])
 }
 
 model Chapter {
-  id        String   @id @default(cuid())
+  id        String  @id @default(cuid())
   subjectId String
-  subject   Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
   name      String
   slug      String
-  order     Int      @default(0)
+  order     Int     @default(0)
 
   topics Topic[]
 
@@ -249,21 +511,23 @@ model Chapter {
 }
 
 model Topic {
-  id        String     @id @default(cuid())
-  chapterId String
-  chapter   Chapter    @relation(fields: [chapterId], references: [id], onDelete: Cascade)
-  name      String
-  slug      String
+  id         String     @id @default(cuid())
+  chapterId  String
+  chapter    Chapter    @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  name       String
+  slug       String
   bloomLevel BloomLevel
-  order     Int        @default(0)
+  order      Int        @default(0)
 
-  lessons        Lesson[]
-  studentProgress StudentTopicProgress[]
-  questions       Question[]
+  lessons          Lesson[]
+  studentProgress  StudentTopicProgress[]
+  questions        Question[]
   weaknessProfiles WeaknessProfile[]
+  strengthProfiles StrengthProfile[]
   // pgvector embedding of the topic's canonical description, used for
   // semantic clustering of weak concepts across a student's attempt history.
-  embedding      Unsupported("vector(1536)")?
+  // Type left as Json until the `vector` extension is enabled (see top of file).
+  embedding        Json?
 
   @@unique([chapterId, slug])
 }
@@ -295,57 +559,163 @@ model LessonQuestion {
 }
 
 // ---------------------------------------------------------------------------
-// Study materials (teacher uploads, AI-extracted)
+// Class sections (teacher rosters) - was the old top-level `Class` model.
 // ---------------------------------------------------------------------------
 
-model StudyMaterial {
-  id              String         @id @default(cuid())
-  teacherId       String
-  teacher         Teacher        @relation(fields: [teacherId], references: [id], onDelete: Cascade)
-  fileName        String
-  fileUrl         String
-  subject         String
-  sizeKb          Int
-  status          MaterialStatus @default(PROCESSING)
-  extractedTopics Json? // string[] populated once AI extraction completes
-  uploadedAt      DateTime       @default(now())
+model ClassSection {
+  id            String      @id @default(cuid())
+  teacherId     String
+  teacher       Teacher     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  schoolClassId String
+  // Restrict, not Cascade - see the comment on Board.state above. A
+  // SchoolClass delete cascading here would silently drop teacher rosters
+  // AND (transitively) student enrollments below - too large a blast
+  // radius for what should be a deliberate admin action.
+  schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Restrict)
+  subjectId     String
+  subject       Subject     @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  name          String // e.g. "Section A"
+  createdAt     DateTime    @default(now())
+
+  enrollments ClassSectionEnrollment[]
+}
+
+model ClassSectionEnrollment {
+  id        String       @id @default(cuid())
+  sectionId String
+  section   ClassSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  studentId String
+  student   Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([sectionId, studentId])
+  @@index([studentId])
 }
 
 // ---------------------------------------------------------------------------
-// Questions, Papers, Attempts, Scores
+// Study materials (admin/teacher uploads) & Worksheets (teacher -> class)
+// ---------------------------------------------------------------------------
+
+// File bytes live in cloud storage (Vercel Blob - see lib/storage/*), not on
+// the Vercel filesystem. `fileUrl` is the storage provider's public/signed
+// URL; `storageKey` is the provider-internal key used for delete/lookup.
+model StudyMaterial {
+  id              String         @id @default(cuid())
+  title           String
+  description     String?
+  fileName        String
+  fileUrl         String
+  storageKey      String
+  materialType    MaterialType
+  sizeKb          Int
+  status          MaterialStatus @default(PROCESSING)
+  extractedTopics Json? // string[] populated once AI extraction completes
+
+  boardId       String?
+  board         Board?       @relation(fields: [boardId], references: [id], onDelete: SetNull)
+  schoolClassId String?
+  schoolClass   SchoolClass? @relation(fields: [schoolClassId], references: [id], onDelete: SetNull)
+  subjectId     String?
+  subject       Subject?     @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  chapterName   String?
+  topicName     String?
+
+  // Either a Teacher or an Admin can upload material (spec section 5 +
+  // section 12.3), so this is a relation to the shared User table rather
+  // than to Teacher specifically. `teacherId` below is kept alongside it
+  // only to preserve the Teacher-side `uploadedMaterials` back-relation for
+  // teacher-scoped queries; both point at the same uploader when set.
+  uploadedByUserId String?
+  uploadedBy       User?    @relation(fields: [uploadedByUserId], references: [id], onDelete: SetNull)
+  teacherId        String?
+  teacher          Teacher? @relation(fields: [teacherId], references: [id], onDelete: SetNull)
+
+  uploadedAt DateTime @default(now())
+
+  @@index([boardId])
+  @@index([schoolClassId, subjectId])
+  @@index([uploadedByUserId])
+}
+
+model Worksheet {
+  id          String  @id @default(cuid())
+  title       String
+  description String?
+  fileName    String?
+  fileUrl     String?
+  storageKey  String?
+
+  teacherId     String
+  teacher       Teacher     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  schoolClassId String
+  schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Cascade)
+  subjectId     String
+  subject       Subject     @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  chapterName   String?
+  topicName     String?
+
+  dueDate     DateTime?
+  isPublished Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  submissions WorksheetSubmission[]
+
+  @@index([schoolClassId, subjectId])
+  @@index([teacherId])
+}
+
+model WorksheetSubmission {
+  id          String    @id @default(cuid())
+  worksheetId String
+  worksheet   Worksheet @relation(fields: [worksheetId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  fileUrl     String?
+  submittedAt DateTime?
+  score       Int?
+  maxScore    Int?
+  feedback    String?
+
+  @@unique([worksheetId, studentId])
+  @@index([studentId])
+}
+
+// ---------------------------------------------------------------------------
+// Self-practice engine: Questions, Papers, Attempts, Scores (pre-existing -
+// backs Practice Papers / Mock Tests, distinct from teacher-graded Exams
+// below).
 // ---------------------------------------------------------------------------
 
 model Question {
-  id              String       @id @default(cuid())
-  topicId         String
-  topic           Topic        @relation(fields: [topicId], references: [id], onDelete: Cascade)
-  type            QuestionType
-  bloomLevel      Int
-  marks           Int
-  prompt          String
-  scenario        String?
-  diagramCaption  String?
-  options         Json?
-  correctAnswer   String
-  explanation     String
-  improvementTip  String
-  createdAt       DateTime     @default(now())
+  id             String       @id @default(cuid())
+  topicId        String
+  topic          Topic        @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  type           QuestionType
+  bloomLevel     Int
+  marks          Int
+  prompt         String
+  scenario       String?
+  diagramCaption String?
+  options        Json?
+  correctAnswer  String
+  explanation    String
+  improvementTip String
+  createdAt      DateTime     @default(now())
 
   paperQuestions PaperQuestion[]
 }
 
 model Paper {
-  id               String    @id @default(cuid())
-  subjectId        String
-  subject          Subject   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
-  title            String
-  type             PaperType
-  totalMarks       Int
-  durationMinutes  Int
-  difficulty       String
-  isCustom         Boolean   @default(false)
-  createdByUserId  String?
-  createdAt        DateTime  @default(now())
+  id              String    @id @default(cuid())
+  subjectId       String
+  subject         Subject   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  title           String
+  type            PaperType
+  totalMarks      Int
+  durationMinutes Int
+  difficulty      String
+  isCustom        Boolean   @default(false)
+  createdByUserId String?
+  createdAt       DateTime  @default(now())
 
   questions PaperQuestion[]
   attempts  Attempt[]
@@ -361,15 +731,15 @@ model PaperQuestion {
 }
 
 model Attempt {
-  id                  String   @id @default(cuid())
-  studentId           String
-  student             Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  paperId             String
-  paper               Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
-  answers             Json // Record<questionId, answer>
-  flagged             Json // string[]
-  startedAt           DateTime
-  timeTakenSeconds    Int
+  id                   String   @id @default(cuid())
+  studentId            String
+  student              Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  paperId              String
+  paper                Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  answers              Json // Record<questionId, answer>
+  flagged              Json // string[]
+  startedAt            DateTime
+  timeTakenSeconds     Int
   scoreObtained        Int
   totalMarks           Int
   accuracy             Float
@@ -380,88 +750,193 @@ model Attempt {
 }
 
 model Score {
-  id            String   @id @default(cuid())
-  attemptId     String
-  attempt       Attempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
-  topic         String
-  bloomLevel    Int
-  marksScored   Int
-  marksTotal    Int
-  isCorrect     Boolean
+  id          String  @id @default(cuid())
+  attemptId   String
+  attempt     Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  topic       String
+  bloomLevel  Int
+  marksScored Int
+  marksTotal  Int
+  isCorrect   Boolean
 }
 
 // ---------------------------------------------------------------------------
-// Classes (teacher-managed groups of students)
+// Admin-declared Exam Schedule (announcement: board/class/subject/scope/
+// date/marks) vs. teacher-authored Exam (the actual paper + grading
+// pipeline). A schedule can optionally link to the Exam once built.
 // ---------------------------------------------------------------------------
 
-model Class {
-  id        String   @id @default(cuid())
-  teacherId String
-  teacher   Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
-  subjectId String
-  subject   Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
-  name      String
-  grade     String
-  createdAt DateTime @default(now())
+model ExamSchedule {
+  id              String      @id @default(cuid())
+  name            String
+  boardId         String
+  // Restrict - see the comment on Board.state above (same config-tier
+  // blast-radius reasoning).
+  board           Board       @relation(fields: [boardId], references: [id], onDelete: Restrict)
+  schoolClassId   String
+  schoolClass     SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Restrict)
+  subjectName     String
+  chapterScope    String
+  startDate       DateTime?
+  examDate        DateTime
+  durationMinutes Int
+  maxMarks        Int
+  instructions    String?
+  isPublished     Boolean     @default(false)
+  createdByUserId String?
+  createdBy       User?       @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime    @default(now())
 
-  enrollments ClassEnrollment[]
+  exam Exam?
+
+  @@index([boardId, schoolClassId])
 }
 
-model ClassEnrollment {
-  id        String  @id @default(cuid())
-  classId   String
-  class     Class   @relation(fields: [classId], references: [id], onDelete: Cascade)
-  studentId String
-  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+model Exam {
+  id              String        @id @default(cuid())
+  scheduleId      String?       @unique
+  schedule        ExamSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  title           String
+  teacherId       String
+  teacher         Teacher       @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  schoolClassId   String
+  schoolClass     SchoolClass   @relation(fields: [schoolClassId], references: [id], onDelete: Restrict)
+  subjectId       String
+  subject         Subject       @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  chapterScope    String?
+  durationMinutes Int
+  maxMarks        Int
+  instructions    String?
+  // Uploaded exam paper file, when the teacher uploads a PDF instead of
+  // building questions inline.
+  fileUrl         String?
+  storageKey      String?
+  status          ExamStatus    @default(DRAFT)
+  createdAt       DateTime      @default(now())
 
-  @@unique([classId, studentId])
+  questions   ExamQuestion[]
+  submissions ExamSubmission[]
+
+  @@index([schoolClassId, subjectId])
+  @@index([teacherId])
+}
+
+model ExamQuestion {
+  id            String       @id @default(cuid())
+  examId        String
+  exam          Exam         @relation(fields: [examId], references: [id], onDelete: Cascade)
+  type          QuestionType
+  prompt        String
+  options       Json?
+  correctAnswer String? // null for subjective questions (teacher/AI-graded)
+  marks         Int
+  order         Int          @default(0)
+
+  answers ExamAnswer[]
+}
+
+model ExamSubmission {
+  id               String           @id @default(cuid())
+  examId           String
+  exam             Exam             @relation(fields: [examId], references: [id], onDelete: Cascade)
+  studentId        String
+  student          Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  status           SubmissionStatus @default(NOT_STARTED)
+  startedAt        DateTime?
+  submittedAt      DateTime?
+  timeTakenSeconds Int?
+  totalScore       Int?
+  maxScore         Int?
+
+  answers ExamAnswer[]
+  grade   Grade?
+
+  @@unique([examId, studentId])
+  @@index([studentId])
+}
+
+model ExamAnswer {
+  id            String         @id @default(cuid())
+  submissionId  String
+  submission    ExamSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId    String
+  question      ExamQuestion   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  studentAnswer String?
+  isAutoGraded  Boolean        @default(false)
+  isCorrect     Boolean?
+  marksAwarded  Int?
+
+  @@unique([submissionId, questionId])
+}
+
+// One row per graded submission - teacher's overall grade + feedback, saved
+// once per submission (per-question marks live on ExamAnswer.marksAwarded).
+model Grade {
+  id           String         @id @default(cuid())
+  submissionId String         @unique
+  submission   ExamSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  // Who graded it is `teacher.user`, not a separate field - `teacherId`
+  // already identifies the grader via a real relation (a redundant plain
+  // `gradedByUserId String` here would just be denormalized data that could
+  // drift out of sync with `teacherId`).
+  teacherId    String
+  teacher      Teacher        @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  totalScore   Int
+  maxScore     Int
+  feedback     String?
+  gradedAt     DateTime       @default(now())
+
+  @@index([teacherId])
 }
 
 // ---------------------------------------------------------------------------
-// Assignments
+// Assignments (legacy generic assignment list - kept; Worksheets above are
+// the newer, richer teacher->class flow)
 // ---------------------------------------------------------------------------
 
 model Assignment {
-  id             String           @id @default(cuid())
-  studentId      String
-  student        Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  title          String
-  subject        String
-  dueDate        DateTime
-  status         AssignmentStatus @default(PENDING)
-  score          Int?
-  maxScore       Int?
-  targetConcept  String?
-  bloomLevel     BloomLevel?
-  questionCount  Int?
-  personalized   Boolean          @default(false)
-  createdAt      DateTime         @default(now())
+  id            String           @id @default(cuid())
+  studentId     String
+  student       Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  title         String
+  subject       String
+  dueDate       DateTime
+  status        AssignmentStatus @default(PENDING)
+  score         Int?
+  maxScore      Int?
+  targetConcept String?
+  bloomLevel    BloomLevel?
+  questionCount Int?
+  personalized  Boolean          @default(false)
+  createdAt     DateTime         @default(now())
+
+  @@index([studentId])
 }
 
 // ---------------------------------------------------------------------------
-// Progress, Weakness detection, Analytics
+// Progress, Weakness/Strength detection, Achievements
 // ---------------------------------------------------------------------------
 
 model StudentSubjectProgress {
-  id         String  @id @default(cuid())
-  studentId  String
-  student    Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  subjectId  String
-  subject    Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
-  progress   Int     @default(0)
-  averageScore Int   @default(0)
+  id           String  @id @default(cuid())
+  studentId    String
+  student      Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subjectId    String
+  subject      Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  progress     Int     @default(0)
+  averageScore Int     @default(0)
 
   @@unique([studentId, subjectId])
 }
 
 model StudentTopicProgress {
-  id        String      @id @default(cuid())
-  studentId String
-  student   Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  topicId   String
-  topic     Topic       @relation(fields: [topicId], references: [id], onDelete: Cascade)
-  mastery   Int         @default(0)
-  status    TopicStatus @default(DEVELOPING)
+  id              String      @id @default(cuid())
+  studentId       String
+  student         Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  topicId         String
+  topic           Topic       @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  mastery         Int         @default(0)
+  status          TopicStatus @default(DEVELOPING)
   lastPracticedAt DateTime?
 
   @@unique([studentId, topicId])
@@ -471,33 +946,65 @@ model StudentTopicProgress {
 // weak. Recomputed after every attempt; reason + trend are derived, not
 // hand-entered. See docs/ARCHITECTURE.md for the mocked vs. real algorithm.
 model WeaknessProfile {
-  id             String   @id @default(cuid())
-  studentId      String
-  student        Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  topicId        String
-  topic          Topic    @relation(fields: [topicId], references: [id], onDelete: Cascade)
-  reason         String
-  wrongAnswers   Int
-  totalAttempts  Int
-  mastery        Int
-  trend          String // "improving" | "declining" | "stable"
-  trendHistory   Json // number[]
-  lastPracticed  DateTime
-  updatedAt      DateTime @updatedAt
+  id            String            @id @default(cuid())
+  studentId     String
+  student       Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  topicId       String
+  topic         Topic             @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  reason        String
+  wrongAnswers  Int
+  totalAttempts Int
+  mastery       Int
+  trend         WeakStrengthTrend
+  trendHistory  Json // number[]
+  lastPracticed DateTime
+  updatedAt     DateTime          @updatedAt
 
   @@unique([studentId, topicId])
 }
 
-model StudentAchievement {
-  id          String   @id @default(cuid())
-  studentId   String
-  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  achievementKey String
-  unlocked    Boolean  @default(false)
-  unlockedAt  DateTime?
-  progress    Int      @default(0)
+// Mirror of WeaknessProfile for topics a student is strong in - same
+// derivation approach (mastery >= threshold over recent attempts), computed
+// by the same job that computes weaknesses.
+model StrengthProfile {
+  id            String            @id @default(cuid())
+  studentId     String
+  student       Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  topicId       String
+  topic         Topic             @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  mastery       Int
+  trend         WeakStrengthTrend
+  trendHistory  Json
+  lastPracticed DateTime
+  updatedAt     DateTime          @updatedAt
 
-  @@unique([studentId, achievementKey])
+  @@unique([studentId, topicId])
+}
+
+// Catalog of achievements an admin/system defines (badge, criteria).
+model Achievement {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  title       String
+  description String
+  icon        String
+  category    String // "streak" | "mastery" | "practice" | "milestone" | "social"
+  createdAt   DateTime @default(now())
+
+  studentAchievements StudentAchievement[]
+}
+
+model StudentAchievement {
+  id            String      @id @default(cuid())
+  studentId     String
+  student       Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  unlocked      Boolean     @default(false)
+  unlockedAt    DateTime?
+  progress      Int         @default(0)
+
+  @@unique([studentId, achievementId])
 }
 
 model DailyGoal {
@@ -510,10 +1017,14 @@ model DailyGoal {
   unit      String
   xpReward  Int
   date      DateTime @default(now())
+
+  @@index([studentId])
 }
 
 // ---------------------------------------------------------------------------
-// Study Plan Engine + Exam Planner
+// Study Plan / Learning Path Engine + Exam Planner
+// (StudyPlan/StudyPlanItem *is* the "Learning Path" concept from the spec -
+// kept under its established name rather than duplicated under a second one.)
 // ---------------------------------------------------------------------------
 
 model StudyPlan {
@@ -523,6 +1034,8 @@ model StudyPlan {
   createdAt DateTime @default(now())
 
   items StudyPlanItem[]
+
+  @@index([studentId])
 }
 
 model StudyPlanItem {
@@ -535,22 +1048,42 @@ model StudyPlanItem {
   subject         String
   title           String
   durationMinutes Int
+  priority        Priority          @default(MEDIUM)
   completed       Boolean           @default(false)
 }
 
 model ExamPlan {
-  id                    String   @id @default(cuid())
-  studentId             String
-  student               Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  examName              String
-  examDate              DateTime
-  subject               String
-  chapters              Json // string[]
-  weightage             Int
-  priority              Priority
-  availableHoursPerDay  Float
-  generatedOutput       Json // ExamPlanOutput snapshot
-  createdAt             DateTime @default(now())
+  id                   String   @id @default(cuid())
+  studentId            String
+  student              Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  examName             String
+  examDate             DateTime
+  subject              String
+  chapters             Json // string[]
+  weightage            Int
+  priority             Priority
+  availableHoursPerDay Float
+  generatedOutput      Json // ExamPlanOutput snapshot
+  createdAt            DateTime @default(now())
+
+  @@index([studentId])
+}
+
+// Lightweight, student-created to-do items (distinct from the
+// system-generated StudyPlanItem) - backs the Daily Planner UI.
+model DailyPlannerTask {
+  id        String            @id @default(cuid())
+  studentId String
+  student   Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  title     String
+  subject   String?
+  date      DateTime
+  time      String?
+  priority  Priority          @default(MEDIUM)
+  status    PlannerTaskStatus @default(PENDING)
+  createdAt DateTime          @default(now())
+
+  @@index([studentId, date])
 }
 
 // ---------------------------------------------------------------------------
@@ -567,34 +1100,45 @@ model CalendarEvent {
   type        CalendarEventType
   time        String?
   description String?
+
+  @@index([studentId, date])
 }
 
 // ---------------------------------------------------------------------------
-// AI Tutor Chat
+// AI Tutor Chat (provider-agnostic - see lib/ai/provider.ts once Stage G
+// lands; only message/conversation storage is part of the Stage A schema)
 // ---------------------------------------------------------------------------
 
-model Conversation {
-  id        String   @id @default(cuid())
-  studentId String
-  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  title     String
-  subject   String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model AIConversation {
+  id              String   @id @default(cuid())
+  studentId       String
+  student         Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  title           String
+  subject         String?
+  // Curriculum context captured at conversation start, so the tutor prompt
+  // can be reconstructed without re-deriving it from the student's current
+  // (possibly since-changed) profile.
+  contextSnapshot Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  messages ChatMessage[]
+  messages AIMessage[]
+
+  @@index([studentId])
 }
 
-model ChatMessage {
-  id             String       @id @default(cuid())
+model AIMessage {
+  id             String         @id @default(cuid())
   conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  role           String // "student" | "ai"
+  conversation   AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           AIMessageRole
   content        String
-  createdAt      DateTime     @default(now())
-  // Embedding of this turn's content, used to retrieve relevant prior
-  // context for conversation-memory-aware follow-up answers.
-  embedding      Unsupported("vector(1536)")?
+  createdAt      DateTime       @default(now())
+  // Embedding of this turn's content for retrieval-augmented follow-ups.
+  // Left as Json until the `vector` extension is enabled (see top of file).
+  embedding      Json?
+
+  @@index([conversationId])
 }
 
 // ---------------------------------------------------------------------------
@@ -602,18 +1146,21 @@ model ChatMessage {
 // ---------------------------------------------------------------------------
 
 model Notification {
-  id      String           @id @default(cuid())
-  userId  String
-  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type    NotificationType
-  title   String
-  message String
-  read    Boolean          @default(false)
-  createdAt DateTime       @default(now())
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  message   String
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  // Every notification-bell query is "unread notifications for this user".
+  @@index([userId, read])
 }
 
 // ---------------------------------------------------------------------------
-// Admin: Prompt Templates + Logs
+// Admin: Prompt Templates, System Settings, Audit Logs
 // ---------------------------------------------------------------------------
 
 model PromptTemplate {
@@ -622,17 +1169,29 @@ model PromptTemplate {
   description String
   usedFor     String
   model       String
-  template     String
+  template    String
   lastEdited  DateTime  @updatedAt
   subjects    Subject[] @relation("SubjectPrompts")
 }
 
-model Log {
-  id      String   @id @default(cuid())
-  userId  String?
-  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  level   String // "info" | "warning" | "error"
-  message String
-  source  String
-  time    DateTime @default(now())
+// Simple key/value feature-flag store backing Admin > System Settings.
+model SystemSetting {
+  key         String   @id
+  label       String
+  description String?
+  enabled     Boolean  @default(false)
+  updatedAt   DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  userId    String?
+  user      User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    AuditAction
+  resource  String? // e.g. "Student:abc123", "Exam:xyz789"
+  message   String
+  createdAt DateTime    @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
 }
