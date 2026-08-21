@@ -323,8 +323,13 @@ model SchoolClassSubject {
 
 model User {
   id             String   @id @default(cuid())
+  // Login identifier shown in the UI (the existing "Username" field on
+  // /login) - kept separate from `email` since Stage B's demo/seed accounts
+  // don't have real inboxes yet, and the login form is username-based, not
+  // email-based, to preserve the existing UI (Stage B requirement).
+  username       String   @unique
   email          String   @unique
-  passwordHash   String // bcrypt hash - see Stage B (docs/STEP_3_5.md); never plaintext
+  passwordHash   String // bcrypt hash (see lib/auth/password.ts) - never plaintext
   name           String
   role           Role
   isActive       Boolean  @default(true)

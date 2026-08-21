@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing role, username, or password." }, { status: 400 });
   }
 
-  const user = findUser(role, username, password);
+  const user = await findUser(role, username, password);
   if (!user) {
     return NextResponse.json({ error: "Invalid username or password for that role." }, { status: 401 });
   }

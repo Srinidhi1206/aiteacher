@@ -15,8 +15,8 @@ stage is applied to `main`/production without an explicit go-ahead.
 
 | Stage | Scope | Status |
 |---|---|---|
-| A | Database + Prisma | **Code complete and reviewed, not yet connected.** Schema written, validated, client generates; seed script written; a full correctness/security review pass found and fixed several real issues (see "Stage A review" below). **Database NOT connected. No migrations executed. No production database provisioned.** Needs a real `DATABASE_URL`/`DIRECT_URL` from you to run `db:migrate`/`db:seed` for the first time - I have not asked for or been given one. |
-| B | Real users/auth | Not started |
+| A | Database + Prisma | **Code complete and reviewed, not yet connected.** Schema written, validated, client generates; seed script written; a full correctness/security review pass found and fixed several real issues (see "Stage A review" below). **Database NOT connected. No migrations executed. No production database provisioned.** Needs a real `DATABASE_URL`/`DIRECT_URL` from you to run `db:migrate`/`db:seed` for the first time - I have not asked for or been given one. Committed: `c8815ea`. |
+| B | Real users/auth | **Code complete, locally validated where possible, not yet connected.** Bcrypt hashing, DB-backed login, session/middleware, tamper-rejection all implemented and tested (see "Stage B detail" below) - but the actual database query path has never executed against a live Postgres instance. Same DB-connection blocker as Stage A. |
 | C | Admin persistence (Board & Classes, Users, Study Materials, Exam Schedule) | Not started |
 | D | Teacher persistence (worksheets, exams, grading, student progress) | Not started |
 | E | Student persistence (subjects, textbook, learning path, planner) | Not started |
@@ -145,3 +145,76 @@ cannot be resolved while staying on Next.js 14, which was an explicit
 constraint. This is the safest achievable state within that constraint.
 Lint/typecheck/build/manual route testing all re-verified clean after the
 upgrade.
+
+## Stage B detail
+
+**Delivered:**
+- `lib/auth/password.ts` - bcrypt hash/verify (12 salt rounds), `server-only`-guarded.
+- `prisma/schema.prisma` - added `User.username` (the login form is
+  username-based, not email-based, to preserve the existing UI - the
+  schema didn't have this field before).
+- `lib/auth/users.ts` - rewritten. `findUser()` is now async and picks one
+  of two paths automatically: a real Prisma/bcrypt lookup against the
+  `User` table when `DATABASE_URL` is set, or a fallback to the same 7
+  hardcoded demo accounts (unchanged from Step 1/2) when it's unset. See
+  "Why a fallback, not a hard cutover" below for the reasoning. The client
+  never controls the session's role - it always comes from the matched
+  account record (`user.role`), whichever path resolved it.
+- `prisma/seed.ts` - now also seeds a demo School and the 7 demo accounts
+  as real `User`/`Student`/`Teacher`/`Admin`/`TeacherAssignment` rows with
+  bcrypt-hashed passwords, matching the fallback list's usernames/passwords
+  exactly.
+- `app/api/auth/login/route.ts` - awaits the now-async `findUser()`; no
+  other change needed (session signing, cookie flags were already correct
+  from Step 1).
+
+**Why a fallback, not a hard cutover:** the live Vercel deployment
+(`https://maiteacher.vercel.app/`) is running today with no database
+connected. If `findUser()` only queried Prisma, every login attempt on the
+live site would start failing the moment this code ships, regardless of
+whether it's pushed - there is no database for it to query yet. The
+fallback keeps the live site (and local dev) working exactly as before;
+the moment `DATABASE_URL` is set in an environment, that environment
+automatically starts using real, bcrypt-verified database rows instead -
+no further code change needed. This is a deliberate safety design, not a
+shortcut: **do not push this Stage B code to `main`/production until
+`DATABASE_URL`/`DIRECT_URL` are set in Vercel and `npm run db:seed` has
+been run** - see the final report for why.
+
+**Verified (real tests, no live database required):**
+- Bcrypt hash/verify round-trip (hash format, correct-password accept,
+  wrong-password reject, salting produces different hashes each time) - 4/4 pass.
+- HMAC session sign/verify logic (legitimate token accepted, forged token
+  rejected, tampered/role-escalated token rejected via signature mismatch,
+  empty/malformed tokens rejected) - 5/5 pass.
+- Full HTTP login -> session -> middleware -> logout flow in a running dev
+  server, exercised through the fallback path (same route handler,
+  session, and middleware code every path uses): admin/teacher/student
+  login, wrong-password rejection (401), session persistence across
+  reload, logout invalidation, and cross-role blocks (student blocked
+  from `/admin`; teacher blocked from `/admin`; admin blocked from
+  `/teacher`) - all confirmed working.
+- `prisma/seed.ts` dry-run against an unreachable database: confirmed the
+  script imports cleanly and runs correctly through all seeding logic up
+  to the first real network call, which fails with a clean "can't reach
+  database server" error - not a code defect.
+- `npm run lint`, `npx tsc --noEmit`, `npm run build`, `prisma validate`,
+  `prisma generate` all pass.
+
+**Implemented but awaiting a real database connection (not executed):**
+`findUserInDatabase()`'s actual Prisma query, and `prisma/seed.ts`'s actual
+writes - both type-check correctly against the generated client but have
+never run against live Postgres.
+
+**Not implemented (out of Stage B's scope, deferred):**
+- The state -> board -> class onboarding flow mentioned in the spec
+  (section 8) needs the board-hierarchy picker UI that doesn't exist until
+  Stage E (Student Portal) - building it now would mean building it twice.
+- Admin-facing password reset / account creation UI - that's Stage C
+  (Admin > Users). The hashing primitive (`hashPassword()`) it will call
+  already exists.
+- A session-revocation list (server-side "kill this specific session
+  early" beyond waiting for the 7-day expiry or clearing the cookie via
+  logout) - the signed-cookie design is inherently stateless; adding
+  revocation would need a `Session` table and is more infrastructure than
+  a "production-ready authentication foundation" requires at this stage.

@@ -181,9 +181,14 @@ already import from the shared `lib/types.ts` interfaces.
 
 ## 5. Known Gaps in This Build
 
-- Authentication is a demo layer, not production auth: 7 hardcoded accounts
-  in `lib/auth/users.ts` with plaintext passwords (overridable via env vars)
-  and a hand-rolled signed cookie - not bcrypt/NextAuth/OAuth. `/teacher`,
+- Authentication (Stage B, see `docs/STEP_3_5.md`) has a real,
+  bcrypt-backed database path (`lib/auth/users.ts` -> `prisma.user`), used
+  automatically once `DATABASE_URL` is set. Until then - the current state
+  of both local dev and the live deployment, since no database is
+  connected yet - it falls back to the original 7 hardcoded demo accounts
+  with plaintext comparison, exactly as Step 1/2 worked. Session is still a
+  hand-rolled signed (not NextAuth/OAuth) cookie - see `lib/auth/session.ts`;
+  that part is unchanged and was already reviewed as sound. `/teacher`,
   `/admin`, and the student pages are all server-enforced (`middleware.ts`)
   against the session's role, not just hidden nav links; `/parent` has no
   role restriction yet since "parent" isn't one of the three product roles.

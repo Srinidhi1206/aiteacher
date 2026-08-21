@@ -12,9 +12,20 @@
 // see docs/DATABASE.md; this will fail without a real database, which is
 // expected until Stage A's database step is actually provisioned).
 
-import { PrismaClient, BoardType, RegionType } from "@prisma/client";
+import { PrismaClient, BoardType, RegionType, Role } from "@prisma/client";
+import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
+
+// Mirrors lib/auth/password.ts's hashPassword() - duplicated rather than
+// imported because that module has `import "server-only"` at the top,
+// which throws under plain Node execution (this seed script runs via tsx,
+// outside Next.js's build pipeline where "server-only" is specially
+// resolved). Keep SALT_ROUNDS in sync with lib/auth/password.ts if changed.
+const SALT_ROUNDS = 12;
+function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, SALT_ROUNDS);
+}
 
 // ---------------------------------------------------------------------------
 // Reference data - see docs/BOARDS.md for the full table and sourcing notes.
@@ -206,12 +217,119 @@ async function main() {
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Demo accounts (Stage B). Same usernames/passwords as the fallback
+  // list in lib/auth/users.ts, so nothing changes for anyone using these
+  // credentials once DATABASE_URL is set - login just starts authenticating
+  // them against real, bcrypt-hashed rows instead of the hardcoded array.
+  // Passwords are overridable via the same env vars documented in
+  // .env.example / docs/DEMO_CREDENTIALS.md; never real production
+  // credentials, and never committed anywhere in plaintext.
+  // ---------------------------------------------------------------------
+  console.log("Seeding demo school...");
+  const demoSchool = await prisma.school.upsert({
+    where: { id: "demo-school" },
+    update: {},
+    create: { id: "demo-school", name: "TeachAI Demo School" },
+  });
+
+  const cbseBoardId = nationalBoardIds[0]; // NATIONAL_BOARDS[0] = CBSE
+  const cbseClassIds = schoolClassIdsByBoard.get(cbseBoardId)!; // index 0 = Class 1 ... index 9 = Class 10
+  const mathSubjectId = subjectIds[CORE_SUBJECTS.findIndex((s) => s.slug === "mathematics")];
+  const scienceSubjectId = subjectIds[CORE_SUBJECTS.findIndex((s) => s.slug === "science")];
+
+  console.log("Seeding demo admin account...");
+  const adminPassword = process.env.ADMIN_PASSWORD || "Admin@123";
+  const adminUser = await prisma.user.upsert({
+    where: { username: "admin" },
+    update: { passwordHash: await hashPassword(adminPassword) },
+    create: {
+      username: "admin",
+      email: "admin@teachai.local",
+      passwordHash: await hashPassword(adminPassword),
+      name: "Srinidhi",
+      role: Role.ADMIN,
+    },
+  });
+  await prisma.admin.upsert({
+    where: { userId: adminUser.id },
+    update: {},
+    create: { userId: adminUser.id },
+  });
+
+  console.log("Seeding demo teacher account...");
+  const teacherPassword = process.env.TEACHER_PASSWORD || "Teacher@123";
+  const teacherUser = await prisma.user.upsert({
+    where: { username: "teacher" },
+    update: { passwordHash: await hashPassword(teacherPassword) },
+    create: {
+      username: "teacher",
+      email: "teacher@teachai.local",
+      passwordHash: await hashPassword(teacherPassword),
+      name: "Teacher",
+      role: Role.TEACHER,
+    },
+  });
+  const teacherProfile = await prisma.teacher.upsert({
+    where: { userId: teacherUser.id },
+    update: { schoolId: demoSchool.id },
+    create: { userId: teacherUser.id, schoolId: demoSchool.id },
+  });
+  // Matches the fallback account's assignedClasses ["Class 8","Class 9","Class 10"] x subjects ["Mathematics","Science"]
+  for (const grade of [8, 9, 10]) {
+    const schoolClassId = cbseClassIds[grade - 1];
+    for (const subjectId of [mathSubjectId, scienceSubjectId]) {
+      await prisma.teacherAssignment.upsert({
+        where: { teacherId_schoolClassId_subjectId: { teacherId: teacherProfile.id, schoolClassId, subjectId } },
+        update: {},
+        create: { teacherId: teacherProfile.id, schoolClassId, subjectId },
+      });
+    }
+  }
+
+  console.log("Seeding demo student accounts...");
+  const studentGrades = [6, 7, 8, 9, 10]; // student1 -> Class 6 ... student5 -> Class 10
+  for (let i = 0; i < studentGrades.length; i++) {
+    const n = i + 1;
+    const grade = studentGrades[i];
+    const envKey = `STUDENT${n}_PASSWORD`;
+    const password = process.env[envKey] || "Student@123";
+    const username = `student${n}`;
+    const studentUser = await prisma.user.upsert({
+      where: { username },
+      update: { passwordHash: await hashPassword(password) },
+      create: {
+        username,
+        email: `${username}@teachai.local`,
+        passwordHash: await hashPassword(password),
+        name: `Student ${n}`,
+        role: Role.STUDENT,
+      },
+    });
+    await prisma.student.upsert({
+      where: { userId: studentUser.id },
+      update: { schoolId: demoSchool.id, boardId: cbseBoardId, schoolClassId: cbseClassIds[grade - 1] },
+      create: {
+        userId: studentUser.id,
+        schoolId: demoSchool.id,
+        boardId: cbseBoardId,
+        schoolClassId: cbseClassIds[grade - 1],
+        // Legacy self-serve fields (pre-existing onboarding flow) - kept
+        // populated so the old /onboarding-driven pages still have data.
+        grade: `Class ${grade}`,
+        gradeStage: grade <= 5 ? "PRIMARY" : grade <= 8 ? "MIDDLE_SCHOOL" : "HIGH_SCHOOL",
+        curriculum: "CBSE",
+      },
+    });
+  }
+
   console.log("Seed complete.");
   console.log(`  States/UTs: ${STATES.length}`);
   console.log(`  National boards: ${NATIONAL_BOARDS.length}`);
   console.log(`  State boards: ${STATES.filter((s) => s.board).length}`);
   console.log(`  Classes seeded (national boards only, Class 1-10 each): ${NATIONAL_BOARDS.length * 10}`);
   console.log(`  Core subjects: ${CORE_SUBJECTS.length}`);
+  console.log("  Demo accounts: 1 admin, 1 teacher, 5 students (see docs/DEMO_CREDENTIALS.md)");
   console.log("  Note: additional state-board classes are enabled via Admin > Board & Classes (Stage C), not pre-seeded here.");
 }
 
