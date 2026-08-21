@@ -19,6 +19,9 @@ const STUDENT_PATHS = [
   "/calendar",
   "/ai-tutor",
   "/settings",
+  "/materials", // Stage C5 - study materials / textbook
+  "/exams", // Stage D3/D5 - real exam attempts + results
+  "/results",
 ];
 
 // Routes that require a specific role. Anything under (app) not listed here

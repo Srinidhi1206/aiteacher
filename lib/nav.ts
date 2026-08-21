@@ -7,6 +7,9 @@ export interface NavItem {
 export const navItems: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: "LayoutDashboard" },
   { label: "Subjects", href: "/subjects", icon: "BookOpen" },
+  { label: "Study Materials", href: "/materials", icon: "Library" },
+  { label: "Exams", href: "/exams", icon: "FileEdit" },
+  { label: "Results", href: "/results", icon: "Award" },
   { label: "Study Plan", href: "/study-plan", icon: "CalendarClock" },
   { label: "Assignments", href: "/assignments", icon: "ClipboardList" },
   { label: "Practice Papers", href: "/practice-papers", icon: "FileText" },

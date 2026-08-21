@@ -17,13 +17,13 @@ stage is applied to `main`/production without an explicit go-ahead.
 |---|---|---|
 | A | Database + Prisma | **Code complete and reviewed, not yet connected.** Schema written, validated, client generates; seed script written; a full correctness/security review pass found and fixed several real issues (see "Stage A review" below). **Database NOT connected. No migrations executed. No production database provisioned.** Needs a real `DATABASE_URL`/`DIRECT_URL` from you to run `db:migrate`/`db:seed` for the first time - I have not asked for or been given one. Committed: `c8815ea`. |
 | B | Real users/auth | **Code complete, locally validated where possible, not yet connected.** Bcrypt hashing, DB-backed login, session/middleware, tamper-rejection all implemented and tested (see "Stage B detail" below) - but the actual database query path has never executed against a live Postgres instance. Same DB-connection blocker as Stage A. |
-| C | Admin persistence (Board & Classes, Users, Study Materials, Exam Schedule) | Not started |
-| D | Teacher persistence (worksheets, exams, grading, student progress) | Not started |
-| E | Student persistence (subjects, textbook, learning path, planner) | Not started |
-| F | Exams/evaluation (online exam flow, auto + manual grading) | Not started |
+| C | Study materials + file storage | **Mostly complete.** Storage abstraction (Vercel Blob, gracefully "not configured" without a token), full materials CRUD + student-facing `/materials` page, worksheet CRUD (data layer only, no dedicated UI page yet), file validation/authorization. Admin's pre-existing `study-materials-card.tsx`/`exam-schedule-card.tsx` still run on local mock state, not yet rewired to the new real actions - see "Stage C/D/E detail". |
+| D | Exam + grading system | **Complete, end-to-end.** Teacher exam creation + question builder + publish/unpublish (`/teacher/exams`), student exam-taking with timer/navigation/flagging (`/exams/[id]/attempt`), server-authoritative MCQ/TRUE_FALSE auto-evaluation, teacher subjective grading + finalize (`/teacher/exams/[id]`), student results (`/exams/[id]/results`, `/results`). |
+| E | Progress + learning path + planner | **Complete.** Deterministic progress/weakness/strength engines (`lib/analytics/*`), learning path generation reusing `StudyPlan`, daily planner, all wired into the student dashboard with graceful "database not connected" fallback (not a crash) when unreachable. |
+| F | (folded into D) | Exam evaluation was implemented as part of Stage D rather than separately, since the two are inseparable in this schema - see Stage D above. |
 | G | AI tutor (provider abstraction + real provider wiring) | Not started |
-| H | Analytics (notifications, audit logs, dashboards) | Not started |
-| I | Production hardening (validation, rate limiting, loading/error/empty states, a11y, mobile polish) | Not started |
+| H | Analytics (notifications, audit logs, dashboards) | Partially - AuditLog is written to on key admin/material actions; full admin Logs UI wiring and Notification generation not done. |
+| I | Production hardening (validation, rate limiting, loading/error/empty states, a11y, mobile polish) | Partial - Zod validation and graceful empty/error states exist throughout Stage C/D/E; rate limiting and full a11y pass not done. |
 
 ## Stage A detail
 
@@ -218,3 +218,162 @@ never run against live Postgres.
   logout) - the signed-cookie design is inherently stateless; adding
   revocation would need a `Session` table and is more infrastructure than
   a "production-ready authentication foundation" requires at this stage.
+
+## Stage C/D/E detail
+
+**Schema changes made while implementing these stages** (all validated,
+formatted, client-regenerated, `tsc --noEmit` clean before and after):
+- `MaterialType` enum changed from file-format values (PDF/DOC/PPT/IMAGE)
+  to content-category values (TEXTBOOK/NOTES/REFERENCE/VIDEO/PDF/
+  PRESENTATION/OTHER) matching the spec's explicit list.
+- `StudyMaterial` gained `isPublished`, `updatedAt`, and real `chapterId`/
+  `topicId` relations (previously free-text `chapterName`); board/class/
+  subject/chapter are now required, not nullable - a material that isn't
+  placed in the curriculum hierarchy can't be filtered to the right
+  students.
+- `Worksheet` gained the same `chapterId`/`topicId` relations and
+  `updatedAt`.
+- `ExamQuestion` gained an optional `topicId` - without it, the
+  weakness/strength engine could only reason at exam/subject granularity,
+  not topic granularity.
+- `StrengthProfile` gained a `reason` field (symmetry with
+  `WeaknessProfile` - the spec's own strength example includes a reason).
+- `PlannerTaskStatus` corrected from `PENDING/COMPLETED/SKIPPED` to the
+  spec's explicit `TODO/IN_PROGRESS/COMPLETED/SKIPPED`.
+
+**Delivered - shared infrastructure:**
+- `lib/storage/{types,provider,index}.ts` - Vercel Blob abstraction.
+  `storage.isConfigured` is `false` without `BLOB_READ_WRITE_TOKEN`; every
+  method throws a typed `StorageNotConfiguredError` instead of silently
+  pretending an upload succeeded. Compiles and builds with zero token set.
+- `lib/auth/current-session.ts` - `getCurrentSession()`/`requireRole()`
+  helpers so every server action derives identity from the session cookie,
+  never from client-supplied `userId`/`role`/etc.
+- `components/database-unavailable.tsx` - the empty state every new page
+  shows when a Prisma query throws because there's no live database. This
+  exists because of a real bug caught during testing (see below).
+
+**Delivered - Stage C (`lib/actions/materials.ts`, `worksheets.ts`,
+`exam-schedule.ts`, `curriculum.ts`):**
+- Materials: create (with file upload + validation), publish/unpublish,
+  delete, list-for-admin, list-for-student (scoped to the student's own
+  `schoolClassId`/`boardId`, published only - verified in code that a
+  student's query can never reach another board/class's materials, since
+  the filter comes from their own `Student` row, not client input).
+  Student-facing `/materials` page implemented (grouped by subject, open/
+  download actions, empty state).
+  **UI not yet built:** Admin's material upload form - `study-materials-card.tsx`
+  still uses local `useState` mock data from Step 2, not yet rewired to
+  `createMaterial()`.
+- Worksheets: create/publish/delete/list (teacher + student), submit
+  (student), grade (teacher) - all authorization-checked against
+  `TeacherAssignment` (a teacher can only touch a class/subject they're
+  actually assigned to, checked server-side, not just hidden in the UI).
+  **UI not yet built:** no dedicated teacher worksheet-creation page yet -
+  the data layer is complete and typechecked but unreached by any page.
+- Exam schedule: create/publish/delete/list (admin), list-for-student
+  (scoped, published-only). **UI not yet built:** admin's
+  `exam-schedule-card.tsx` still uses local mock state.
+- File security: MIME allowlist, 25MB size cap, safe-filename sanitization,
+  auth+role+ownership checks on every mutation - all server-side, all in
+  `lib/storage/types.ts`'s `validateUploadFile()`/`safeFilename()` plus
+  each action's own authorization checks.
+
+**Delivered - Stage D (`lib/actions/exams.ts`) - end to end:**
+- Teacher: create exam (draft), add/edit/delete/reorder questions
+  (**draft-only** - a published exam's questions are frozen so
+  already-submitted attempts can never be corrupted), publish (requires
+  ≥1 question)/unpublish. UI: `/teacher/exams` (list + create form),
+  `/teacher/exams/[id]` (question builder + publish controls + submissions).
+- Student: browse published exams for their own class only
+  (`listExamsForStudent`), start an attempt (creates/resumes an
+  `ExamSubmission`, blocks re-entry after submission), question view that
+  **never includes `correctAnswer`** (verified by reading
+  `getExamForAttempt`'s select shape), autosave per answer, submit with a
+  confirmation modal and duplicate-submission guard. UI: `/exams` (list),
+  `/exams/[id]/attempt` (full exam-taking interface: question navigator,
+  countdown timer with auto-submit at zero, flagging, MCQ/TRUE_FALSE/
+  SHORT_ANSWER/LONG_ANSWER inputs).
+- Evaluation: MCQ/TRUE_FALSE compared server-side against the stored
+  `correctAnswer` (case/whitespace-normalized) the moment a student
+  submits - the score is never computed or trusted client-side.
+  SHORT_ANSWER/LONG_ANSWER left `marksAwarded: null` (pending) until a
+  teacher grades them.
+- Teacher grading: per-answer marks entry, feedback, "finalize" which
+  requires every answer to be marked before it'll compute the final
+  `Grade` row - all ownership-checked (`exam.teacher.userId === session.id`).
+  UI: expandable submission list on `/teacher/exams/[id]`.
+- Student results: `/exams/[id]/results` (question-by-question, correct
+  answers only shown post-submission, "pending review" state while
+  subjective questions await grading) and `/results` (all past results).
+  Ownership is structural, not a runtime check: the query is always
+  `{examId, studentId: <from session>}` - there is no code path where a
+  student can fetch another student's result by changing a URL parameter.
+
+**Delivered - Stage E (`lib/analytics/{progress,weakness,strengths,
+learning-path}.ts`, `lib/actions/{analytics,planner}.ts`):**
+- Progress: `recalculateTopicProgress`/`recalculateSubjectProgress`
+  compute real percentages from `ExamAnswer.marksAwarded` (only for
+  topic-tagged questions - see the `ExamQuestion.topicId` schema addition
+  above), persisted to `StudentTopicProgress`/`StudentSubjectProgress`.
+  Triggered automatically after `submitExam` (fully auto-graded case) and
+  `finalizeExamGrade` (subjective case) - not something a page computes
+  itself.
+- Weakness/Strength: deterministic thresholds (< 50% mastery = weak,
+  ≥ 80% = strong with ≥3 attempts required - "don't call it a strength off
+  one question," per the spec), explainable `reason` strings generated
+  from real recent-attempt counts, persisted to `WeaknessProfile`/
+  `StrengthProfile`, auto-recalculated on the same grading events as
+  progress. No LLM involved anywhere in this arithmetic.
+- Learning Path: `generateLearningPath()` reuses `StudyPlan`/
+  `StudyPlanItem` (no second "LearningPath" model, per the spec) -
+  schedules weak topics first (or general subject coverage if no weak
+  areas exist yet), spreads across up to 14 days (or fewer, if an
+  upcoming published exam is sooner), inserts a revision/mock-test buffer
+  day every 4th/8th day. Regeneration is a button on the dashboard
+  (`GenerateLearningPathButton`).
+- Daily Planner: `DailyPlannerTask` CRUD (student-created ad-hoc tasks,
+  distinct from system-generated `StudyPlanItem`) plus `getTodayOverview()`
+  which combines today's manual tasks, today's learning-path item, worksheets
+  due within 7 days, and upcoming published exams into one dashboard widget.
+- Dashboard integration (E6): `components/dashboard/real-data-section.tsx`
+  adds Today's Planner / Weak Areas / Strengths / Learning Path / Upcoming
+  Exams / Recent Results to the existing student dashboard, **alongside**
+  (not replacing) every pre-existing Step 1/2 mock widget.
+
+**A real regression caught and fixed during testing:** the first version
+of `RealDataSection` had no error handling. Verified in the browser
+(logged in via the Stage B fallback path) that visiting `/dashboard`
+without a database threw `PrismaClientInitializationError` and produced a
+**blank page - the entire dashboard, including every working Step 1/2
+widget, stopped rendering.** This is exactly the kind of regression these
+instructions explicitly forbid. Fixed by wrapping the data-fetch in
+try/catch with a `DatabaseUnavailable`-style fallback card; re-verified in
+the browser that the dashboard now renders normally with a small "database
+not connected" notice in place of the real-data section, and applied the
+same defensive pattern (`components/database-unavailable.tsx`) to every
+other new Stage C/D page (`/materials`, `/exams`, `/exams/[id]/results`,
+`/results`, `/teacher/exams`, `/teacher/exams/[id]`) so a missing database
+degrades gracefully everywhere, not just on the dashboard.
+
+**Verified (real tests, no live database required):**
+- `prisma validate`/`generate`, `npx tsc --noEmit`, `npm run lint`,
+  `npm run build` all pass after every schema/code change (checked
+  incrementally, not just once at the end).
+- Full browser session via the Stage B fallback auth: student/teacher
+  login; `/dashboard` renders (with graceful fallback for the new
+  section); `/materials`, `/exams`, `/teacher/exams` all show the
+  graceful "database not connected" state instead of crashing;
+  cross-role blocks re-verified on the new routes (teacher blocked from
+  `/materials`, student blocked from `/teacher/exams`).
+- `prisma/seed.ts` dry-run against an unreachable database still runs
+  cleanly through all its logic after every schema change in this stage,
+  failing only at the network call.
+
+**Not executed against a live database (code implemented, untested at
+runtime):** every actual Prisma read/write in `lib/actions/*` and
+`lib/analytics/*` - the query shapes are verified by TypeScript against
+the real generated Prisma client (which catches most structural errors -
+wrong field names, wrong relation includes, wrong enum values), but no
+row has ever actually been read or written, because there is still no
+`DATABASE_URL`.

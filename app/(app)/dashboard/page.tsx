@@ -16,13 +16,16 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { WeeklyProgressChart } from "@/components/charts/weekly-progress-chart";
 import { MonthlyProgressChart } from "@/components/charts/monthly-progress-chart";
 import { Heatmap } from "@/components/charts/heatmap";
+import { RealDataSection } from "@/components/dashboard/real-data-section";
 
-export default function DashboardPage() {
+export default async function DashboardPage() {
   return (
     <>
       <Topbar title="Dashboard" />
       <main className="flex-1 space-y-6 p-4 sm:p-6">
         <WelcomeBanner />
+
+        <RealDataSection />
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2 space-y-6">

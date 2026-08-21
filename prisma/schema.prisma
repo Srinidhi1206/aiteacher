@@ -125,11 +125,16 @@ enum MaterialStatus {
   ERROR
 }
 
+// Content category (what the material IS for the student), not file format
+// - file format is inferred from the uploaded file's contentType/extension
+// instead of duplicated here.
 enum MaterialType {
+  TEXTBOOK
+  NOTES
+  REFERENCE
+  VIDEO
   PDF
-  DOC
-  PPT
-  IMAGE
+  PRESENTATION
   OTHER
 }
 
@@ -164,7 +169,8 @@ enum StudyPlanItemKind {
 }
 
 enum PlannerTaskStatus {
-  PENDING
+  TODO
+  IN_PROGRESS
   COMPLETED
   SKIPPED
 }
@@ -510,7 +516,9 @@ model Chapter {
   slug      String
   order     Int     @default(0)
 
-  topics Topic[]
+  topics         Topic[]
+  studyMaterials StudyMaterial[]
+  worksheets     Worksheet[]
 
   @@unique([subjectId, slug])
 }
@@ -529,6 +537,9 @@ model Topic {
   questions        Question[]
   weaknessProfiles WeaknessProfile[]
   strengthProfiles StrengthProfile[]
+  studyMaterials   StudyMaterial[]
+  worksheets       Worksheet[]
+  examQuestions    ExamQuestion[]
   // pgvector embedding of the topic's canonical description, used for
   // semantic clustering of weak concepts across a student's attempt history.
   // Type left as Json until the `vector` extension is enabled (see top of file).
@@ -614,30 +625,36 @@ model StudyMaterial {
   sizeKb          Int
   status          MaterialStatus @default(PROCESSING)
   extractedTopics Json? // string[] populated once AI extraction completes
+  isPublished     Boolean        @default(false)
 
-  boardId       String?
-  board         Board?       @relation(fields: [boardId], references: [id], onDelete: SetNull)
-  schoolClassId String?
-  schoolClass   SchoolClass? @relation(fields: [schoolClassId], references: [id], onDelete: SetNull)
-  subjectId     String?
-  subject       Subject?     @relation(fields: [subjectId], references: [id], onDelete: SetNull)
-  chapterName   String?
-  topicName     String?
+  // Board/class/subject/chapter are required (not nullable) - a material
+  // that isn't placed in the curriculum hierarchy can't be filtered to the
+  // right students, which defeats the point of storing it. Pick chapter
+  // last in the UI once subject narrows the options; topic stays optional
+  // (chapter-level material is common and valid on its own).
+  boardId       String
+  board         Board       @relation(fields: [boardId], references: [id], onDelete: Restrict)
+  schoolClassId String
+  schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Restrict)
+  subjectId     String
+  subject       Subject     @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  chapterId     String
+  chapter       Chapter     @relation(fields: [chapterId], references: [id], onDelete: Restrict)
+  topicId       String?
+  topic         Topic?      @relation(fields: [topicId], references: [id], onDelete: SetNull)
 
-  // Either a Teacher or an Admin can upload material (spec section 5 +
-  // section 12.3), so this is a relation to the shared User table rather
-  // than to Teacher specifically. `teacherId` below is kept alongside it
-  // only to preserve the Teacher-side `uploadedMaterials` back-relation for
-  // teacher-scoped queries; both point at the same uploader when set.
-  uploadedByUserId String?
-  uploadedBy       User?    @relation(fields: [uploadedByUserId], references: [id], onDelete: SetNull)
+  // Uploader is required and always a real User relation - "uploadedBy"
+  // must be derivable from the authenticated session, never client input.
+  uploadedByUserId String
+  uploadedBy       User     @relation(fields: [uploadedByUserId], references: [id], onDelete: Restrict)
   teacherId        String?
   teacher          Teacher? @relation(fields: [teacherId], references: [id], onDelete: SetNull)
 
   uploadedAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
-  @@index([boardId])
-  @@index([schoolClassId, subjectId])
+  @@index([boardId, schoolClassId, subjectId])
+  @@index([chapterId])
   @@index([uploadedByUserId])
 }
 
@@ -652,20 +669,24 @@ model Worksheet {
   teacherId     String
   teacher       Teacher     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
   schoolClassId String
-  schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Cascade)
+  schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Restrict)
   subjectId     String
   subject       Subject     @relation(fields: [subjectId], references: [id], onDelete: Cascade)
-  chapterName   String?
-  topicName     String?
+  chapterId     String?
+  chapter       Chapter?    @relation(fields: [chapterId], references: [id], onDelete: SetNull)
+  topicId       String?
+  topic         Topic?      @relation(fields: [topicId], references: [id], onDelete: SetNull)
 
   dueDate     DateTime?
   isPublished Boolean   @default(false)
   createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   submissions WorksheetSubmission[]
 
   @@index([schoolClassId, subjectId])
   @@index([teacherId])
+  @@index([chapterId])
 }
 
 model WorksheetSubmission {
@@ -836,8 +857,17 @@ model ExamQuestion {
   correctAnswer String? // null for subjective questions (teacher/AI-graded)
   marks         Int
   order         Int          @default(0)
+  // Optional: tagging a question to a topic is what lets the weakness/
+  // strength engine (lib/analytics/*) explain results at topic granularity
+  // instead of only exam/subject granularity. Optional because a teacher
+  // isn't always going to tag every question, and untagged questions still
+  // count toward exam/subject-level progress either way.
+  topicId       String?
+  topic         Topic?       @relation(fields: [topicId], references: [id], onDelete: SetNull)
 
   answers ExamAnswer[]
+
+  @@index([topicId])
 }
 
 model ExamSubmission {
@@ -977,6 +1007,7 @@ model StrengthProfile {
   student       Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
   topicId       String
   topic         Topic             @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  reason        String
   mastery       Int
   trend         WeakStrengthTrend
   trendHistory  Json
@@ -1085,7 +1116,7 @@ model DailyPlannerTask {
   date      DateTime
   time      String?
   priority  Priority          @default(MEDIUM)
-  status    PlannerTaskStatus @default(PENDING)
+  status    PlannerTaskStatus @default(TODO)
   createdAt DateTime          @default(now())
 
   @@index([studentId, date])

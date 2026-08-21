@@ -1,10 +1,14 @@
-# Database (Stage A)
+# Database (Stages A-E)
 
-Status: **schema and tooling exist and are verified (`prisma validate`, `prisma generate`,
-`tsc --noEmit` all pass); nothing in the app reads or writes through it yet.**
-Every page still runs on `lib/mock-data/*`, exactly as before. This document
-describes how to actually turn the database on when you're ready - that
-step hasn't happened yet.
+Status: **schema, auth, and Stage C/D/E server actions all exist and are
+verified (`prisma validate`, `prisma generate`, `tsc --noEmit`, `npm run
+build` all pass) - but no query has ever executed against a live
+database.** Login falls back to hardcoded demo accounts; every
+materials/exam/progress page shows a graceful "database not connected"
+state (see `components/database-unavailable.tsx`) instead of pretending
+to work. This document describes how to actually turn the database on -
+that step hasn't happened yet. See `docs/STEP_3_5.md` for the full
+stage-by-stage breakdown of what's built on top of it.
 
 ## Stack
 
@@ -48,19 +52,33 @@ step hasn't happened yet.
    npm run db:studio
    ```
 
-## What's deliberately not seeded yet
+## What's seeded (and what isn't)
 
-`prisma/seed.ts` does not create `User`/`Student`/`Teacher`/`Admin` rows.
-Doing that correctly requires password hashing (bcrypt), which is Stage B
-(real authentication) - see `docs/STEP_3_5.md`. Until Stage B lands, the 7
-demo accounts in `lib/auth/users.ts` keep working exactly as before, fully
-independent of the database.
+As of Stage B, `prisma/seed.ts` **does** create the 7 demo `User`/
+`Student`/`Teacher`/`Admin` rows, bcrypt-hashed, matching the same
+usernames/passwords as the `lib/auth/users.ts` fallback (see
+`docs/DEMO_CREDENTIALS.md`) - so login works identically either way, only
+the storage mechanism changes once you connect a database.
 
-It also only pre-creates Class 1-10 for the 3 **national** boards (CBSE,
+It only pre-creates Class 1-10 for the 3 **national** boards (CBSE,
 CISCE, NIOS), not for all 30+ state boards - that would be a few hundred
 speculative rows nobody's using yet. Enabling Class 1-10 for a specific
-state board is an Admin > Board & Classes action (Stage C), not a seed-time
+state board is an Admin > Board & Classes action (Stage C's admin UI,
+not yet wired to real data - see `docs/STEP_3_5.md`), not a seed-time
 decision.
+
+Not seeded: any `StudyMaterial`, `Worksheet`, `Exam`, or progress data -
+those are created through the app itself (Stage C/D/E) once a database
+exists, not pre-populated.
+
+## File storage (Stage C)
+
+Uploads (Admin Study Materials, Teacher Worksheets, Teacher Exam Papers)
+go through `lib/storage/*` to **Vercel Blob**. Create a Blob store from
+your Vercel project's Storage tab and set `BLOB_READ_WRITE_TOKEN` (see
+`.env.example`). Without it, `storage.isConfigured` is `false` and every
+upload action returns a clear "storage is not configured" error instead
+of pretending to succeed - the app still builds and runs fine.
 
 ## Known Vercel + Prisma nuances (for when Stage B+ actually queries the DB)
 

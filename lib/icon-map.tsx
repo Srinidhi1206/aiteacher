@@ -39,6 +39,9 @@ import {
   GraduationCap,
   Database,
   Server,
+  Library,
+  FileEdit,
+  Award,
 } from "lucide-react";
 
 // Explicit registry (rather than `import * as` from lucide-react) so
@@ -83,6 +86,9 @@ const iconRegistry: Record<string, LucideIcon> = {
   GraduationCap,
   Database,
   Server,
+  Library,
+  FileEdit,
+  Award,
 };
 
 export function DynamicIcon({ name, ...props }: { name: string } & LucideProps) {

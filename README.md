@@ -35,7 +35,9 @@ Next.js frontend  →  lib/mock-data/* (typed sample data)  →  Demo auth / ses
 All of the above (marks, uploads, scheduled exams, toggled settings) is React state scoped to the current session — nothing is persisted to a database yet, by design.
 
 **Step 3-5 — real backend, academic workflows, AI tutor, production hardening: IN PROGRESS.**
-Being built as reviewed, sequential stages (A through I) rather than one large change — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for the full stage-by-stage tracker. Stage A (database schema + Prisma tooling) is code-complete and verified but not yet connected to a live database or wired into any page — see [`docs/DATABASE.md`](docs/DATABASE.md).
+Being built as reviewed, sequential stages (A through I) rather than one large change — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for the full stage-by-stage tracker. Stages A/B (database schema, bcrypt auth) and C/D/E (study materials, real exam creation/taking/grading, progress/weak-area/strength engines, learning path, daily planner) are code-complete, type-checked against the real Prisma client, and browser-tested via the demo-account fallback — but **no query has ever executed against a live database** (none is connected yet). Every new page shows a graceful "database not connected" state rather than crashing or faking data — see [`docs/DATABASE.md`](docs/DATABASE.md).
+
+New routes this round: `/materials` (study materials/textbook), `/exams` + `/exams/[id]/attempt` + `/exams/[id]/results` (real exams, student side), `/results` (result history), `/teacher/exams` + `/teacher/exams/[id]` (teacher exam creation, question builder, grading).
 
 ## Demo accounts
 
@@ -76,12 +78,16 @@ See [`.env.example`](.env.example). For the current demo auth layer:
 - `SESSION_SECRET` — signs the session cookie; set a long random value for any real deployment.
 - `ADMIN_PASSWORD`, `TEACHER_PASSWORD`, `STUDENT1_PASSWORD`…`STUDENT5_PASSWORD` — optional overrides for the demo account passwords.
 
-For the database (Stage A — not connected yet, see `docs/DATABASE.md`):
+For the database (not connected yet, see `docs/DATABASE.md`):
 
 - `DATABASE_URL` — pooled Postgres connection string, used by the app at runtime.
 - `DIRECT_URL` — non-pooled connection string, used only by migrations/seeding.
 
-Reserved for future stages, not used yet: `BLOB_READ_WRITE_TOKEN` (file storage), `OPENAI_API_KEY`/`GEMINI_API_KEY`/`ANTHROPIC_API_KEY` (AI tutor — only one would ever be set, matching whichever provider is activated).
+For file storage (Stage C — study materials, worksheets, exam papers):
+
+- `BLOB_READ_WRITE_TOKEN` — Vercel Blob token. Without it, uploads return a clear "storage not configured" error instead of failing silently; the app still builds and runs.
+
+Reserved for a future stage, not used yet: `OPENAI_API_KEY`/`GEMINI_API_KEY`/`ANTHROPIC_API_KEY` (AI tutor — only one would ever be set, matching whichever provider is activated).
 
 No real secrets are committed to the repo.
 
