@@ -8,6 +8,15 @@ const ROLE_HOME: Record<Role, string> = {
   student: "/dashboard",
 };
 
+// Stage F: distinct, non-revealing messages per account status. None of
+// these hint at *why* a review went the way it did (see STEP 9 - "do not
+// reveal unnecessary internal review information").
+const STATUS_MESSAGES: Record<string, string> = {
+  PENDING: "Your account is awaiting administrator approval.",
+  REJECTED: "Your registration was not approved.",
+  SUSPENDED: "Your account has been suspended. Please contact an administrator.",
+};
+
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   const role = body?.role as Role | undefined;
@@ -18,10 +27,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing role, username, or password." }, { status: 400 });
   }
 
-  const user = await findUser(role, username, password);
-  if (!user) {
+  const outcome = await findUser(role, username, password);
+
+  if (outcome.kind === "invalid_credentials") {
     return NextResponse.json({ error: "Invalid username or password for that role." }, { status: 401 });
   }
+
+  if (outcome.kind === "account_status") {
+    return NextResponse.json(
+      { error: STATUS_MESSAGES[outcome.status] ?? "Your account cannot sign in right now.", status: outcome.status },
+      { status: 403 }
+    );
+  }
+
+  const user = outcome.user;
 
   const token = await signSession({
     id: user.id,

@@ -192,6 +192,16 @@ already import from the shared `lib/types.ts` interfaces.
   `/admin`, and the student pages are all server-enforced (`middleware.ts`)
   against the session's role, not just hidden nav links; `/parent` has no
   role restriction yet since "parent" isn't one of the three product roles.
+- Registration + account approval (Stage F, see `docs/STEP_3_5.md`) adds
+  public self-registration under `/register`, `/register/student`,
+  `/register/teacher`, `/register/admin` (`lib/actions/registration.ts`),
+  all landing accounts in `AccountStatus.PENDING` until an admin approves
+  them (`lib/actions/user-management.ts`, `/admin` -> Users tab). Only the
+  one seed-bootstrapped `Admin.isSuperAdmin = true` account may approve/
+  reject/suspend/reactivate another admin - no code path anywhere creates
+  a second super admin. This is database-only, same as Stage B: the
+  fallback demo accounts have no concept of `AccountStatus` and are
+  unaffected.
 - No persistence across page reloads for most interactions (toasts, toggled
   checkboxes, generated exam plans, uploaded materials, entered marks,
   scheduled exams) beyond the current session - by design, since there is

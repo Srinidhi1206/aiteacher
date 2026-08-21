@@ -24,6 +24,7 @@ Next.js frontend  →  lib/mock-data/* (typed sample data)  →  Demo auth / ses
 - Role-selection-first login (`/login`): pick Student / Teacher / Admin, then sign in.
 - Session is a signed (HMAC-SHA256), httpOnly cookie (`lib/auth/session.ts`) — no external auth provider yet.
 - `middleware.ts` enforces route protection server-side: unauthenticated visitors are redirected to `/login`; each role is confined to its own area (`/admin`, `/teacher`, or the student pages) and bounced back to its own dashboard on a mismatch; a returning user with a valid session who hits `/login` is sent straight to their dashboard instead of re-selecting a role.
+- Self-registration (`/register` and role-specific `/register/student`, `/register/teacher`, `/register/admin`) is also public, database-only (Stage F, see below) — new accounts land `PENDING` until an admin approves them.
 - Logout (`POST /api/auth/logout`) clears the session.
 - Centralized `Role` type (`lib/auth/users.ts`) and centralized `Class 1–10` config (`lib/classes.ts`) — no scattered role/class string literals.
 
@@ -38,6 +39,8 @@ All of the above (marks, uploads, scheduled exams, toggled settings) is React st
 Being built as reviewed, sequential stages (A through I) rather than one large change — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for the full stage-by-stage tracker. Stages A/B (database schema, bcrypt auth) and C/D/E (study materials, real exam creation/taking/grading, progress/weak-area/strength engines, learning path, daily planner) are code-complete, type-checked against the real Prisma client, and browser-tested via the demo-account fallback — but **no query has ever executed against a live database** (none is connected yet). Every new page shows a graceful "database not connected" state rather than crashing or faking data — see [`docs/DATABASE.md`](docs/DATABASE.md).
 
 New routes this round: `/materials` (study materials/textbook), `/exams` + `/exams/[id]/attempt` + `/exams/[id]/results` (real exams, student side), `/results` (result history), `/teacher/exams` + `/teacher/exams/[id]` (teacher exam creation, question builder, grading).
+
+**Stage F — registration + account approval: code-complete, not yet connected.** Student/teacher/admin-request self-registration (`/register/*`), an `AccountStatus` (PENDING/ACTIVE/REJECTED/SUSPENDED) gate on login, and an admin approval workflow (`/admin` → Users tab: approve/reject/suspend/reactivate) with a protected super-admin account that only it can approve/manage other admins. Same DB-connection caveat as every other stage above — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md#stage-f-detail).
 
 ## Demo accounts
 
@@ -157,7 +160,7 @@ Not yet implemented — explicitly out of scope until a real backend exists:
 
 Steps 3-5 are underway as nine reviewed stages (A-I) — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for current status of each:
 
-- **Step 3 — Backend + Database + Persistent Data.** Stage A (database schema + Prisma tooling) is code-complete; Stages B-F (real auth, admin/teacher/student persistence, exam evaluation) are not started.
+- **Step 3 — Backend + Database + Persistent Data.** Stages A-F (database schema, real auth, study materials, exam creation/taking/grading, progress/learning-path engines, registration + account approval) are all code-complete and type-checked against the real Prisma client, but none has ever executed against a live database — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for the stage-by-stage detail.
 - **Step 4 — Real AI / GenAI Tutor + Evaluation.** Stage G — wire an LLM provider behind the AI Tutor using the prompt templates already sketched in the Admin panel and `docs/ARCHITECTURE.md`. Not started.
 - **Step 5 — Production User Management + Advanced Learning Features.** Stages H-I — real auth provider, notifications/audit logs, production hardening (validation, rate limiting, loading/error/empty states). Not started.
 

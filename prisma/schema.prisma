@@ -219,6 +219,35 @@ enum AuditAction {
   GRADE_CHANGE
   BOARD_CHANGE
   CLASS_CHANGE
+  // Stage F - registration & approval workflow
+  REGISTRATION_SUBMITTED
+  REGISTRATION_APPROVED
+  REGISTRATION_REJECTED
+  USER_SUSPENDED
+  USER_REACTIVATED
+}
+
+// Stage F: a User's overall account lifecycle. Login is gated on this, not
+// just `isActive` - see lib/auth/users.ts. New registrations start PENDING;
+// only an approval action (never the user themselves) can move them to
+// ACTIVE or REJECTED. SUSPENDED is a separate, later action against an
+// already-ACTIVE account (see docs/STEP_3_5.md's Stage F section for the
+// full state machine and who can trigger each transition).
+enum AccountStatus {
+  PENDING
+  ACTIVE
+  REJECTED
+  SUSPENDED
+}
+
+// Lifecycle of a single RegistrationRequest row - distinct from
+// AccountStatus because a request only ever has three states (it doesn't
+// need a SUSPENDED equivalent; suspension is a separate action against the
+// resulting User after approval).
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 // ---------------------------------------------------------------------------
@@ -328,21 +357,26 @@ model SchoolClassSubject {
 // ---------------------------------------------------------------------------
 
 model User {
-  id             String   @id @default(cuid())
+  id             String        @id @default(cuid())
   // Login identifier shown in the UI (the existing "Username" field on
   // /login) - kept separate from `email` since Stage B's demo/seed accounts
   // don't have real inboxes yet, and the login form is username-based, not
   // email-based, to preserve the existing UI (Stage B requirement).
-  username       String   @unique
-  email          String   @unique
+  username       String        @unique
+  email          String        @unique
   passwordHash   String // bcrypt hash (see lib/auth/password.ts) - never plaintext
   name           String
   role           Role
-  isActive       Boolean  @default(true)
+  // Stage F: the authoritative login gate (see lib/auth/users.ts) - login
+  // is only allowed when status = ACTIVE. `isActive` (below) predates this
+  // and is kept for backward compatibility with any earlier reads of it,
+  // but new code should check `status`, not `isActive`.
+  status         AccountStatus @default(PENDING)
+  isActive       Boolean       @default(true)
   avatarInitials String?
   avatarColor    String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   student Student?
   parent  Parent?
@@ -353,8 +387,13 @@ model User {
   auditLogs              AuditLog[]
   createdExamSchedules   ExamSchedule[]
   uploadedStudyMaterials StudyMaterial[]
+  // The request this user filed for themselves at registration time.
+  registrationRequest    RegistrationRequest?  @relation("Applicant")
+  // Requests this user has reviewed (approved/rejected) as an admin.
+  reviewedRequests       RegistrationRequest[] @relation("Reviewer")
 
   @@index([role])
+  @@index([status])
 }
 
 model Student {
@@ -466,6 +505,48 @@ model Admin {
   id     String @id @default(cuid())
   userId String @unique
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Stage F: exactly one protected original administrator is expected to
+  // have this set (see prisma/seed.ts's bootstrap logic and
+  // docs/STEP_3_5.md). Only a super admin can approve another admin's
+  // RegistrationRequest, suspend/reactivate an admin account, or ever set
+  // this field - normal admins can never self-promote (enforced in
+  // lib/actions/user-management.ts, never trusted from client input).
+  isSuperAdmin Boolean @default(false)
+}
+
+// Stage F: one row per user who has ever registered - tracks the
+// approval lifecycle independently of the User row itself, so "who
+// reviewed this, when, and why" survives even if the account is later
+// modified. `userId` is unique (1:1 with User), which is what naturally
+// prevents a user from filing a second registration request - they
+// already have one the moment their account exists.
+model RegistrationRequest {
+  id            String        @id @default(cuid())
+  userId        String        @unique
+  user          User          @relation("Applicant", fields: [userId], references: [id], onDelete: Cascade)
+  requestedRole Role
+  status        RequestStatus @default(PENDING)
+
+  // Free-form context captured at submission time - e.g. a teacher's
+  // requested class/subject combinations (never auto-applied as real
+  // TeacherAssignment rows - an admin grants those explicitly after
+  // approval, see docs/STEP_3_5.md), or an admin applicant's stated reason.
+  requestedDetails Json?
+
+  submittedAt      DateTime  @default(now())
+  reviewedAt       DateTime?
+  reviewedByUserId String?
+  reviewedBy       User?     @relation("Reviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  rejectionReason  String?
+  reviewNotes      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([requestedRole])
+  @@index([reviewedByUserId])
 }
 
 // ---------------------------------------------------------------------------

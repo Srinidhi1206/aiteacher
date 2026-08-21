@@ -238,36 +238,42 @@ async function main() {
   const mathSubjectId = subjectIds[CORE_SUBJECTS.findIndex((s) => s.slug === "mathematics")];
   const scienceSubjectId = subjectIds[CORE_SUBJECTS.findIndex((s) => s.slug === "science")];
 
-  console.log("Seeding demo admin account...");
+  console.log("Seeding demo admin account (bootstrapped as the protected super admin)...");
   const adminPassword = process.env.ADMIN_PASSWORD || "Admin@123";
   const adminUser = await prisma.user.upsert({
     where: { username: "admin" },
-    update: { passwordHash: await hashPassword(adminPassword) },
+    update: { passwordHash: await hashPassword(adminPassword), status: "ACTIVE" },
     create: {
       username: "admin",
       email: "admin@teachai.local",
       passwordHash: await hashPassword(adminPassword),
       name: "Srinidhi",
       role: Role.ADMIN,
+      status: "ACTIVE",
     },
   });
+  // isSuperAdmin: true only here, at seed time - this is the one and only
+  // code path in the whole app that ever sets it. No registration or
+  // approval action can create or promote a super admin (see
+  // lib/actions/registration.ts and lib/actions/user-management.ts).
   await prisma.admin.upsert({
     where: { userId: adminUser.id },
-    update: {},
-    create: { userId: adminUser.id },
+    update: { isSuperAdmin: true },
+    create: { userId: adminUser.id, isSuperAdmin: true },
   });
 
   console.log("Seeding demo teacher account...");
   const teacherPassword = process.env.TEACHER_PASSWORD || "Teacher@123";
   const teacherUser = await prisma.user.upsert({
     where: { username: "teacher" },
-    update: { passwordHash: await hashPassword(teacherPassword) },
+    update: { passwordHash: await hashPassword(teacherPassword), status: "ACTIVE" },
     create: {
       username: "teacher",
       email: "teacher@teachai.local",
       passwordHash: await hashPassword(teacherPassword),
       name: "Teacher",
       role: Role.TEACHER,
+      status: "ACTIVE",
     },
   });
   const teacherProfile = await prisma.teacher.upsert({
@@ -297,13 +303,14 @@ async function main() {
     const username = `student${n}`;
     const studentUser = await prisma.user.upsert({
       where: { username },
-      update: { passwordHash: await hashPassword(password) },
+      update: { passwordHash: await hashPassword(password), status: "ACTIVE" },
       create: {
         username,
         email: `${username}@teachai.local`,
         passwordHash: await hashPassword(password),
         name: `Student ${n}`,
         role: Role.STUDENT,
+        status: "ACTIVE",
       },
     });
     await prisma.student.upsert({

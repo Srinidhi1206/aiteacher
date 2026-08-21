@@ -39,7 +39,7 @@ const ROLE_HOME: Record<Role, string> = {
 };
 
 // Everything that should NOT be gated by login.
-const PUBLIC_PATHS = ["/login", "/api/auth/login", "/api/auth/logout"];
+const PUBLIC_PATHS = ["/login", "/register", "/api/auth/login", "/api/auth/logout"];
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;

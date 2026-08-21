@@ -20,7 +20,7 @@ stage is applied to `main`/production without an explicit go-ahead.
 | C | Study materials + file storage | **Mostly complete.** Storage abstraction (Vercel Blob, gracefully "not configured" without a token), full materials CRUD + student-facing `/materials` page, worksheet CRUD (data layer only, no dedicated UI page yet), file validation/authorization. Admin's pre-existing `study-materials-card.tsx`/`exam-schedule-card.tsx` still run on local mock state, not yet rewired to the new real actions - see "Stage C/D/E detail". |
 | D | Exam + grading system | **Complete, end-to-end.** Teacher exam creation + question builder + publish/unpublish (`/teacher/exams`), student exam-taking with timer/navigation/flagging (`/exams/[id]/attempt`), server-authoritative MCQ/TRUE_FALSE auto-evaluation, teacher subjective grading + finalize (`/teacher/exams/[id]`), student results (`/exams/[id]/results`, `/results`). |
 | E | Progress + learning path + planner | **Complete.** Deterministic progress/weakness/strength engines (`lib/analytics/*`), learning path generation reusing `StudyPlan`, daily planner, all wired into the student dashboard with graceful "database not connected" fallback (not a crash) when unreachable. |
-| F | (folded into D) | Exam evaluation was implemented as part of Stage D rather than separately, since the two are inseparable in this schema - see Stage D above. |
+| F | Registration + account approval | **Code complete, locally validated where possible, not yet connected.** Student/teacher/admin-request registration, `AccountStatus`/`RegistrationRequest` model, super-admin-gated approval workflow, suspend/reactivate, audit logging - see "Stage F detail" below. Same DB-connection blocker as Stages A/B: nothing here has executed against a live database. (Note: an earlier, unrelated "exam evaluation" item was previously tracked under the letter F; it was folded into Stage D and is documented there instead - this F is the registration/approval work described below.) |
 | G | AI tutor (provider abstraction + real provider wiring) | Not started |
 | H | Analytics (notifications, audit logs, dashboards) | Partially - AuditLog is written to on key admin/material actions; full admin Logs UI wiring and Notification generation not done. |
 | I | Production hardening (validation, rate limiting, loading/error/empty states, a11y, mobile polish) | Partial - Zod validation and graceful empty/error states exist throughout Stage C/D/E; rate limiting and full a11y pass not done. |
@@ -376,4 +376,228 @@ runtime):** every actual Prisma read/write in `lib/actions/*` and
 the real generated Prisma client (which catches most structural errors -
 wrong field names, wrong relation includes, wrong enum values), but no
 row has ever actually been read or written, because there is still no
+`DATABASE_URL`.
+
+## Stage F detail
+
+**Goal:** let real students/teachers/admins create their own accounts,
+instead of only the 7 fixed seed accounts, without opening a hole that
+lets anyone hand themselves elevated access. Every account created through
+this stage starts inert (`AccountStatus.PENDING`) and only an authorized
+admin action can activate it.
+
+**Schema (`prisma/schema.prisma`):**
+- `AccountStatus` enum (`PENDING`/`ACTIVE`/`REJECTED`/`SUSPENDED`) added to
+  `User` as `status` (indexed), defaulting to `PENDING`. This is the
+  authoritative login gate - separate from the pre-existing `isActive`
+  boolean, which is left alone. Rejected/suspended users are never
+  deleted, only status-flipped, so the audit trail and the option to
+  reverse a decision both survive.
+- `Admin.isSuperAdmin` (`Boolean @default(false)`) - set to `true` in
+  exactly one place in the entire codebase: `prisma/seed.ts`, for the one
+  bootstrap admin account. No registration action, approval action, or
+  UI control can ever set it; there is no parameter for it anywhere
+  outside the seed script.
+- `RegistrationRequest` model: one row per registration attempt
+  (`userId` unique, `requestedRole`, `RequestStatus` PENDING/APPROVED/
+  REJECTED, `requestedDetails Json?` for role-specific extra fields,
+  `reviewedAt`/`reviewedByUserId`/`rejectionReason`/`reviewNotes`). Kept
+  separate from `User` rather than adding a dozen nullable columns to it -
+  most users will never have more than one request, and the review
+  metadata (who reviewed it, when, why rejected) doesn't belong on the
+  account itself.
+- `AuditAction` gained `REGISTRATION_SUBMITTED`, `REGISTRATION_APPROVED`,
+  `REGISTRATION_REJECTED`, `USER_SUSPENDED`, `USER_REACTIVATED`.
+
+**Registration (`lib/actions/registration.ts`, public routes under
+`/register/*`):**
+- `registerStudent` / `registerTeacher` / `registerAdminRequest`, each
+  Zod-validated server-side (password: min 8 chars + at least one letter
+  and one digit, matching confirm-password, username/email format),
+  hashing the password with the existing `hashPassword` (bcrypt, 12
+  rounds), checking for a duplicate username/email before creating
+  anything, and validating the submitted State/Board/Class (and, for
+  teachers, every requested Class+Subject pair) against the real
+  curriculum tables rather than trusting the submitted IDs. All three
+  create the `User` + role profile + `RegistrationRequest` + an
+  `AuditLog` row (`REGISTRATION_SUBMITTED`) inside one
+  `prisma.$transaction`, so a failure partway through never leaves an
+  orphaned half-created account.
+- Teacher registration stores the requested class/subject combinations as
+  `RegistrationRequest.requestedDetails` JSON, **not** as real
+  `TeacherAssignment` rows - a teacher's request describes what they say
+  they teach; an admin decides what they're actually assigned to
+  afterward. Nothing here grants a teacher access to a class before
+  someone reviews it.
+- `registerAdminRequest` hardcodes `role: ADMIN` and `isSuperAdmin: false`
+  server-side - the form's Zod schema has no field for either, so there
+  is nothing for a crafted request body to override. The confirmation
+  page for this path is explicitly worded "Admin access requested," never
+  implying an account was created that can sign in.
+- Duplicate-account checks at registration time return a specific
+  "username taken" / "email already registered" message. This is a
+  deliberate, conventional exception to generic-error-message practice:
+  the registrant already asserts ownership of that email by registering
+  with it, so confirming it exists doesn't leak anything they didn't
+  already claim. Login errors remain fully generic (unchanged from Stage
+  B: "Invalid username or password for that role").
+
+**Login gating (`lib/auth/users.ts`, `app/api/auth/login/route.ts`):**
+- `findUser` now returns a discriminated `LoginOutcome`
+  (`success | invalid_credentials | account_status`) instead of a plain
+  user-or-null, so the login route can distinguish "wrong password" from
+  "correct password, but this account isn't ACTIVE yet." The password is
+  always checked *before* the status is inspected, so a wrong guess can
+  never be used to probe whether a given username is pending/rejected/
+  suspended.
+- Distinct, non-revealing copy per status (PENDING/REJECTED/SUSPENDED) -
+  none of them explain *why* a review went the way it did, per the
+  requirement not to leak internal review detail through the login form.
+- The Stage B fallback account list (used only when `DATABASE_URL` is
+  unset) is untouched: it has no concept of `AccountStatus` and every
+  fallback account behaves as if `ACTIVE`, exactly as before. Stage F
+  only changes behavior on the database-backed path.
+
+**Approval workflow (`lib/actions/user-management.ts`, admin UI at
+`/admin` → Users tab):**
+- `requireAdminActor()` re-derives the caller from the session cookie and
+  does a **fresh** `prisma.admin.findUnique` lookup for `isSuperAdmin` on
+  every single call - it is never read from the session payload (which
+  doesn't carry it) and never cached across calls, so a demotion/promotion
+  takes effect on the very next action, not on next login.
+- `approveRegistration` / `rejectRegistration`: any admin may approve or
+  reject a STUDENT or TEACHER request; only `isSuperAdmin` may approve or
+  reject an ADMIN request (`requireSuperAdmin()` throws otherwise); an
+  admin can never approve or reject their own request, regardless of
+  role. Approval flips `User.status` to `ACTIVE` and
+  `RegistrationRequest.status` to `APPROVED`, atomically, plus an
+  `AuditLog` row. Rejection requires a non-empty reason, flips `User.status`
+  to `REJECTED` (never deletes the row), and records the reason on the
+  request (shown to admins reviewing history, not to the applicant).
+- `suspendUser` / `reactivateUser`: same super-admin gate for any ADMIN
+  target. The bootstrap super admin (`Admin.isSuperAdmin === true`) can
+  never be suspended by this action, by anyone, including another
+  hypothetical super admin - there is currently no UI path that creates a
+  second super admin, so in practice this protects the one bootstrap
+  account outright. An admin can never suspend their own account through
+  this action either.
+- `listUsersForAdmin` / `listRegistrationRequests`: read-only, gated by
+  `requireAdminActor()` (any admin role, not super-admin-only - viewing
+  the list isn't privileged the way mutating it is).
+- UI (`components/admin/users-table.tsx`, replacing the old
+  `adminUsers` mock-data table): status/role filters, Approve/Reject
+  (with a reason modal)/Suspend/Reactivate buttons per row, a "Super
+  Admin" badge on the protected account, and admin-only buttons disabled
+  client-side when the signed-in admin isn't a super admin - **disabled,
+  not hidden**, and this is UX only: every mutation re-checks the same
+  rule server-side regardless of what the button's `disabled` attribute
+  says, so there is no code path where editing the DOM or calling the
+  action directly bypasses the actual gate. Renders a
+  `DatabaseUnavailable` card instead of crashing when there's no database
+  (verified in the browser - see below).
+
+**Routing (`middleware.ts`):** `/register` (and everything under it) added
+to `PUBLIC_PATHS`, same treatment as `/login` - reachable while logged
+out, and still reachable while logged in (nothing forces a logout to
+register a second account, matching how `/login` already behaves).
+
+**Bootstrap (`prisma/seed.ts`):** the seeded admin ("Srinidhi") now gets
+`isSuperAdmin: true` and every one of the 7 demo accounts (admin, teacher,
+student1-5) gets `status: "ACTIVE"` explicitly - required because the new
+column defaults to `PENDING`, and without this change the seeded demo
+accounts would be unable to sign in on the database-backed path once a
+database is connected. Both changes are inside the existing idempotent
+`upsert` calls, so re-running the seed script is still safe.
+
+**Reasoning through the required attack scenarios** (no live database to
+execute these against yet, so this is a code-level walkthrough of what
+each one hits):
+1. A student tries to submit `role: "ADMIN"` on the student form -
+   `registerStudent`'s Zod schema has no `role` field at all; the server
+   hardcodes `Role.STUDENT`. Not possible.
+2. A crafted request sets `isSuperAdmin: true` on an admin registration -
+   `registerAdminRequest` hardcodes `isSuperAdmin: false`; there is no
+   field to overwrite it with.
+3. A normal admin calls `approveRegistration` on an ADMIN-role request -
+   `requireSuperAdmin()` throws `ForbiddenError`, caught and returned as
+   `{ ok: false, error }`.
+4. A normal admin calls `suspendUser`/`reactivateUser` on another admin -
+   same `requireSuperAdmin()` gate.
+5. Anyone calls `suspendUser` on the bootstrap super admin's `userId` -
+   blocked unconditionally before the super-admin check even runs.
+6. An admin calls `approveRegistration`/`rejectRegistration` on their own
+   `RegistrationRequest.id` - blocked by the explicit
+   `request.userId === actor.userId` check.
+7. A PENDING/REJECTED/SUSPENDED user tries to log in with the correct
+   password - `findUserInDatabase` returns `account_status`, not
+   `success`; no session is issued.
+8. Direct server-action call bypassing the UI (e.g. from devtools) - every
+   action re-derives the actor from `getCurrentSession()` server-side;
+   there is no client-supplied `userId`/`role`/`isSuperAdmin` parameter
+   anywhere in `user-management.ts` or `registration.ts` for a crafted
+   call to exploit.
+9. A teacher or student calls anything in `user-management.ts` -
+   `requireAdminActor()` throws `ForbiddenError` on the `session.role !==
+   "admin"` check before any query runs.
+10. A logged-out user calls an admin action - `getCurrentSession()`
+    returns `null`, `requireAdminActor()` throws `UnauthorizedError`.
+11. Duplicate username at registration - `assertNoDuplicateAccount` checks
+    before any row is created; returns a clear error, creates nothing.
+12. Duplicate email, different username - same check, `findUnique({where:
+    {email}})` catches it independently of the username check.
+13. Registering with a username/email that has a pending, not-yet-reviewed
+    request - still caught by the same duplicate check, since the first
+    registration already created the `User` row (PENDING is still a real
+    row).
+14. Invalid State→Board combination (e.g. a state board ID paired with an
+    unrelated state) - `validateCurriculumSelection` re-checks
+    `board.stateId === stateId` server-side regardless of what the
+    dropdown showed.
+15. Invalid Board→Class combination - same function checks
+    `schoolClass.boardId === boardId`.
+16. Teacher requests a class/subject pair that doesn't actually exist
+    together - `registerTeacher` looks up the real
+    `SchoolClassSubject` join row for every requested pair and rejects if
+    it's missing or disabled.
+17. A student/teacher session tries to load `/admin/users` - blocked by
+    the existing `middleware.ts` `ROLE_ONLY` check (unchanged by this
+    stage) before the page even renders, and independently by
+    `requireAdminActor()` if a server action were called directly.
+18. Rejected/suspended user's row being deleted or losing history -
+    never happens; every terminal state is a status flip, and the
+    `RegistrationRequest` row (with `rejectionReason`) is permanent.
+19. Approving the same request twice / double-submitting - `if
+    (request.status !== "PENDING")` short-circuits with an error on the
+    second call; the first call's transaction already moved it out of
+    `PENDING`.
+
+**Verified (real tests, no live database required):**
+- `prisma validate`/`generate` (with placeholder `DATABASE_URL`/
+  `DIRECT_URL`, since neither Prisma CLI command needs a reachable
+  database, only a syntactically valid connection string to parse),
+  `npx tsc --noEmit`, `npm run lint`, and `npm run build` all pass.
+- Full browser session, logged in via the Stage B fallback admin account:
+  `/register`, `/register/student`, `/register/teacher`, `/register/admin`
+  all render (both logged out and while an admin session is active,
+  confirming `/register` doesn't force a logout); the curriculum
+  cascading selects correctly show a "needs a connected database" notice
+  and disable the submit button rather than silently failing or letting a
+  half-valid form through; `/login` still shows the pre-existing 3-role
+  picker plus the new "Register" link; fallback admin login still
+  succeeds and redirects to `/admin`; the Users tab renders the new
+  approve/reject/suspend/reactivate UI shell and correctly falls back to
+  a `DatabaseUnavailable` card (not a crash) when the underlying actions
+  hit the missing `DATABASE_URL`; logout still works.
+- Regression-checked: `/dashboard`, `/admin` (all tabs), `/login` all
+  still render exactly as before this stage for the existing fallback
+  accounts - nothing in Stage F changes behavior on the fallback-auth
+  path.
+
+**Not executed against a live database (code implemented, untested at
+runtime):** every registration submission, every approve/reject/suspend/
+reactivate action, and the seed script's new `status`/`isSuperAdmin`
+writes - the query shapes are verified by TypeScript against the real
+generated Prisma client, and the authorization logic is verified by
+code-level walkthrough above, but no registration has ever actually been
+approved or rejected against a real row, because there is still no
 `DATABASE_URL`.

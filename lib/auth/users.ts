@@ -13,8 +13,15 @@
 // would be a real security hole.
 //
 // Real accounts, once the database is connected, are created via
-// `npm run db:seed` (see prisma/seed.ts and docs/DEMO_CREDENTIALS.md) or
-// eventually the Admin > Users UI (Stage C) - never hardcoded here.
+// `npm run db:seed` (see prisma/seed.ts and docs/DEMO_CREDENTIALS.md), the
+// Stage F registration flow (pending admin approval), or eventually a full
+// Admin > Users UI - never hardcoded here.
+//
+// Stage F: the fallback accounts below are dev/demo-only and have no
+// concept of AccountStatus - they are always treated as ACTIVE. Real,
+// database-backed accounts are gated on `User.status` (see
+// findUserInDatabase below) - a PENDING/REJECTED/SUSPENDED account can
+// never reach a signed-in session, regardless of a correct password.
 
 import "server-only";
 import { verifyPassword } from "./password";
@@ -34,6 +41,21 @@ export interface AuthenticatedUser {
   subjects?: string[];
 }
 
+export type NonActiveStatus = "PENDING" | "REJECTED" | "SUSPENDED";
+
+/**
+ * Discriminated login result. Kept distinct from a plain `User | null` so
+ * the login route can tell "wrong username/password" apart from "correct
+ * password, but this account isn't allowed to sign in yet" - those need
+ * different messages (see STEP 9 of the Stage F spec), and conflating them
+ * either leaks account existence (bad) or hides *why* a legitimate user
+ * can't log in (bad UX, and against the spec's explicit requirement).
+ */
+export type LoginOutcome =
+  | { kind: "success"; user: AuthenticatedUser }
+  | { kind: "invalid_credentials" }
+  | { kind: "account_status"; status: NonActiveStatus };
+
 // Maps the app's lowercase Role (used throughout middleware.ts, the
 // sidebar, session payloads, etc.) to/from Prisma's uppercase Role enum,
 // so the rest of the app never has to deal with the DB's casing.
@@ -49,14 +71,14 @@ const ROLE_FROM_DB: Record<string, Role> = {
   STUDENT: "student",
 };
 
-export async function findUser(role: Role, username: string, password: string): Promise<AuthenticatedUser | null> {
+export async function findUser(role: Role, username: string, password: string): Promise<LoginOutcome> {
   if (process.env.DATABASE_URL) {
     return findUserInDatabase(role, username, password);
   }
   return findUserInFallback(role, username, password);
 }
 
-async function findUserInDatabase(role: Role, username: string, password: string): Promise<AuthenticatedUser | null> {
+async function findUserInDatabase(role: Role, username: string, password: string): Promise<LoginOutcome> {
   // Dynamic import so `@prisma/client`/`lib/prisma` are never pulled into
   // the fallback-only path's module graph when there's no database.
   const { prisma } = await import("@/lib/prisma");
@@ -69,13 +91,23 @@ async function findUserInDatabase(role: Role, username: string, password: string
     },
   });
 
-  if (!dbUser || !dbUser.isActive || dbUser.role !== ROLE_TO_DB[role]) return null;
+  // Wrong username, or a real username but for a different role: treat
+  // both as plain invalid credentials rather than a role-specific message,
+  // so a login attempt can't be used to probe which role a username has.
+  if (!dbUser || dbUser.role !== ROLE_TO_DB[role]) return { kind: "invalid_credentials" };
 
+  // Check the password BEFORE revealing account status - otherwise an
+  // attacker who doesn't know the password could still learn "this
+  // account is pending/suspended" just by guessing usernames.
   const valid = await verifyPassword(password, dbUser.passwordHash);
-  if (!valid) return null;
+  if (!valid) return { kind: "invalid_credentials" };
+
+  if (dbUser.status !== "ACTIVE") {
+    return { kind: "account_status", status: dbUser.status as NonActiveStatus };
+  }
 
   const appRole = ROLE_FROM_DB[dbUser.role];
-  if (!appRole) return null;
+  if (!appRole) return { kind: "invalid_credentials" };
 
   const result: AuthenticatedUser = {
     id: dbUser.id,
@@ -93,7 +125,7 @@ async function findUserInDatabase(role: Role, username: string, password: string
     result.subjects = [...new Set(assignments.map((a) => a.subject.name))];
   }
 
-  return result;
+  return { kind: "success", user: result };
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +134,11 @@ async function findUserInDatabase(role: Role, username: string, password: string
 // the same usernames/passwords the seeded database version will use, so
 // nothing changes for anyone using these credentials once the database is
 // connected - the app just starts authenticating them for real instead.
+//
+// These are fixed, hardcoded DEVELOPMENT accounts, not a substitute for
+// real registration - Stage F's registration/approval flow only exists on
+// the database-backed path above. Do not add more accounts here; new real
+// users are created via registration once a database is connected.
 // ---------------------------------------------------------------------------
 
 interface FallbackUser {
@@ -174,11 +211,11 @@ const FALLBACK_USERS: FallbackUser[] = [
   },
 ];
 
-function findUserInFallback(role: Role, username: string, password: string): AuthenticatedUser | null {
+function findUserInFallback(role: Role, username: string, password: string): LoginOutcome {
   const match = FALLBACK_USERS.find(
     (u) => u.role === role && u.username.toLowerCase() === username.toLowerCase() && u.password === password
   );
-  if (!match) return null;
+  if (!match) return { kind: "invalid_credentials" };
   const { password: _password, ...rest } = match;
-  return rest;
+  return { kind: "success", user: rest };
 }

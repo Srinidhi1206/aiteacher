@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { GraduationCap, ShieldCheck, User, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -139,6 +140,13 @@ function LoginForm() {
             </form>
           </>
         )}
+
+        <p className="mt-6 text-center text-xs text-gray-500 dark:text-gray-400">
+          Don&apos;t have an account?{" "}
+          <Link href="/register" className="font-medium text-primary-600 hover:underline dark:text-primary-400">
+            Register
+          </Link>
+        </p>
       </div>
     </div>
   );

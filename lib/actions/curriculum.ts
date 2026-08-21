@@ -25,6 +25,13 @@ export async function listBoards(stateId?: string | null) {
   });
 }
 
+export async function listSchools(stateId?: string | null) {
+  return prisma.school.findMany({
+    where: { isEnabled: true, ...(stateId ? { stateId } : {}) },
+    orderBy: { name: "asc" },
+  });
+}
+
 export async function listSchoolClasses(boardId: string) {
   return prisma.schoolClass.findMany({
     where: { boardId, isEnabled: true },
