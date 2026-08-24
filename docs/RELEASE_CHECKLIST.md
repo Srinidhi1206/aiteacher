@@ -406,3 +406,51 @@ No raw stack traces, SQL, or secret values are ever returned to a
 client in any of the above - server actions only ever return `.message`
 from the app's own typed error classes; anything else is re-thrown and
 redacted by Next.js's built-in Server Action production error handling.
+
+---
+
+## 10. Rollback guidance
+
+Nothing in this project has ever been deployed, so there is no live
+rollback to perform yet - this section is the procedure to follow the
+first time something needs to be undone after a real deployment exists.
+
+**Application code (Vercel deployment):**
+- Vercel keeps every previous deployment. Roll back instantly from the
+  Vercel dashboard (Deployments -> select a prior one -> Promote to
+  Production), or `vercel rollback` from the CLI. This does not touch the
+  database - a code rollback alone is always safe.
+
+**Database migrations:**
+- Prisma has no automatic "down" migration. Before applying a new
+  migration in production, ensure it is additive/backward-compatible
+  wherever possible (add columns/tables nullable-or-defaulted rather than
+  dropping/renaming in the same release) so that rolling the *application*
+  back a version continues to work against the *new* schema.
+- If a migration must be reverted, write and review a new forward
+  migration that undoes it (e.g. drop the added column) - never hand-edit
+  `_prisma_migrations` or delete a migration directory after it has been
+  applied to a real database. Test the reverting migration's SQL with
+  `npx prisma migrate diff` the same offline way the initial migration was
+  generated (see Section 2) before running `npm run db:deploy`.
+- Take a database snapshot/backup (via your Postgres provider, e.g. Neon's
+  point-in-time restore) before every `npm run db:deploy` against
+  production - this is the actual safety net for a migration that turns
+  out to be destructive in practice, not just in review.
+
+**Seed data:**
+- `npm run db:seed` is idempotent for curriculum reference data (upserts),
+  so re-running it after a partial failure is safe. It is **not** safe to
+  re-run in a way that recreates already-existing demo accounts with new
+  passwords - if demo/bootstrap accounts need new passwords post-seed,
+  change them through the app (admin user management) or directly via a
+  reviewed one-off script, not by re-seeding.
+
+**Storage (Blob):** uploaded files are never deleted by a rollback -
+`delete` only happens through the app's own authorized worksheet/material
+delete actions. A code rollback that removes a feature referencing a Blob
+file leaves the file orphaned (safe, just unused), never inaccessible.
+
+**Sessions:** rolling back `SESSION_SECRET` invalidates every existing
+session (all users are logged out) since old cookies were signed with a
+different secret - expected and safe, not a rollback bug.

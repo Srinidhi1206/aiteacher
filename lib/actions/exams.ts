@@ -199,8 +199,20 @@ export async function deleteExamQuestion(questionId: string): Promise<ActionResu
 export async function reorderExamQuestions(examId: string, orderedQuestionIds: string[]): Promise<ActionResult> {
   try {
     await requireDraftOwnedExam(examId);
+    // Every id must actually belong to this exam - without this check a
+    // teacher who owns *some* draft exam could pass another exam's (or
+    // another teacher's) question ids here and silently overwrite their
+    // `order` field, since Prisma's `update({ where: { id } })` only needs
+    // the id to be unique, not scoped to examId.
+    const owned = await prisma.examQuestion.findMany({ where: { examId }, select: { id: true } });
+    const ownedIds = new Set(owned.map((q) => q.id));
+    if (orderedQuestionIds.length !== ownedIds.size || orderedQuestionIds.some((id) => !ownedIds.has(id))) {
+      return { ok: false, error: "Question list does not match this exam's questions." };
+    }
     await prisma.$transaction(
-      orderedQuestionIds.map((id, index) => prisma.examQuestion.update({ where: { id }, data: { order: index } }))
+      orderedQuestionIds.map((id, index) =>
+        prisma.examQuestion.update({ where: { id, examId }, data: { order: index } })
+      )
     );
     return { ok: true };
   } catch (e) {

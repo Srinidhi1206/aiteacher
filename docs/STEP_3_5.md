@@ -1750,3 +1750,117 @@ exam/worksheet end-to-end plan, the analytics/AI plan, and most of the
 smoke-test matrix. Only the two Stage L code-level fixes (session
 expiry, seed production guard) and the already-established fallback-auth/
 cross-role/config-fail-closed checks were actually executed.
+
+## Stage M detail
+
+Final release-candidate audit (M1-M14): re-verified every Stage
+I/K/L security fix for regressions (session `iat` expiry, live
+`AccountStatus` re-check, production auth fallback prohibition,
+worksheet score bounds, registration race handling) - all intact,
+no regressions. Re-confirmed `.env.example` fully documents every
+`process.env.*` reference with no undocumented or stale variables, and
+the committed migration SQL still matches a fresh offline
+`prisma migrate diff --from-empty` regeneration byte-for-byte.
+
+### Finding: `reorderExamQuestions` IDOR (fixed)
+
+A deep, non-grep authorization read of every server action that mutates
+exams/worksheets/materials/AI conversations/analytics/user-management
+(dispatched as a background audit, since it spans ~2,200 lines across 8
+files) surfaced one genuine gap: `reorderExamQuestions` in
+`lib/actions/exams.ts` checked that the caller owns `examId` via
+`requireDraftOwnedExam`, but then updated each id in the caller-supplied
+`orderedQuestionIds` array with a bare
+`prisma.examQuestion.update({ where: { id } })` - `id` alone is a valid
+unique `where` for Prisma, so it never confirmed each question actually
+belonged to that exam. A teacher who owns at least one draft exam could
+supply question ids belonging to a *different* exam (another teacher's,
+or even a published one) and silently overwrite that question's `order`
+field. Impact was scoped to the `order` column only - no marks, prompt,
+correct-answer, or grade exposure/change - but it was a real cross-tenant
+IDOR mutation with zero ownership check on the target rows.
+
+**Fix:** before the reorder transaction, fetch the exam's actual question
+ids and require the supplied list to be an exact match (same size, every
+id present) - reject with a clear error otherwise. The transaction's
+`update` `where` clause was also changed to `{ id, examId }` as
+defense-in-depth. Re-ran `npx tsc --noEmit` (clean) after the change.
+
+All other files audited (`worksheets.ts`, `materials.ts`, `tutor.ts`,
+`teacher-analytics.ts`, `admin-analytics.ts`, `user-management.ts`,
+`registration.ts`) were confirmed clean: every mutation re-derives
+identity/ownership from the session-scoped row (`teacher.userId`,
+`student.id`, `requireAdminActor`/`requireSuperAdmin`), never from a
+client-supplied id, with no new gaps found.
+
+### New: `docs/RELEASE_CHECKLIST.md` Section 10 - Rollback guidance
+
+Added a rollback section (app code via Vercel's built-in deployment
+history, migrations via forward-only reverting migrations plus a
+pre-deploy snapshot, seed idempotency caveats, Blob orphan-file safety,
+and session invalidation on a `SESSION_SECRET` rotation) - the one gap
+M12 identified in the otherwise-complete Stage L checklist.
+
+### M13 - new checks beyond prior stages' cleanup scans
+
+Specifically searched (not previously done as explicit, separate checks
+in any prior stage) for `dangerouslySetInnerHTML` (none in the
+codebase), unsafe/open redirects (only `middleware.ts` redirects,
+constructed from a server-side `ROLE_HOME` map and the request's own
+URL - never a client-supplied redirect target), and accidental
+debug/test routes under `app/` (none found). Re-ran the `TODO`/`FIXME`/
+`HACK` and hardcoded-demo-credential scans from Stage L - the one
+`TODO` match is a comment describing the `TODO` planner task-status enum
+value, not a real placeholder; demo passwords appear only in the two
+already-reviewed, intentional files (`lib/auth/users.ts`,
+`prisma/seed.ts`).
+
+### Verification
+
+```
+Prisma validate:  PASS
+Prisma generate:  PASS
+TypeScript:       PASS (npx tsc --noEmit, re-run after the exams.ts fix)
+Lint:              PASS (no findings)
+Build:             PASS (all 33 routes)
+Client-bundle secret scan: PASS - SESSION_SECRET, DIRECT_URL,
+                   BLOB_READ_WRITE_TOKEN, GEMINI_API_KEY, OPENAI_API_KEY
+                   all absent from .next/static/chunks/; DATABASE_URL
+                   appears only as the already-reviewed instructional
+                   UI-copy string, never a value
+Migration/schema correspondence: PASS - byte-identical to fresh
+                   offline regeneration
+```
+
+Browser-verified end-to-end (fallback auth, no live database) across
+the full route matrix: unauthenticated `/dashboard` redirect,
+student login -> `/dashboard` (mock data) with every DB-backed section
+(`/ai-tutor`, `/results`, `/performance`, `/weak-areas`, `/strengths`)
+correctly showing `DatabaseUnavailable`, student blocked from
+`/teacher` (redirected home), teacher login -> `/teacher` (mock data)
+with `/teacher/exams` and `/teacher/worksheets` correctly showing
+`DatabaseUnavailable`, teacher blocked from `/admin` (redirected home),
+admin login -> `/admin` with the Users and Study Materials tabs
+rendering correctly (Users shows `DatabaseUnavailable`; Study Materials
+shows its upload form), admin blocked from `/teacher` (redirected
+home), and the unauthenticated `/register` landing page rendering all
+three registration paths.
+
+### Not executed (no live database, no Blob token, no AI provider key)
+
+Identical scope to Stage L's list - every live-infrastructure item in
+`docs/RELEASE_CHECKLIST.md` remains explicitly BLOCKED, not fabricated:
+real migration apply/seed run, real Blob upload/delete, real Gemini
+generation, real registration-to-login round trip against a database,
+real exam/worksheet grading persistence, real analytics computed from
+real rows. Nothing in Stage M pretended otherwise.
+
+### Final classification: READY FOR LIVE INFRASTRUCTURE VERIFICATION
+
+Every check performable without live credentials passes cleanly, one
+genuine (now-fixed) authorization gap was found and closed, and no other
+Stage K/L security behavior has regressed. The system is not, and
+cannot honestly be called, fully production-verified while
+`DATABASE_URL`/`BLOB_READ_WRITE_TOKEN`/an AI provider key remain unset -
+that verification requires the live test matrices in
+`docs/RELEASE_CHECKLIST.md` and cannot be performed in this environment.
