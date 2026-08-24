@@ -59,10 +59,13 @@ Same usernames/passwords either way - only *how* they're validated changes.
 Once a database is connected, the 7 demo accounts above are created by
 `npm run db:seed` (`prisma/seed.ts`) - bcrypt-hashed there, never
 hardcoded in a table an app server reads from. For actual production
-users beyond the demo set, the intended path is the Admin > Users screen
-(Stage C - not built yet); until then, accounts can be created directly
-via `npm run db:studio` or a script using `lib/auth/password.ts`'s
-`hashPassword()`.
+users beyond the demo set, accounts are created through the app itself:
+self-registration (`/register` - see below) creates a `PENDING` account
+that an admin approves via the Admin > Users screen
+(`components/admin/users-table.tsx`, backed by
+`lib/actions/user-management.ts` and `lib/actions/registration.ts`);
+until a database is connected, neither has anything to read/write and
+falls back to `DatabaseUnavailable`.
 
 ## Status
 
@@ -77,5 +80,6 @@ via `npm run db:studio` or a script using `lib/auth/password.ts`'s
   (`lib/auth/users.ts`) and running `npm run db:seed` for real. Both are
   written and type-checked against the generated Prisma client, but have
   not executed against a live Postgres instance - see `docs/DATABASE.md`.
-- **Not implemented:** NextAuth/OAuth/third-party auth providers, admin UI
-  for account creation (Stage C), account self-registration.
+- **Not implemented:** NextAuth/OAuth/third-party auth providers. Admin
+  user management and account self-registration/approval are implemented
+  (Stages C-F, hardened through Stage M) - see `docs/STEP_3_5.md`.

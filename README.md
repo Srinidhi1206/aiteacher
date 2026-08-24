@@ -15,7 +15,7 @@ Next.js frontend  →  lib/mock-data/* (typed sample data)  →  Demo auth / ses
 - Next.js 14 (App Router) + React + TypeScript
 - Tailwind CSS (indigo/violet + green/amber tokens, full dark mode)
 - `recharts` (charts), `framer-motion` (animation), `lucide-react` (icons), `next-themes` (dark mode)
-- `clsx` / `tailwind-merge` (class merging), `date-fns` (dates)
+- `clsx` / `tailwind-merge` (class merging)
 - Prisma 6.x + PostgreSQL — schema/tooling written (Stage A, see below), not yet connected or queried by any page
 
 ## Current status

@@ -454,3 +454,33 @@ file leaves the file orphaned (safe, just unused), never inaccessible.
 **Sessions:** rolling back `SESSION_SECRET` invalidates every existing
 session (all users are logged out) since old cookies were signed with a
 different secret - expected and safe, not a rollback bug.
+
+---
+
+## 11. Dependency & audit status (Stage N)
+
+`npm audit` reported 14 high-severity advisories as of Stage N. 3 were
+fully fixed via `npm audit fix` (non-breaking, applied): `brace-expansion`,
+`js-yaml`, `nanoid`. A 4th, `postcss`, was **partially** fixed the same
+way - the project's own top-level `postcss` (used by `postcss.config.js`/
+Tailwind) was bumped to `8.5.26` (past the vulnerable `<=8.5.22` range),
+but a second, nested copy at `node_modules/next/node_modules/postcss`
+(`8.4.31`, bundled and pinned by Next.js 14.2.35's own internal build
+tooling, never invoked by this project's own code) remains vulnerable
+and can only be updated by upgrading Next itself. The remaining
+advisories are intentionally **deferred**, not ignored - each requires a
+major-version upgrade that is out of scope for a routine audit pass and
+needs its own dedicated migration/testing effort:
+
+| Package | Advisory | Why deferred |
+|---|---|---|
+| `deepmerge-ts` (via `@prisma/config`) | stack exhaustion on recursive merges | Fix path resolves to `prisma@6.12.0` - a **downgrade** from the deliberately-pinned `6.19.3` (see `docs/DATABASE.md` "Stack"), not a real fix. Dev-tooling only (Prisma's own config loader), not reachable by any request this app serves. |
+| `glob` (via `eslint-config-next`) | CLI command injection via `-c`/`--cmd` | Requires `eslint-config-next@16.3.2` (major). Lint-only dev tooling; the vulnerable code path (the `glob` CLI's shell flag) is never invoked by this project's build/lint. |
+| `minimatch` (via `@typescript-eslint`) | ReDoS in pattern matching | Same `eslint-config-next` major bump as above. Dev-only (ESLint's own file matching). |
+| `next` | multiple DoS/XSS/SSRF/cache-poisoning advisories | Fix is `next@16.3.2` - a **two-major-version jump** from the pinned `14.2.35`. A framework upgrade of this size needs its own reviewed, tested stage, not a side effect of a dependency audit. |
+| `postcss` (nested copy inside `next`) | source-map/XSS advisories | The project's own top-level `postcss` is already patched (see above); only Next's internally-bundled copy remains, and resolves via the same `next` major bump. |
+
+Re-run `npm audit` after any future dependency change to confirm this
+list hasn't grown, and revisit it explicitly (as its own stage, with
+full regression testing) before treating the Next.js major-version
+upgrade as routine maintenance.
