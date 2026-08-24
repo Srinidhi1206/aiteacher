@@ -11,11 +11,16 @@ const intensityClasses = [
   "bg-success-700 dark:bg-success-500",
 ];
 
-export function Heatmap() {
+// `data` is optional so the pre-existing dashboard usage (no prop) keeps
+// its original mock behavior unchanged (Stage H doesn't touch the
+// dashboard's mock Heatmap widget - see docs/STEP_3_5.md "Stage H
+// detail"); /performance passes real data from getMyActivityHeatmap().
+export function Heatmap({ data }: { data?: HeatmapDay[] } = {}) {
+  const source = data ?? learningHeatmap;
   // Group into weeks (columns), 7 days each
   const weeks: HeatmapDay[][] = [];
-  for (let i = 0; i < learningHeatmap.length; i += 7) {
-    weeks.push(learningHeatmap.slice(i, i + 7));
+  for (let i = 0; i < source.length; i += 7) {
+    weeks.push(source.slice(i, i + 7));
   }
 
   return (

@@ -15,6 +15,7 @@ export const navItems: NavItem[] = [
   { label: "Practice Papers", href: "/practice-papers", icon: "FileText" },
   { label: "Performance", href: "/performance", icon: "TrendingUp" },
   { label: "Weak Areas", href: "/weak-areas", icon: "Target" },
+  { label: "Strengths", href: "/strengths", icon: "Award" },
   { label: "Achievements", href: "/achievements", icon: "Trophy" },
   { label: "Calendar", href: "/calendar", icon: "Calendar" },
   { label: "AI Tutor Chat", href: "/ai-tutor", icon: "MessageCircleQuestion" },

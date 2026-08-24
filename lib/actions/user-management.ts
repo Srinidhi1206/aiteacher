@@ -24,7 +24,7 @@ interface AdminActor {
 }
 
 /** Confirms the caller is an admin and returns their fresh (not session-cached) isSuperAdmin status. */
-async function requireAdminActor(): Promise<AdminActor> {
+export async function requireAdminActor(): Promise<AdminActor> {
   const session = await getCurrentSession();
   if (!session) throw new UnauthorizedError();
   if (session.role !== "admin") throw new ForbiddenError("Admin access required.");

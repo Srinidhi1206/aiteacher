@@ -17,22 +17,23 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { getCurrentSession } from "@/lib/auth/current-session";
-import { getTodayOverview } from "@/lib/actions/planner";
+import { getTodayOverview, getPlannerAnalytics } from "@/lib/actions/planner";
 import { getMyWeakAreas, getMyStrengths, getMyLearningPath } from "@/lib/actions/analytics";
 import { listExamsForStudent, listResultsForStudent } from "@/lib/actions/exams";
 import { RealPlannerTaskRow } from "./real-planner-task";
 import { GenerateLearningPathButton } from "./generate-learning-path-button";
 
 async function loadData() {
-  const [overview, weakAreas, strengths, learningPath, exams, results] = await Promise.all([
+  const [overview, plannerStats, weakAreas, strengths, learningPath, exams, results] = await Promise.all([
     getTodayOverview(),
+    getPlannerAnalytics(),
     getMyWeakAreas(),
     getMyStrengths(),
     getMyLearningPath(),
     listExamsForStudent(),
     listResultsForStudent(),
   ]);
-  return { overview, weakAreas, strengths, learningPath, exams, results };
+  return { overview, plannerStats, weakAreas, strengths, learningPath, exams, results };
 }
 
 export async function RealDataSection() {
@@ -57,9 +58,19 @@ export async function RealDataSection() {
       </Card>
     );
   }
-  const { overview, weakAreas, strengths, learningPath, exams, results } = data;
+  const { overview, plannerStats, weakAreas, strengths, learningPath, exams, results } = data;
 
   const upcomingExams = exams.filter((e) => e.submissions.length === 0).slice(0, 3);
+
+  // Learning-path analytics (H11): presentation-only aggregation over data
+  // already fetched above - no recomputation of the plan-generation logic
+  // itself (that stays entirely in lib/analytics/learning-path.ts).
+  const pathItems = learningPath?.items ?? [];
+  const pathCompleted = pathItems.filter((i) => i.completed).length;
+  const pathCompletionPct = pathItems.length > 0 ? Math.round((pathCompleted / pathItems.length) * 100) : null;
+  const pathRemaining = pathItems.length - pathCompleted;
+  const weakTopicsCovered = weakAreas.filter((w) => pathItems.some((i) => i.title.includes(w.topic.name))).length;
+  const nextItem = pathItems.find((i) => !i.completed) ?? null;
 
   return (
     <div className="space-y-6">
@@ -77,6 +88,16 @@ export async function RealDataSection() {
               <CalendarClock className="h-4 w-4 text-primary-500" /> Today&apos;s Planner
             </CardTitle>
           </CardHeader>
+          {plannerStats.today.total > 0 && (
+            <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-2 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
+              <span className="font-semibold text-gray-700 dark:text-gray-200">{plannerStats.today.completionPct}% today</span>
+              <span>{plannerStats.today.completed}/{plannerStats.today.total} done</span>
+              {plannerStats.today.skipped > 0 && <span>{plannerStats.today.skipped} skipped</span>}
+              <span className="ml-auto">
+                {plannerStats.week.completionPct != null ? `${plannerStats.week.completionPct}% this week` : "No tasks this week"}
+              </span>
+            </div>
+          )}
           <CardContent className="space-y-1">
             {overview.tasks.length === 0 && !overview.planItem && overview.dueWorksheets.length === 0 ? (
               <p className="py-4 text-center text-sm text-gray-400">Nothing planned for today yet.</p>
@@ -175,7 +196,25 @@ export async function RealDataSection() {
                 No learning path yet. Click &quot;Generate my learning path&quot; to build one from your weak areas and upcoming exams.
               </p>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+                  <span className="font-semibold text-gray-700 dark:text-gray-200">{pathCompletionPct}% complete</span>
+                  <span>{pathCompleted}/{pathItems.length} items done</span>
+                  <span>{pathRemaining} remaining</span>
+                  {weakAreas.length > 0 && (
+                    <span>
+                      {weakTopicsCovered}/{weakAreas.length} weak topics covered
+                    </span>
+                  )}
+                </div>
+                {nextItem && (
+                  <div className="flex items-center justify-between gap-2 rounded-xl bg-primary-50 px-2.5 py-2 text-xs dark:bg-primary-950/40">
+                    <span className="text-primary-800 dark:text-primary-300">
+                      <span className="font-semibold">Next up:</span> Day {nextItem.day} - {nextItem.title}
+                    </span>
+                  </div>
+                )}
+                <div className="space-y-2">
                 {learningPath.items.slice(0, 6).map((item) => (
                   <div key={item.id} className="flex items-center justify-between gap-2 rounded-xl border border-gray-100 p-2.5 text-sm dark:border-gray-800">
                     <div className="min-w-0">
@@ -193,6 +232,7 @@ export async function RealDataSection() {
                     </div>
                   </div>
                 ))}
+                </div>
               </div>
             )}
           </CardContent>

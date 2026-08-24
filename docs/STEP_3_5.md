@@ -22,7 +22,7 @@ stage is applied to `main`/production without an explicit go-ahead.
 | E | Progress + learning path + planner | **Complete.** Deterministic progress/weakness/strength engines (`lib/analytics/*`), learning path generation reusing `StudyPlan`, daily planner, all wired into the student dashboard with graceful "database not connected" fallback (not a crash) when unreachable. |
 | F | Registration + account approval | **Code complete, locally validated where possible, not yet connected.** Student/teacher/admin-request registration, `AccountStatus`/`RegistrationRequest` model, super-admin-gated approval workflow, suspend/reactivate, audit logging - see "Stage F detail" below. Same DB-connection blocker as Stages A/B: nothing here has executed against a live database. (Note: an earlier, unrelated "exam evaluation" item was previously tracked under the letter F; it was folded into Stage D and is documented there instead - this F is the registration/approval work described below.) |
 | G | AI tutor (provider abstraction + real provider wiring) | **Code complete, locally validated where possible, not yet connected.** Provider-agnostic abstraction (`lib/ai/*`), Gemini implementation, conversation persistence reusing `AIConversation`/`AIMessage`, `/ai-tutor` upgraded from a canned mock to a real (database-backed) tutor with graceful "no database"/"AI not configured" states - see "Stage G detail" below. No `DATABASE_URL` and no `GEMINI_API_KEY` exist yet, so no real generation has ever executed. |
-| H | Analytics (notifications, audit logs, dashboards) | Partially - AuditLog is written to on key admin/material actions; full admin Logs UI wiring and Notification generation not done. |
+| H | Analytics, reporting & performance | **Code complete, locally validated where possible, not yet connected.** Real student/teacher/admin analytics across `/performance`, `/weak-areas`, the new `/strengths`, `/teacher`, `/teacher/exams/[examId]`, and the admin dashboard - see "Stage H detail" below. No schema change. (Note: this letter was originally scoped as "notifications, audit logs, dashboards" in early planning; AuditLog writes and admin Logs/Notification UI wiring remain as described below, unrelated to the analytics work done here.) |
 | I | Production hardening (validation, rate limiting, loading/error/empty states, a11y, mobile polish) | Partial - Zod validation and graceful empty/error states exist throughout Stage C/D/E; rate limiting and full a11y pass not done. |
 
 ## Stage A detail
@@ -839,3 +839,223 @@ infrastructure than the "don't overbuild" instruction calls for: instead,
 `npx tsc --noEmit` (which catches most structural/type errors across
 `lib/ai/*`) plus the browser checks above are the verification actually
 performed.
+
+## Stage H detail
+
+**Goal:** replace mock analytics with real, persisted-data reporting for
+students, teachers, and admins - without duplicating routes, without a
+second copy of the Stage E analytics engines, and without ever showing a
+number that isn't backed by an actual row in the database.
+
+**No Prisma schema changes.** Every requirement was met by reading the
+existing schema differently, not by adding to it - see the two specific
+decisions below (Bloom-level, activity heatmap) for why.
+
+### Routes changed (all reused, none duplicated)
+
+- **`/performance`** - fully converted from `lib/mock-data/performance.ts`/
+  `progress.ts` to real data. Now an async Server Component (matching
+  `components/dashboard/real-data-section.tsx`'s established pattern),
+  wrapped in the same try/catch -> `DatabaseUnavailable` shape as every
+  other Stage C-G real page.
+- **`/weak-areas`** - converted from `lib/mock-data/weak-areas.ts` to the
+  real `getMyWeakAreas()`. Same route, same visual structure, real data.
+- **`/strengths`** - **new route**, because no real strengths page existed
+  (the dashboard's Strengths card only ever showed a top-4 summary). Mirrors
+  `/weak-areas`'s structure/visual language exactly. Added to
+  `middleware.ts`'s `STUDENT_PATHS` and `lib/nav.ts`.
+- **`/results`** - already fully real from Stage D (`listResultsForStudent()`,
+  proper empty/pending-review/`DatabaseUnavailable` states). **Not
+  touched** - re-verified it already satisfies every H1 requirement rather
+  than duplicating its query logic.
+- **`/dashboard`** - untouched at the route level; its existing mock
+  widgets are still mock (Stage H doesn't touch them). Only
+  `components/dashboard/real-data-section.tsx`'s already-real Today's
+  Planner and Learning Path cards gained analytics (completion %, weekly
+  %, weak-topic coverage, "next up") - presentation-only additions over
+  data the section already fetched, per the "don't recompute
+  learning-path logic in the UI" instruction.
+- **`/teacher`** - untouched mock cards (`ClassSubjectSelector`,
+  `CreateClassCard`, `CreateExamsCard`, `UploadMaterialCard`,
+  `GradeSubmissionsCard`) all still present and working exactly as
+  before. A new, clearly-labeled "Real class analytics" section was added
+  below them (`components/teacher/real-class-analytics.tsx`), with its
+  own class/subject selector scoped to the teacher's actual
+  `TeacherAssignment` rows - separate from the pre-existing mock
+  `ClassSubjectSelector`, which still drives the other mock cards
+  unchanged.
+- **`/teacher/exams/[examId]`** - one new card
+  (`ExamQuestionAnalytics`) added between the existing `QuestionBuilder`
+  and `SubmissionsList`, only rendered once the exam is no longer a
+  draft. Nothing else on this page was changed.
+- **Admin `/admin` -> Dashboard tab** - `PlatformAnalytics` converted from
+  `lib/mock-data/admin.ts` to real aggregate counts. Same tab, same
+  component name, real data.
+
+### Server actions / query modules added
+
+- **`lib/actions/analytics.ts`** gained `getMyOverallPerformance()`,
+  `getMyBloomPerformance()`, `getMyActivityHeatmap()` - all behind the
+  file's existing `requireOwnStudentId()`, unchanged.
+- **`lib/actions/planner.ts`** gained `getPlannerAnalytics()` (today's and
+  a rolling-7-day "week" completion/skipped/remaining breakdown), behind
+  the file's existing `requireOwnStudent()`.
+- **`lib/actions/teacher-analytics.ts`** (new file) -
+  `getClassOverview`, `getStudentPerformanceTable`,
+  `getClassTopicDifficulty`. All three call `requireOwnedAssignment`
+  (exported from `lib/actions/exams.ts`, reused rather than duplicated) -
+  the exact same "does this teacher actually have a `TeacherAssignment`
+  for this class+subject" check that exam creation already used. Every
+  query is additionally filtered by `teacherId` when reading `Exam`/
+  `ExamSubmission` rows, so even two teachers legitimately assigned to
+  the same class/subject only ever see analytics for exams *they*
+  created.
+- **`lib/actions/exams.ts`** gained `getExamQuestionAnalytics(examId)`,
+  behind the existing `requireOwnedExam` (also newly exported, for the
+  same reuse-not-duplicate reason). `requireOwnedAssignment` was also
+  exported from this file for `teacher-analytics.ts` to import.
+- **`lib/actions/admin-analytics.ts`** (new file) - `getPlatformAnalytics()`,
+  behind `requireAdminActor` (exported from `lib/actions/user-management.ts`,
+  reused). Returns aggregate counts only - `.count()` per metric via
+  `Promise.all`, never a full-table `findMany`, never an individual
+  student/user record.
+
+### Authorization model (re-verified per function, not just by middleware)
+
+- **Student**: every one of the three new `lib/actions/analytics.ts`
+  functions and `getPlannerAnalytics()` starts with the file's existing
+  `requireOwnStudentId()`/`requireOwnStudent()` - session -> role check ->
+  that user's own `Student` row. There is no parameter anywhere in these
+  functions that accepts a student id from the caller.
+- **Teacher**: `getClassOverview`/`getStudentPerformanceTable`/
+  `getClassTopicDifficulty` all take a `schoolClassId`/`subjectId` *as
+  UI filters*, but the very first line of each is
+  `requireOwnedAssignment(schoolClassId, subjectId)`, which re-derives
+  the teacher from the session and throws `ForbiddenError` unless a
+  matching `TeacherAssignment` row exists for that exact teacher. A
+  teacher cannot pass another teacher's class/subject pair and see
+  data - the assignment check fails, nothing is returned.
+  `getExamQuestionAnalytics(examId)` uses `requireOwnedExam`, which
+  additionally checks `exam.teacher.userId === session.id` - a teacher
+  cannot view analytics for an exam they don't own even if it's for a
+  class/subject they're otherwise assigned to.
+- **Admin**: `getPlatformAnalytics()` calls `requireAdminActor()`, the
+  same check `lib/actions/user-management.ts`'s approve/reject/suspend
+  actions already use (any authenticated admin - platform analytics
+  isn't super-admin-gated, matching the read-only "viewing isn't
+  privileged the way mutating it is" reasoning already documented for
+  `listUsersForAdmin` in Stage F). No student/user record is returned,
+  only counts.
+- **Middleware is still not the only line of defense.** Every function
+  above performs its own authorization independent of
+  `middleware.ts`'s route gate - a direct server-action call bypassing
+  the UI hits the exact same checks a page load would.
+
+### Bloom-level derivation (H6)
+
+`ExamQuestion` has no Bloom field. `Topic.bloomLevel` does (a single
+classification per topic - curriculum design metadata, not per-answer).
+`getMyBloomPerformance()` joins `ExamAnswer -> ExamQuestion.topicId ->
+Topic.bloomLevel` and buckets marks by the topic's classification. The
+`/performance` UI labels this card **"Performance by Topic Bloom
+Level"** and its description explicitly says this comes from "each
+answered question's topic classification... not an individually-classified
+question" - it would be misleading to present this as per-question Bloom
+tagging when the schema doesn't have that. Only the real enum values
+(`REMEMBER`/`UNDERSTAND`/`APPLY`/`ANALYZE`) are used - `EVALUATE`/`CREATE`
+were never invented. `getExamQuestionAnalytics` (teacher side) surfaces the
+same `topic.bloomLevel` per question, when a topic is tagged, for the same
+honest reason.
+
+### Activity heatmap derivation (H5)
+
+No activity-log model was added. `getMyActivityHeatmap()` derives daily
+activity entirely from three already-persisted, timestamped sources:
+`ExamSubmission.submittedAt`, `WorksheetSubmission.submittedAt`, and
+`DailyPlannerTask` rows with `status = COMPLETED` (by `date`). Each real
+event bumps that calendar day's count (capped at 4, matching the existing
+`Heatmap` component's 5-level intensity scale); a day with zero matching
+events is a real, honestly-computed 0, not a gap. The function returns
+every day in the 84-day (12-week) window plus a `hasAnyActivity` flag, so
+the UI can show "No activity recorded in the last 12 weeks" without
+hiding the (accurately empty) grid.
+
+`components/charts/heatmap.tsx` got one change: its `data` prop is now
+**optional**. `/dashboard`'s pre-existing usage (`<Heatmap />`, no prop)
+is completely unchanged - it still renders the original
+`lib/mock-data/progress.ts` mock data, exactly as before Stage H.
+`/performance` is the only caller that passes real `data`. This was the
+deliberate way to "reuse/upgrade the existing heatmap component" (per the
+Stage H brief) without touching the dashboard's still-mock widget stack.
+
+### Date/time convention (H13)
+
+Every new date-bucketed query (`getMyActivityHeatmap`, `getPlannerAnalytics`)
+uses the exact same convention `lib/actions/planner.ts`'s pre-existing
+`getTodayOverview()` and `lib/analytics/learning-path.ts` already used:
+`new Date()` + `setHours(0, 0, 0, 0)` to get a server-local "start of
+day," with no timezone library and no UTC conversion. This was a
+deliberate consistency choice, not an oversight: introducing a
+timezone-aware "today" only for the new Stage H queries while every
+other date-sensitive feature in the app (today's planner, learning-path
+generation, exam due dates) keeps using server-local time would make
+different pages disagree about what day it is - worse than one
+consistent, documented limitation.
+
+**Known limitation:** date-bucketed analytics currently follow the
+application's existing server-local date convention (server-local, which
+is UTC on Vercel). A student in India (UTC+5:30) whose activity happens
+late at night IST could see it attributed to the following server-local
+calendar day. A dedicated timezone strategy (storing/deriving each
+student's local timezone) can be introduced later if required - this
+was judged out of scope for a reporting stage that inherits, rather than
+fixes, an existing app-wide convention.
+
+**Data-quality guards applied throughout:** every percentage calculation
+checks its denominator before dividing (`x > 0 ? Math.round(...) : null`,
+never a bare division that could produce `NaN`); a metric with zero
+underlying data returns `null`/an explicit empty state, never a
+misleading `0%`; every "insufficient data" case has distinct UI copy
+("Not enough graded activity yet", "No weak areas detected", "No
+submissions yet") rather than a generic zero.
+
+### Verified (real tests, no live database required)
+
+- `npx tsc --noEmit`, `npm run lint`, `npm run build` (with placeholder
+  `DATABASE_URL`/`DIRECT_URL` for the Prisma commands only - neither
+  needs a reachable database), `npx prisma validate`, `npx prisma
+  generate` all pass. No schema diff - `prisma validate`/`generate` ran
+  against the unchanged schema.
+- Full browser session via the Stage B fallback accounts, no live
+  database:
+  - Unauthenticated visitor hitting `/performance` is redirected to
+    `/login`.
+  - Student (fallback) reaches `/performance`, `/weak-areas`,
+    `/strengths`, `/results`, `/dashboard` - every one renders its
+    `DatabaseUnavailable` card cleanly, no blank page, no crash.
+  - Teacher (fallback) hitting `/strengths` (a student-only path) is
+    bounced to `/teacher`; `/teacher` itself renders with every
+    pre-existing mock card intact plus the new "Real class analytics"
+    section correctly showing its own `DatabaseUnavailable` state;
+    `/teacher/exams/<fake-id>` renders the pre-existing
+    `DatabaseUnavailable` fallback (confirms the new
+    `getExamQuestionAnalytics` call didn't break that page's existing
+    try/catch).
+  - Admin (fallback) hitting `/performance` or `/teacher` is bounced back
+    to `/admin`; `/admin`'s Dashboard tab renders the converted
+    `PlatformAnalytics` with its own `DatabaseUnavailable` state.
+
+### Not executed against a live database (code implemented, untested at
+runtime)
+
+Every actual aggregate query result (`.count()` values, average-score
+calculations, heatmap day buckets, topic-difficulty percentages,
+Bloom-level buckets) - the query shapes are verified by TypeScript
+against the real generated Prisma client (which catches most structural
+errors - wrong field names, wrong relation includes, wrong enum values),
+and the authorization logic is verified by code-level reasoning above,
+but no real row has ever been aggregated, because there is still no
+`DATABASE_URL`. No unit tests were added, for the same reason already
+documented for Stage G (no test runner exists in this repository yet;
+`npx tsc --noEmit` plus the browser checks above are the substitute, per
+the "don't overbuild" instruction).

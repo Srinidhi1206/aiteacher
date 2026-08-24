@@ -1,6 +1,6 @@
 "use client";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell } from "recharts";
-import { subjectPerformance } from "@/lib/mock-data/performance";
+import type { SubjectPerformanceRow } from "@/lib/types";
 
 const colorHex: Record<string, string> = {
   indigo: "#6366f1",
@@ -10,11 +10,11 @@ const colorHex: Record<string, string> = {
   amber: "#f59e0b",
 };
 
-export function SubjectPerformanceChart() {
+export function SubjectPerformanceChart({ data }: { data: SubjectPerformanceRow[] }) {
   return (
     <ResponsiveContainer width="100%" height={260}>
       <BarChart
-        data={subjectPerformance}
+        data={data}
         layout="vertical"
         margin={{ top: 8, right: 24, left: 8, bottom: 0 }}
         barCategoryGap={18}
@@ -27,12 +27,12 @@ export function SubjectPerformanceChart() {
           formatter={(value: number, name: string) => [`${value}%`, name === "completion" ? "Completion" : "Avg Score"]}
         />
         <Bar dataKey="completion" radius={[0, 8, 8, 0]} maxBarSize={16}>
-          {subjectPerformance.map((s, i) => (
+          {data.map((s, i) => (
             <Cell key={i} fill={colorHex[s.color] ?? "#6366f1"} fillOpacity={0.35} />
           ))}
         </Bar>
         <Bar dataKey="averageScore" radius={[0, 8, 8, 0]} maxBarSize={16}>
-          {subjectPerformance.map((s, i) => (
+          {data.map((s, i) => (
             <Cell key={i} fill={colorHex[s.color] ?? "#6366f1"} />
           ))}
         </Bar>

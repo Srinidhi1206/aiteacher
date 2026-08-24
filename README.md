@@ -113,7 +113,7 @@ app/
   api/auth/                login/logout route handlers (session cookie)
   (app)/                   authenticated shell (sidebar + topbar), gated by middleware.ts
     dashboard/ subjects/ study-plan/ assignments/ practice-papers/
-    performance/ weak-areas/ achievements/ calendar/ ai-tutor/ settings/
+    performance/ weak-areas/ strengths/ achievements/ calendar/ ai-tutor/ settings/
     parent/ teacher/ admin/
 middleware.ts              session check + role-based route protection
 components/
@@ -164,7 +164,7 @@ Steps 3-5 are underway as nine reviewed stages (A-I) — see [`docs/STEP_3_5.md`
 
 - **Step 3 — Backend + Database + Persistent Data.** Stages A-F (database schema, real auth, study materials, exam creation/taking/grading, progress/learning-path engines, registration + account approval) are all code-complete and type-checked against the real Prisma client, but none has ever executed against a live database — see [`docs/STEP_3_5.md`](docs/STEP_3_5.md) for the stage-by-stage detail.
 - **Step 4 — Real AI / GenAI Tutor + Evaluation.** Stage G is code-complete, not yet connected — provider-agnostic abstraction (`lib/ai/*`), Gemini as the first real provider, conversation persistence, and a real `/ai-tutor` UI. See [`docs/STEP_3_5.md`](docs/STEP_3_5.md#stage-g-detail).
-- **Step 5 — Production User Management + Advanced Learning Features.** Stages H-I — real auth provider, notifications/audit logs, production hardening (validation, rate limiting, loading/error/empty states). Not started.
+- **Step 5 — Production User Management + Advanced Learning Features.** Stage H (analytics, reporting & performance) is code-complete, not yet connected — real student/teacher/admin analytics across `/performance`, `/weak-areas`, the new `/strengths`, `/teacher`, `/teacher/exams/[examId]`, and the admin dashboard, with no schema changes. See [`docs/STEP_3_5.md`](docs/STEP_3_5.md#stage-h-detail). Stage I (real auth provider, notifications/audit-log UI, production hardening) not started.
 
 ## Known gaps in the mocked UI
 

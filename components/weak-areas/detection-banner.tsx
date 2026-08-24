@@ -1,6 +1,9 @@
 import { Sparkles } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 
+// Stage H: copy corrected to describe the actual deterministic algorithm
+// (lib/analytics/weakness.ts) - this is arithmetic over real graded
+// answers, not an AI/ML detection process.
 export function DetectionBanner() {
   return (
     <Card className="border-primary-100 bg-primary-50/60 dark:border-primary-900 dark:bg-primary-950/30">
@@ -9,12 +12,12 @@ export function DetectionBanner() {
           <Sparkles className="h-5 w-5" />
         </div>
         <div>
-          <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">How we detect weak areas</p>
+          <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">How weak areas are calculated</p>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            A topic is flagged weak when mastery drops below 50%, you get 2 or more wrong answers in a row on it, or
-            it hasn&apos;t been revisited in 14+ days. We combine practice paper attempts, lesson quiz results, and
-            time-since-last-review to compute the reason shown on each card below - so this list updates automatically
-            as you keep practicing.
+            A topic is flagged as weak when your average mastery on it drops below 50%, based on at least 2 graded
+            exam answers tagged to that topic - never off a single question. This is a deterministic calculation
+            over your real graded answers (not an AI judgment), and updates automatically every time a new exam is
+            graded.
           </p>
         </div>
       </CardContent>

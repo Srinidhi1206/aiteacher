@@ -4,8 +4,7 @@ import { CreateClassCard } from "@/components/teacher/create-class-card";
 import { UploadMaterialCard } from "@/components/teacher/upload-material-card";
 import { CreateExamsCard } from "@/components/teacher/create-exams-card";
 import { GradeSubmissionsCard } from "@/components/teacher/grade-submissions-card";
-import { StudentAnalyticsTable } from "@/components/teacher/student-analytics-table";
-import { ClassWeakConceptsCard } from "@/components/teacher/class-weak-concepts-card";
+import { RealClassAnalytics } from "@/components/teacher/real-class-analytics";
 
 export default function TeacherDashboardPage() {
   return (
@@ -16,14 +15,17 @@ export default function TeacherDashboardPage() {
         <CreateClassCard />
         <CreateExamsCard />
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <UploadMaterialCard />
-          <ClassWeakConceptsCard />
-        </div>
+        <UploadMaterialCard />
 
         <GradeSubmissionsCard />
 
-        <StudentAnalyticsTable />
+        <div className="flex items-center gap-2">
+          <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Real class analytics (your own exams &amp; assignments)</p>
+          <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+        </div>
+
+        <RealClassAnalytics />
       </main>
     </>
   );

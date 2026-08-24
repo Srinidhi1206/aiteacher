@@ -15,6 +15,7 @@ const STUDENT_PATHS = [
   "/practice-papers",
   "/performance",
   "/weak-areas",
+  "/strengths",
   "/achievements",
   "/calendar",
   "/ai-tutor",

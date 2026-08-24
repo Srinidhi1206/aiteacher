@@ -40,7 +40,7 @@ const examInputSchema = z.object({
   instructions: z.string().trim().max(4000).optional(),
 });
 
-async function requireOwnedAssignment(schoolClassId: string, subjectId: string) {
+export async function requireOwnedAssignment(schoolClassId: string, subjectId: string) {
   const session = await requireRole("teacher");
   const teacher = await prisma.teacher.findUnique({ where: { userId: session.id } });
   if (!teacher) throw new ForbiddenError("Teacher profile not found.");
@@ -257,6 +257,78 @@ export async function listExamsForTeacher() {
     where: { teacherId: teacher.id },
     include: { schoolClass: true, subject: true, questions: true, submissions: true },
     orderBy: { createdAt: "desc" },
+  });
+}
+
+export interface ExamQuestionAnalyticsRow {
+  questionId: string;
+  order: number;
+  prompt: string;
+  type: string;
+  marks: number;
+  topicName: string | null;
+  bloomLevel: string | null;
+  attempts: number;
+  correctCount: number;
+  incorrectCount: number;
+  unansweredCount: number;
+  accuracyPct: number | null; // only meaningful for auto-graded MCQ/TRUE_FALSE
+  averageMarksAwarded: number | null;
+  difficulty: "Easy" | "Medium" | "Hard" | null; // null = not enough data
+}
+
+const MIN_ATTEMPTS_FOR_DIFFICULTY = 3;
+
+/** Per-question aggregate analytics for one of the teacher's own exams (Stage H). Never trusts client-submitted correctness - always recomputed from real ExamAnswer rows. */
+export async function getExamQuestionAnalytics(examId: string): Promise<ExamQuestionAnalyticsRow[]> {
+  const { exam } = await requireOwnedExam(examId);
+
+  const [questions, totalSubmissions] = await Promise.all([
+    prisma.examQuestion.findMany({
+      where: { examId: exam.id },
+      include: { topic: { select: { name: true, bloomLevel: true } } },
+      orderBy: { order: "asc" },
+    }),
+    prisma.examSubmission.count({ where: { examId: exam.id, status: { in: ["SUBMITTED", "GRADED"] } } }),
+  ]);
+
+  const answers = await prisma.examAnswer.findMany({
+    where: { question: { examId: exam.id } },
+    select: { questionId: true, isCorrect: true, marksAwarded: true },
+  });
+
+  return questions.map((q) => {
+    const qAnswers = answers.filter((a) => a.questionId === q.id);
+    const correctCount = qAnswers.filter((a) => a.isCorrect === true).length;
+    const incorrectCount = qAnswers.filter((a) => a.isCorrect === false).length;
+    const gradedForMarks = qAnswers.filter((a) => a.marksAwarded != null);
+    const attempts = qAnswers.length;
+    const accuracyPct = correctCount + incorrectCount > 0 ? Math.round((correctCount / (correctCount + incorrectCount)) * 100) : null;
+    const averageMarksAwarded =
+      gradedForMarks.length > 0 ? Math.round((gradedForMarks.reduce((sum, a) => sum + (a.marksAwarded ?? 0), 0) / gradedForMarks.length) * 10) / 10 : null;
+
+    const difficultyBasisPct = accuracyPct ?? (averageMarksAwarded != null ? Math.round((averageMarksAwarded / q.marks) * 100) : null);
+    let difficulty: ExamQuestionAnalyticsRow["difficulty"] = null;
+    if (attempts >= MIN_ATTEMPTS_FOR_DIFFICULTY && difficultyBasisPct != null) {
+      difficulty = difficultyBasisPct < 40 ? "Hard" : difficultyBasisPct < 70 ? "Medium" : "Easy";
+    }
+
+    return {
+      questionId: q.id,
+      order: q.order,
+      prompt: q.prompt,
+      type: q.type,
+      marks: q.marks,
+      topicName: q.topic?.name ?? null,
+      bloomLevel: q.topic?.bloomLevel ?? null,
+      attempts,
+      correctCount,
+      incorrectCount,
+      unansweredCount: Math.max(0, totalSubmissions - attempts),
+      accuracyPct,
+      averageMarksAwarded,
+      difficulty,
+    };
   });
 }
 

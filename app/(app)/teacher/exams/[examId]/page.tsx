@@ -3,18 +3,21 @@ import { ArrowLeft } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { getExamForTeacher, listSubmissionsForExam } from "@/lib/actions/exams";
+import { getExamForTeacher, listSubmissionsForExam, getExamQuestionAnalytics } from "@/lib/actions/exams";
 import { QuestionBuilder } from "@/components/teacher/question-builder";
 import { PublishExamControls } from "@/components/teacher/publish-exam-controls";
 import { SubmissionsList } from "@/components/teacher/submissions-list";
+import { ExamQuestionAnalytics } from "@/components/teacher/exam-question-analytics";
 import { DatabaseUnavailable } from "@/components/database-unavailable";
 
 export default async function TeacherExamDetailPage({ params }: { params: { examId: string } }) {
   let exam: Awaited<ReturnType<typeof getExamForTeacher>>;
   let submissions: Awaited<ReturnType<typeof listSubmissionsForExam>>;
+  let questionAnalytics: Awaited<ReturnType<typeof getExamQuestionAnalytics>>;
   try {
     exam = await getExamForTeacher(params.examId);
     submissions = exam ? await listSubmissionsForExam(exam.id) : [];
+    questionAnalytics = exam ? await getExamQuestionAnalytics(exam.id) : [];
   } catch {
     return (
       <>
@@ -58,6 +61,8 @@ export default async function TeacherExamDetailPage({ params }: { params: { exam
         </Card>
 
         <QuestionBuilder examId={exam.id} questions={exam.questions} isDraft={exam.status === "DRAFT"} />
+
+        {exam.status !== "DRAFT" && <ExamQuestionAnalytics questions={questionAnalytics} />}
 
         <SubmissionsList examId={exam.id} submissions={submissions} />
       </main>

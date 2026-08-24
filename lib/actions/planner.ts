@@ -113,3 +113,57 @@ export async function getTodayOverview() {
 
   return { tasks, planItem, dueWorksheets, upcomingExams };
 }
+
+export interface PlannerAnalyticsBucket {
+  total: number;
+  completed: number;
+  skipped: number;
+  remaining: number; // TODO + IN_PROGRESS
+  completionPct: number | null; // null when there are no tasks in the window at all
+}
+
+/**
+ * Real completion stats for the Daily Planner (Stage H). "Today" and "this
+ * week" both use the same server-local date convention as
+ * getTodayOverview() above (new Date() + setHours(0,0,0,0)) - see
+ * docs/STEP_3_5.md's Stage H date-convention note. "This week" is a
+ * rolling 7-day window ending today (today - 6 days .. today), not a
+ * Monday-Sunday calendar week - simpler and avoids a week-boundary edge
+ * case with no real benefit here.
+ */
+export async function getPlannerAnalytics(): Promise<{ today: PlannerAnalyticsBucket; week: PlannerAnalyticsBucket }> {
+  const student = await requireOwnStudent();
+
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const endOfToday = new Date(startOfToday);
+  endOfToday.setDate(endOfToday.getDate() + 1);
+  const startOfWeek = new Date(startOfToday);
+  startOfWeek.setDate(startOfWeek.getDate() - 6);
+
+  const [todayTasks, weekTasks] = await Promise.all([
+    prisma.dailyPlannerTask.findMany({
+      where: { studentId: student.id, date: { gte: startOfToday, lt: endOfToday } },
+      select: { status: true },
+    }),
+    prisma.dailyPlannerTask.findMany({
+      where: { studentId: student.id, date: { gte: startOfWeek, lt: endOfToday } },
+      select: { status: true },
+    }),
+  ]);
+
+  function bucket(tasks: { status: PlannerTaskStatus }[]): PlannerAnalyticsBucket {
+    const completed = tasks.filter((t) => t.status === "COMPLETED").length;
+    const skipped = tasks.filter((t) => t.status === "SKIPPED").length;
+    const remaining = tasks.length - completed - skipped;
+    return {
+      total: tasks.length,
+      completed,
+      skipped,
+      remaining,
+      completionPct: tasks.length > 0 ? Math.round((completed / tasks.length) * 100) : null,
+    };
+  }
+
+  return { today: bucket(todayTasks), week: bucket(weekTasks) };
+}

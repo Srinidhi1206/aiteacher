@@ -209,7 +209,54 @@ no duplicate page.
   with a built-in fallback constant per template so a missing database or
   row can never break the tutor.
 
-## 5. Known Gaps in This Build
+## 5. Analytics & Reporting (Stage H, see `docs/STEP_3_5.md` "Stage H detail" for the full writeup)
+
+Real analytics for all three roles, layered strictly on top of the Stage
+E engines (`lib/analytics/progress.ts`/`weakness.ts`/`strengths.ts`/
+`learning-path.ts`) rather than a second calculation layer - every
+number shown is either read directly from a persisted
+`Student*Progress`/`WeaknessProfile`/`StrengthProfile` row, or a
+lightweight aggregate computed in a `lib/actions/*` query module (never
+inside a React component).
+
+- **Student analytics flow:** `/performance`, `/weak-areas`, `/strengths`
+  are all async Server Components that call `lib/actions/analytics.ts`
+  (student identity always re-derived from the session, never from a
+  route param) and render real data through the same chart/card
+  components the Step 1/2 mock pages already used - `StatGrid`/`StatCard`,
+  `SkillRadarChart`, `SubjectPerformanceChart`, `BloomProgressAllChart`,
+  `Heatmap` all became prop-driven rather than being rebuilt.
+- **Teacher authorization flow:** `lib/actions/teacher-analytics.ts`'s
+  three functions (class overview, student table, topic difficulty) all
+  gate through `requireOwnedAssignment` (`lib/actions/exams.ts`) - the
+  same "does a `TeacherAssignment` row actually exist for this
+  teacher+class+subject" check exam creation already relied on. Reading
+  an exam's aggregate stats additionally filters by `teacherId`, so a
+  class/subject shared across two teachers never leaks one teacher's
+  exam data to the other.
+- **Admin aggregate analytics:** `lib/actions/admin-analytics.ts`'s
+  `getPlatformAnalytics()` is intentionally count-only - `Promise.all` of
+  ~25 `.count()`/`.count({where})` calls, never a `findMany` that loads
+  individual student/user rows into memory. Gated by the existing
+  `requireAdminActor()` (Stage F), reused rather than duplicated.
+- **AI/analytics separation:** analytics never calls the AI provider, and
+  the AI Tutor never computes analytics - the only coupling is
+  presentational, "Ask Tutor" links that pass a real `topicId` (weak
+  areas, strengths) or a plain-text prefill (learning path, which has no
+  `topicId` in its schema) into `/ai-tutor`'s existing query-param
+  handling from Stage G. The tutor's own context builder
+  (`lib/ai/context.ts`) still does its own independent, re-scoped lookup
+  of that student's weak areas/mastery - it does not trust or reuse
+  whatever the analytics page happened to compute.
+- **Data sources for activity/Bloom analytics** (no schema change):
+  activity heatmap = `ExamSubmission.submittedAt` +
+  `WorksheetSubmission.submittedAt` + completed `DailyPlannerTask.date`,
+  bucketed into real (possibly zero) daily counts. Bloom-level
+  performance = `ExamAnswer -> ExamQuestion.topicId -> Topic.bloomLevel`,
+  labeled in the UI as topic-level classification since no question-level
+  Bloom field exists in the schema.
+
+## 6. Known Gaps in This Build
 
 - Authentication (Stage B, see `docs/STEP_3_5.md`) has a real,
   bcrypt-backed database path (`lib/auth/users.ts` -> `prisma.user`), used
@@ -232,6 +279,13 @@ no duplicate page.
   a second super admin. This is database-only, same as Stage B: the
   fallback demo accounts have no concept of `AccountStatus` and are
   unaffected.
+- Analytics/reporting (Stage H, see `docs/STEP_3_5.md`) date-bucketed
+  metrics (activity heatmap, planner completion %) use the same
+  server-local date convention as the rest of the app (`new Date()` +
+  `setHours(0,0,0,0)`, no timezone library) - a student in a timezone
+  ahead of the server's clock could see late-night activity attributed to
+  the next server-local day. Documented, not fixed, in this stage - see
+  the Stage H date-convention note.
 - No persistence across page reloads for most interactions (toasts, toggled
   checkboxes, generated exam plans, uploaded materials, entered marks,
   scheduled exams) beyond the current session - by design, since there is
