@@ -350,6 +350,27 @@ pass - a registration duplicate-account race condition and an unvalidated
 worksheet-grading score input - are also fixed; see
 `docs/STEP_3_5.md` "Stage K detail" for both.
 
+**Stage L - sessions now expire server-side, not just client-side.**
+The signed session token previously carried no timestamp at all -
+expiry was enforced only by the cookie's own `maxAge`, which the
+*server* never actually checked, so a validly-signed token would be
+accepted regardless of age. `signSession()`/`verifySession()`
+(`lib/auth/session.ts`) now embed and check an `iat` (issued-at) claim
+against an exported `SESSION_MAX_AGE_SECONDS` constant - the same
+value the login route's cookie `maxAge` now reads from, rather than a
+second hardcoded number. Verified directly by forging a backdated token
+against the real exported functions (outside Next.js, via a throwaway
+script) and confirming it's rejected - not just typechecked. Stage L
+also added a production-only fail-closed guard to `prisma/seed.ts`:
+seeding is refused entirely under `NODE_ENV=production` unless every
+demo-account password override is set, since the seeded accounts
+include the bootstrap super admin. The exact, ordered procedure for
+turning all of this on against real infrastructure - along with every
+live test matrix Stage L was asked to design - now lives in
+`docs/RELEASE_CHECKLIST.md`, kept separate from this file and from
+`docs/STEP_3_5.md`'s narrative history because it's operational
+reference material, not architecture explanation.
+
 ## 7. Known Gaps in This Build
 
 - Authentication (Stage B, see `docs/STEP_3_5.md`) has a real,

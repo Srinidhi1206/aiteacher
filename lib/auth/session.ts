@@ -50,6 +50,22 @@ export interface SessionPayload {
   subjects?: string[];
 }
 
+// Internal wire format only - `iat` is added by signSession()/stripped
+// back off by verifySession() so every existing caller keeps working with
+// plain SessionPayload, unaware this exists.
+type SignedPayload = SessionPayload & { iat: number };
+
+// Stage L: kept as the single source of truth for how long a session may
+// live, both for the cookie's own `maxAge` (app/api/auth/login/route.ts)
+// and for the server-side expiry check below - previously only the
+// cookie's client-enforced maxAge existed, meaning the server would
+// accept a validly-signed token of any age forever. A token is unencrypted
+// but signed, so this doesn't defend against a stolen valid token being
+// used immediately - it bounds how long a *leaked* token stays useful,
+// consistent with the cookie's own stated lifetime rather than silently
+// exceeding it.
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // 7 days
+
 function toBase64Url(bytes: ArrayBuffer | Uint8Array): string {
   const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let str = "";
@@ -77,7 +93,8 @@ async function getKey() {
 
 export async function signSession(payload: SessionPayload): Promise<string> {
   const key = await getKey();
-  const json = JSON.stringify(payload);
+  const signed: SignedPayload = { ...payload, iat: Date.now() };
+  const json = JSON.stringify(signed);
   const payloadB64 = toBase64Url(new TextEncoder().encode(json));
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payloadB64));
   const sigB64 = toBase64Url(sig);
@@ -103,7 +120,19 @@ export async function verifySession(token: string | undefined | null): Promise<S
     );
     if (!valid) return null;
     const json = new TextDecoder().decode(fromBase64Url(payloadB64));
-    return JSON.parse(json) as SessionPayload;
+    const signed = JSON.parse(json) as Partial<SignedPayload>;
+
+    // Server-side expiry, independent of the cookie's own client-enforced
+    // maxAge (see SESSION_MAX_AGE_SECONDS above). Tokens signed before
+    // this field existed have no `iat` at all - treated as expired rather
+    // than trusted indefinitely, so this change can't accidentally grant
+    // an old token unbounded life.
+    if (typeof signed.iat !== "number" || Date.now() - signed.iat > SESSION_MAX_AGE_SECONDS * 1000) {
+      return null;
+    }
+
+    const { iat: _iat, ...payload } = signed;
+    return payload as SessionPayload;
   } catch {
     return null;
   }

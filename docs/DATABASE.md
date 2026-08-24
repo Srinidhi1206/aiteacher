@@ -18,7 +18,12 @@ turn the database on - that step hasn't happened yet. See
 `docs/STEP_3_5.md` for the full stage-by-stage breakdown of what's built
 on top of it.
 
-## Production authentication policy (Stage I, extended in Stage K)
+**See also `docs/RELEASE_CHECKLIST.md` (Stage L)** for the exact, ordered
+procedure to go from this document's setup steps to a fully-configured
+production environment, plus every live test that remains to be run once
+real credentials exist.
+
+## Production authentication policy (Stage I, extended in Stages K and L)
 
 Two things fail closed in production (`NODE_ENV=production`) rather than
 silently degrading:
@@ -60,7 +65,16 @@ itself, which cannot import Prisma on the Edge runtime, still lets a
 suspended user's browser render a page shell before that first server
 action runs).
 
-## Migration status (Stage I, re-confirmed unchanged in Stages J and K)
+**Stage L addition - "up to 7 days later" above is now actually
+enforced, not just claimed.** Previously the session token had no
+expiry claim at all - the server would accept a validly-signed token of
+any age, relying entirely on the cookie's own client-side `maxAge`.
+`lib/auth/session.ts` now embeds and checks an `iat` timestamp against
+an exported `SESSION_MAX_AGE_SECONDS`, verified directly by forging a
+backdated token and confirming rejection (see `docs/STEP_3_5.md`'s
+Stage L section).
+
+## Migration status (Stage I, re-confirmed unchanged in Stages J, K, and L)
 
 **No migration has ever been applied to a real database** - there is no
 database to apply it to. Stages J and K both re-checked this (`npx prisma
@@ -164,6 +178,16 @@ database** (Stage J re-audited `prisma/seed.ts` line-by-line and made no
 changes - see `docs/STEP_3_5.md` "Stage I detail" for the full audit
 checklist result). Running `npm run db:seed` requires a real
 `DIRECT_URL`, which doesn't exist in this environment.
+
+**Stage L addition:** the seed script now refuses to run at all under
+`NODE_ENV=production` unless every one of `ADMIN_PASSWORD`,
+`TEACHER_PASSWORD`, `STUDENT1_PASSWORD` .. `STUDENT5_PASSWORD` is set -
+without this, a production run would create real `ACTIVE` accounts
+(including the bootstrap super admin) with the fixed, publicly-documented
+default passwords below. See `docs/RELEASE_CHECKLIST.md` "Seed safety"
+for the full recommendation, and `npm run db:verify`
+(`scripts/verify-database.ts`) for a safe, read-only way to confirm a
+seed run succeeded without printing any account details.
 
 As of Stage B, `prisma/seed.ts` **does** create the 7 demo `User`/
 `Student`/`Teacher`/`Admin` rows, bcrypt-hashed, matching the same

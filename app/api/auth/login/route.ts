@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { findUser, AuthConfigurationError, type Role } from "@/lib/auth/users";
-import { signSession, SESSION_COOKIE } from "@/lib/auth/session";
+import { signSession, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS } from "@/lib/auth/session";
 
 const ROLE_HOME: Record<Role, string> = {
   admin: "/admin",
@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    maxAge: 60 * 60 * 24 * 7, // 7 days
+    maxAge: SESSION_MAX_AGE_SECONDS,
   });
   return res;
 }

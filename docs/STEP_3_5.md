@@ -26,6 +26,7 @@ stage is applied to `main`/production without an explicit go-ahead.
 | I | Production readiness & real data integration | **Code complete, locally/offline verified, not yet connected.** Offline-generated initial migration, production auth fail-closed hardening, real admin material upload UI, new `/teacher/worksheets` UI, focused authorization re-audit (no new issues beyond the two auth-fallback gaps fixed here) - see "Stage I detail" below. Zod validation and graceful empty/error states already existed throughout Stage C/D/E; rate limiting (AI Tutor only, Stage G) and a full a11y pass remain out of scope for this stage. |
 | J | Real infrastructure integration | **Attempted; blocked - no credentials available in this environment.** No `DATABASE_URL`, `DIRECT_URL`, `BLOB_READ_WRITE_TOKEN`, `SESSION_SECRET`, or AI provider key exists in `.env.local` or the process environment. Every live-infrastructure step (DB connection/migration apply/seed, real registration+approval, real material/Blob upload, real worksheet/exam pipelines, real analytics against real rows, real AI generation) requires credentials this environment does not have, and none was fabricated - see "Stage J detail" below for exactly what *was* re-verified (full local/offline suite + a browser regression pass, both clean, no code changes needed). |
 | K | Final production hardening, QA & release readiness | **Complete - three real findings fixed, verified locally/offline.** A focused code-level audit (not just re-reading prior stages) found and fixed a genuine "stale session after suspension" gap, a registration duplicate-account race condition, and an unvalidated worksheet-grading score input - see "Stage K detail" below. No schema change. Still not connected to live infrastructure (same blocker as Stages I/J). |
+| L | Final infrastructure integration readiness & release candidate | **Complete - one more real finding fixed, plus the full operational runbook for real infrastructure written.** Sessions had no server-side expiry at all (only the cookie's client-enforced `maxAge`) - fixed and directly verified against a forged, backdated token. A production-only seed guard was added (refuses to seed demo accounts, including the bootstrap super admin, in production unless every password override is set). New `docs/RELEASE_CHECKLIST.md` is the exact, ordered setup procedure plus every live test matrix required by this stage - none executed, since no live infrastructure exists here. See "Stage L detail" below. |
 
 ## Stage A detail
 
@@ -1600,3 +1601,152 @@ concurrent load; the worksheet-grading bounds check against a real
 submission; any other live-infrastructure item already listed as
 untested in Stages I/J. Nothing here was claimed as tested against live
 infrastructure.
+
+## Stage L detail
+
+**Goal:** prepare the repository for the moment real infrastructure
+credentials become available - a deterministic setup procedure, exact
+live test matrices, one final focused code audit, and a small safe
+verification script. Preflight confirmed the same infrastructure state
+as Stages I/J/K: no `DATABASE_URL`/`DIRECT_URL`/`BLOB_READ_WRITE_TOKEN`/
+`SESSION_SECRET`/AI provider key anywhere in `.env.local` or the process
+environment.
+
+### Finding (fixed) - sessions had no server-side expiry at all
+
+**Gap:** `lib/auth/session.ts`'s signed token carried no issued-at
+timestamp. Expiry was enforced only by the session cookie's own
+client-side `maxAge` (7 days) - the *server* would accept a validly-signed
+token of any age, forever, since `verifySession()` only ever checked the
+HMAC signature. This is distinct from (and in addition to) Stage K's
+stale-session-after-suspension fix: even a still-ACTIVE user's token
+never actually expired server-side.
+
+**Fix:** `signSession()` now embeds `iat: Date.now()` in the signed
+payload (an internal wire-format detail - the public `SessionPayload`
+type every existing caller uses is unchanged, since `verifySession()`
+strips `iat` back off before returning). `verifySession()` now rejects
+any token whose `iat` is missing or older than
+`SESSION_MAX_AGE_SECONDS` (a newly-exported constant, also now the
+single source of truth the login route's cookie `maxAge` reads from,
+replacing a previously-duplicated magic number). A token with no `iat`
+at all (e.g. one signed before this change existed) is treated as
+expired, not trusted indefinitely - this fix cannot accidentally grant
+an old token unbounded life.
+
+**Verified directly, not just typechecked:** a standalone script (run via
+`tsx`, outside Next.js, against the real exported `signSession`/
+`verifySession`/`SESSION_MAX_AGE_SECONDS`, then deleted) confirmed:
+
+```
+1. Fresh token verifies: PASS
+2. 8-day-old (backdated iat) token rejected: PASS
+3. Token with no iat field rejected: PASS
+4. Tampered signature rejected: PASS
+```
+
+Also confirmed via `npm run build` and a real login -> session ->
+`/dashboard` browser round-trip (fallback auth) that this change is
+fully non-regressive on the one path actually exercisable here.
+
+### Finding (fixed) - seed script could create a production super admin with a public password
+
+**Gap:** `prisma/seed.ts`'s demo accounts - including the bootstrap
+**super admin** - fall back to fixed, publicly-documented default
+passwords (`docs/DEMO_CREDENTIALS.md`) whenever their `*_PASSWORD` env
+var isn't set. Nothing prevented running `npm run db:seed` against a
+real production database without setting every override, which would
+create real `ACTIVE` accounts - including the most privileged account in
+the system - with a guessable, public password.
+
+**Fix:** the seed script now refuses to proceed at all when
+`NODE_ENV=production` unless all 7 `*_PASSWORD` overrides
+(`ADMIN_PASSWORD`, `TEACHER_PASSWORD`, `STUDENT1_PASSWORD` ..
+`STUDENT5_PASSWORD`) are set, throwing a clear error naming exactly
+which ones are missing. This mirrors the exact fail-closed pattern
+already established in Stage I (`SESSION_SECRET`/`DATABASE_URL`) -
+minimal, mechanical, and doesn't change what the seed creates in any
+other environment. Curriculum reference data (states/boards/classes/
+subjects/etc.) is unaffected by this guard and remains safe to seed
+anywhere.
+
+### New: `docs/RELEASE_CHECKLIST.md`
+
+A new, dedicated operational document - deliberately separate from this
+stage-by-stage history file, since it's reference material (an exact
+setup procedure and test matrices), not a narrative. Covers: the
+ordered production setup procedure (provision -> env vars -> migrate
+deploy -> seed -> verify -> Blob -> AI -> build -> deploy -> bootstrap
+super admin -> smoke test), migration release-safety re-verification,
+seed safety (including the new guard above), a full registration/
+approval live test matrix with expected results for every case, a
+storage/Blob verification checklist, an exam/worksheet end-to-end test
+plan, an analytics + AI test plan, a consolidated smoke-test matrix
+table, and a production failure-mode reference table. Every row is
+explicitly marked as executed or not - only the two session tests above
+and the pre-existing Stage I/K fallback-auth/cross-role checks are
+marked as actually run; everything requiring live infrastructure is
+marked "Not yet."
+
+### New: `scripts/verify-database.ts` (`npm run db:verify`)
+
+A small, deliberately **read-only** post-seed verification script - not
+a test framework, not introduced lightly (this repo has none and Stage L
+was explicitly told not to add a heavyweight one). It connects with the
+real `DATABASE_URL`, counts curriculum/account rows, and checks a
+handful of invariants (exactly one super admin, at least one state/
+board/class/subject seeded) - printing only counts and pass/fail lines,
+**never** a username, email, or password value. It refuses to run at all
+without `DATABASE_URL` set. Because it never writes, updates, or deletes
+anything, it carries no destructive risk and needed no non-production
+confirmation gate - a deliberate design choice (a script that *can't* be
+destructive, rather than one that's merely told not to be). Directly
+verified: running it with `DATABASE_URL` unset prints a clear refusal
+and exits non-zero, exactly as designed.
+
+### Final cleanup scan (L12) - no new findings
+
+Re-searched the entire codebase for `TODO`/`FIXME`, `console.log`,
+hardcoded credentials outside the known/reviewed locations, and
+`NEXT_PUBLIC_`-prefixed variables (the only mechanism by which Next.js
+would ever auto-inline an env var into a client bundle - none exist, so
+no app env var is even structurally eligible for client exposure).
+Two apparent hits from an automated grep for secret variable names in
+`"use client"` files were individually inspected and confirmed to be
+false positives: a code *comment* mentioning `"use client"` in
+`lib/prisma.ts`, and the same harmless `DATABASE_URL` instructional-text
+match already found and cleared in Stage K
+(`components/admin/study-materials-card.tsx`'s "Set `DATABASE_URL`..."
+help text). No code changes were needed from this pass.
+
+### Verification
+
+```
+Prisma validate:  PASS
+Prisma generate:  PASS
+TypeScript:       PASS (npx tsc --noEmit)
+Lint:              PASS (no findings)
+Build:             PASS (all routes)
+Client-bundle secret scan: PASS - DIRECT_URL, SESSION_SECRET,
+                   BLOB_READ_WRITE_TOKEN, GEMINI_API_KEY, OPENAI_API_KEY
+                   all absent from .next/static/chunks/; DATABASE_URL
+                   appears only as the already-reviewed instructional
+                   UI-copy string, never a value
+Session expiry:    PASS - direct standalone execution (see above)
+db:verify safety:  PASS - refuses to run without DATABASE_URL
+```
+
+Browser-verified (fallback auth, no live database): login -> session ->
+`/dashboard` round-trip confirms the new `iat`-based expiry check doesn't
+regress normal login; no other browser regression testing was repeated
+this stage beyond what Stage K already covered immediately before it
+(same code, no relevant changes since).
+
+### Not executed (no live database, no Blob token, no AI provider key)
+
+Every item in `docs/RELEASE_CHECKLIST.md` marked "Not yet" - the entire
+registration/approval live matrix, the storage/Blob checklist, the
+exam/worksheet end-to-end plan, the analytics/AI plan, and most of the
+smoke-test matrix. Only the two Stage L code-level fixes (session
+expiry, seed production guard) and the already-established fallback-auth/
+cross-role/config-fail-closed checks were actually executed.

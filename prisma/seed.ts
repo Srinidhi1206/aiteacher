@@ -307,6 +307,26 @@ async function main() {
   const mathSubjectId = subjectIds[CORE_SUBJECTS.findIndex((s) => s.slug === "mathematics")];
   const scienceSubjectId = subjectIds[CORE_SUBJECTS.findIndex((s) => s.slug === "science")];
 
+  // Stage L: the 7 demo accounts below (including the bootstrap SUPER
+  // ADMIN - the single most privileged account in the whole system) fall
+  // back to fixed, publicly-documented default passwords
+  // (docs/DEMO_CREDENTIALS.md) whenever their *_PASSWORD env var isn't
+  // set. That is intentional and safe for local/demo use, but running
+  // this seed against a real production database without overriding
+  // every one of them would create real, ACTIVE accounts - including a
+  // super admin - with a guessable, public password. Fail loud instead:
+  // refuse to proceed at all in production unless every override is set,
+  // rather than silently seeding some accounts with the insecure default.
+  const DEMO_PASSWORD_ENV_VARS = ["ADMIN_PASSWORD", "TEACHER_PASSWORD", "STUDENT1_PASSWORD", "STUDENT2_PASSWORD", "STUDENT3_PASSWORD", "STUDENT4_PASSWORD", "STUDENT5_PASSWORD"];
+  if (process.env.NODE_ENV === "production") {
+    const missing = DEMO_PASSWORD_ENV_VARS.filter((v) => !process.env[v]);
+    if (missing.length > 0) {
+      throw new Error(
+        `Refusing to seed demo accounts in production with default passwords. Set the following environment variables first, then re-run the seed: ${missing.join(", ")}. See docs/RELEASE_CHECKLIST.md.`
+      );
+    }
+  }
+
   console.log("Seeding demo admin account (bootstrapped as the protected super admin)...");
   const adminPassword = process.env.ADMIN_PASSWORD || "Admin@123";
   const adminUser = await prisma.user.upsert({
