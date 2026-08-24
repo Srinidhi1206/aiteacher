@@ -328,6 +328,28 @@ regression pass, not by fabricating a connection. See `docs/STEP_3_5.md`
 "Stage J detail" for the complete list of steps that could not be
 performed and exactly why.
 
+**Stage K - session freshness, not just session validity.** A real gap
+was found and fixed: `getCurrentSession()` (`lib/auth/current-session.ts`)
+previously only checked a session cookie's HMAC signature, never the
+account's live `AccountStatus` - meaning a suspended or rejected user's
+existing cookie kept working for up to 7 days regardless of the
+suspension. It now re-checks `User.status === "ACTIVE"` on every call, on
+the database-backed path only (a single indexed lookup, dynamically
+importing Prisma the same way `lib/auth/users.ts` already does, so the
+fallback/demo path - which has no `AccountStatus` concept - is
+unaffected). This lives in `getCurrentSession()` specifically because
+that's the one choke point every real (Node-runtime) data-touching
+operation passes through - `middleware.ts` itself stays database-free (it
+runs on the Edge runtime, which can't import Prisma in this project's
+configuration) and still only checks the cookie's signature, so a
+suspended user's browser can still render a protected page's shell
+before the first server action reveals the account is no longer active.
+That residual UX gap is accepted, not fixed - no real data is ever
+returned through it. Two smaller, unrelated findings from the same audit
+pass - a registration duplicate-account race condition and an unvalidated
+worksheet-grading score input - are also fixed; see
+`docs/STEP_3_5.md` "Stage K detail" for both.
+
 ## 7. Known Gaps in This Build
 
 - Authentication (Stage B, see `docs/STEP_3_5.md`) has a real,

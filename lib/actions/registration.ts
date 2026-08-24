@@ -16,7 +16,21 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { hashPassword } from "@/lib/auth/password";
 import type { ActionResult } from "./materials";
-import { GradeStage, Curriculum, Role, BoardType } from "@prisma/client";
+import { GradeStage, Curriculum, Role, BoardType, Prisma } from "@prisma/client";
+
+// Stage K: assertNoDuplicateAccount below is a check-then-create pattern,
+// not atomic - two concurrent registrations with the same username/email
+// could both pass that check before either row is created. The database's
+// own @unique constraints (User.username/email) still prevent an actual
+// duplicate row from ever existing, but without this, the *second*
+// concurrent request would surface as a raw, unhandled 500 instead of the
+// same friendly "already taken" message the earlier check already
+// produces for the (far more common) non-racing case. This is the safety
+// net for that narrow race window, not the primary defense.
+function isDuplicateAccountConstraintError(e: unknown): boolean {
+  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
+}
+const DUPLICATE_ACCOUNT_RACE_MESSAGE = "That username or email was just taken by another registration. Please try again with different details.";
 
 // Shared across all three registration forms.
 const PASSWORD_REGEX = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/; // >=8 chars, at least one letter and one digit
@@ -119,53 +133,58 @@ export async function registerStudent(input: unknown): Promise<ActionResult<{ us
 
   const passwordHash = await hashPassword(data.password);
 
-  const user = await prisma.$transaction(async (tx) => {
-    const newUser = await tx.user.create({
-      data: {
-        username: data.username,
-        email: data.email,
-        passwordHash,
-        name: data.name,
-        role: Role.STUDENT,
-        status: "PENDING",
-      },
-    });
-    await tx.student.create({
-      data: {
-        userId: newUser.id,
-        stateId: data.stateId,
-        boardId: data.boardId,
-        schoolClassId: data.schoolClassId,
-        schoolId: data.schoolId || null,
-        grade: schoolClass.label,
-        gradeStage: deriveGradeStage(schoolClass.grade),
-        curriculum: deriveCurriculum(board),
-      },
-    });
-    await tx.registrationRequest.create({
-      data: {
-        userId: newUser.id,
-        requestedRole: Role.STUDENT,
-        requestedDetails: {
-          dateOfBirth: data.dateOfBirth,
-          phone: data.phone,
-          guardianName: data.guardianName,
-          guardianPhone: data.guardianPhone,
+  try {
+    const user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          username: data.username,
+          email: data.email,
+          passwordHash,
+          name: data.name,
+          role: Role.STUDENT,
+          status: "PENDING",
         },
-      },
+      });
+      await tx.student.create({
+        data: {
+          userId: newUser.id,
+          stateId: data.stateId,
+          boardId: data.boardId,
+          schoolClassId: data.schoolClassId,
+          schoolId: data.schoolId || null,
+          grade: schoolClass.label,
+          gradeStage: deriveGradeStage(schoolClass.grade),
+          curriculum: deriveCurriculum(board),
+        },
+      });
+      await tx.registrationRequest.create({
+        data: {
+          userId: newUser.id,
+          requestedRole: Role.STUDENT,
+          requestedDetails: {
+            dateOfBirth: data.dateOfBirth,
+            phone: data.phone,
+            guardianName: data.guardianName,
+            guardianPhone: data.guardianPhone,
+          },
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId: newUser.id,
+          action: "REGISTRATION_SUBMITTED",
+          resource: `User:${newUser.id}`,
+          message: `Student registration submitted for "${data.username}"`,
+        },
+      });
+      return newUser;
     });
-    await tx.auditLog.create({
-      data: {
-        userId: newUser.id,
-        action: "REGISTRATION_SUBMITTED",
-        resource: `User:${newUser.id}`,
-        message: `Student registration submitted for "${data.username}"`,
-      },
-    });
-    return newUser;
-  });
 
-  return { ok: true, data: { userId: user.id } };
+    return { ok: true, data: { userId: user.id } };
+  } catch (e) {
+    if (isDuplicateAccountConstraintError(e)) return { ok: false, error: DUPLICATE_ACCOUNT_RACE_MESSAGE };
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -223,44 +242,49 @@ export async function registerTeacher(input: unknown): Promise<ActionResult<{ us
 
   const passwordHash = await hashPassword(data.password);
 
-  const user = await prisma.$transaction(async (tx) => {
-    const newUser = await tx.user.create({
-      data: {
-        username: data.username,
-        email: data.email,
-        passwordHash,
-        name: data.name,
-        role: Role.TEACHER,
-        status: "PENDING",
-      },
-    });
-    await tx.teacher.create({
-      data: { userId: newUser.id, schoolId: data.schoolId || null },
-    });
-    await tx.registrationRequest.create({
-      data: {
-        userId: newUser.id,
-        requestedRole: Role.TEACHER,
-        requestedDetails: {
-          phone: data.phone,
-          stateId: data.stateId,
-          boardId: data.boardId,
-          requestedAssignments: data.requestedAssignments,
+  try {
+    const user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          username: data.username,
+          email: data.email,
+          passwordHash,
+          name: data.name,
+          role: Role.TEACHER,
+          status: "PENDING",
         },
-      },
+      });
+      await tx.teacher.create({
+        data: { userId: newUser.id, schoolId: data.schoolId || null },
+      });
+      await tx.registrationRequest.create({
+        data: {
+          userId: newUser.id,
+          requestedRole: Role.TEACHER,
+          requestedDetails: {
+            phone: data.phone,
+            stateId: data.stateId,
+            boardId: data.boardId,
+            requestedAssignments: data.requestedAssignments,
+          },
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId: newUser.id,
+          action: "REGISTRATION_SUBMITTED",
+          resource: `User:${newUser.id}`,
+          message: `Teacher registration submitted for "${data.username}"`,
+        },
+      });
+      return newUser;
     });
-    await tx.auditLog.create({
-      data: {
-        userId: newUser.id,
-        action: "REGISTRATION_SUBMITTED",
-        resource: `User:${newUser.id}`,
-        message: `Teacher registration submitted for "${data.username}"`,
-      },
-    });
-    return newUser;
-  });
 
-  return { ok: true, data: { userId: user.id } };
+    return { ok: true, data: { userId: user.id } };
+  } catch (e) {
+    if (isDuplicateAccountConstraintError(e)) return { ok: false, error: DUPLICATE_ACCOUNT_RACE_MESSAGE };
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -286,37 +310,42 @@ export async function registerAdminRequest(input: unknown): Promise<ActionResult
 
   const passwordHash = await hashPassword(data.password);
 
-  const user = await prisma.$transaction(async (tx) => {
-    const newUser = await tx.user.create({
-      data: {
-        username: data.username,
-        email: data.email,
-        passwordHash,
-        name: data.name,
-        role: Role.ADMIN, // hardcoded - never from client input
-        status: "PENDING",
-      },
+  try {
+    const user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          username: data.username,
+          email: data.email,
+          passwordHash,
+          name: data.name,
+          role: Role.ADMIN, // hardcoded - never from client input
+          status: "PENDING",
+        },
+      });
+      await tx.admin.create({
+        data: { userId: newUser.id, isSuperAdmin: false }, // always false - no public path ever sets this true
+      });
+      await tx.registrationRequest.create({
+        data: {
+          userId: newUser.id,
+          requestedRole: Role.ADMIN,
+          requestedDetails: { phone: data.phone, reason: data.reason },
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId: newUser.id,
+          action: "REGISTRATION_SUBMITTED",
+          resource: `User:${newUser.id}`,
+          message: `Admin access requested by "${data.username}"`,
+        },
+      });
+      return newUser;
     });
-    await tx.admin.create({
-      data: { userId: newUser.id, isSuperAdmin: false }, // always false - no public path ever sets this true
-    });
-    await tx.registrationRequest.create({
-      data: {
-        userId: newUser.id,
-        requestedRole: Role.ADMIN,
-        requestedDetails: { phone: data.phone, reason: data.reason },
-      },
-    });
-    await tx.auditLog.create({
-      data: {
-        userId: newUser.id,
-        action: "REGISTRATION_SUBMITTED",
-        resource: `User:${newUser.id}`,
-        message: `Admin access requested by "${data.username}"`,
-      },
-    });
-    return newUser;
-  });
 
-  return { ok: true, data: { userId: user.id } };
+    return { ok: true, data: { userId: user.id } };
+  } catch (e) {
+    if (isDuplicateAccountConstraintError(e)) return { ok: false, error: DUPLICATE_ACCOUNT_RACE_MESSAGE };
+    throw e;
+  }
 }

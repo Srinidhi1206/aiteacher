@@ -18,7 +18,7 @@ turn the database on - that step hasn't happened yet. See
 `docs/STEP_3_5.md` for the full stage-by-stage breakdown of what's built
 on top of it.
 
-## Production authentication policy (Stage I)
+## Production authentication policy (Stage I, extended in Stage K)
 
 Two things fail closed in production (`NODE_ENV=production`) rather than
 silently degrading:
@@ -47,12 +47,27 @@ Both behaviors were verified with a real `next build` + `next start` run
 (temporary process-env overrides only, `.env.local` untouched) - see
 `docs/STEP_3_5.md`'s Stage I section for the exact commands/results.
 
-## Migration status (Stage I, re-confirmed unchanged in Stage J)
+**Stage K addition - sessions are now re-checked, not just re-signed.**
+The two fail-closed behaviors above cover *logging in*. Stage K closed a
+separate gap covering *staying logged in*: `getCurrentSession()`
+(`lib/auth/current-session.ts`) now re-verifies `User.status === "ACTIVE"`
+against the database on every call (database-backed path only), so
+suspending/rejecting a user takes effect on their very next server
+action, not after their existing session cookie happens to expire (up to
+7 days later). See `docs/STEP_3_5.md`'s Stage K section for the full
+finding, the fix, and its one accepted residual limitation (middleware
+itself, which cannot import Prisma on the Edge runtime, still lets a
+suspended user's browser render a page shell before that first server
+action runs).
+
+## Migration status (Stage I, re-confirmed unchanged in Stages J and K)
 
 **No migration has ever been applied to a real database** - there is no
-database to apply it to. Stage J re-checked this (`npx prisma migrate
-status` still fails immediately with `Environment variable not found:
-DIRECT_URL`, since neither var is configured) and made no changes here.
+database to apply it to. Stages J and K both re-checked this (`npx prisma
+migrate status` still fails immediately with `Environment variable not
+found: DIRECT_URL`, since neither var is configured, and re-generating
+the migration SQL offline still produces a byte-identical file) and made
+no changes here.
 What exists as of Stage I:
 
 - `prisma/migrations/migration_lock.toml` (`provider = "postgresql"`) and

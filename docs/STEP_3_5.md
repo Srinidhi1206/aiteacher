@@ -25,6 +25,7 @@ stage is applied to `main`/production without an explicit go-ahead.
 | H | Analytics, reporting & performance | **Code complete, locally validated where possible, not yet connected.** Real student/teacher/admin analytics across `/performance`, `/weak-areas`, the new `/strengths`, `/teacher`, `/teacher/exams/[examId]`, and the admin dashboard - see "Stage H detail" below. No schema change. (Note: this letter was originally scoped as "notifications, audit logs, dashboards" in early planning; AuditLog writes and admin Logs/Notification UI wiring remain as described below, unrelated to the analytics work done here.) |
 | I | Production readiness & real data integration | **Code complete, locally/offline verified, not yet connected.** Offline-generated initial migration, production auth fail-closed hardening, real admin material upload UI, new `/teacher/worksheets` UI, focused authorization re-audit (no new issues beyond the two auth-fallback gaps fixed here) - see "Stage I detail" below. Zod validation and graceful empty/error states already existed throughout Stage C/D/E; rate limiting (AI Tutor only, Stage G) and a full a11y pass remain out of scope for this stage. |
 | J | Real infrastructure integration | **Attempted; blocked - no credentials available in this environment.** No `DATABASE_URL`, `DIRECT_URL`, `BLOB_READ_WRITE_TOKEN`, `SESSION_SECRET`, or AI provider key exists in `.env.local` or the process environment. Every live-infrastructure step (DB connection/migration apply/seed, real registration+approval, real material/Blob upload, real worksheet/exam pipelines, real analytics against real rows, real AI generation) requires credentials this environment does not have, and none was fabricated - see "Stage J detail" below for exactly what *was* re-verified (full local/offline suite + a browser regression pass, both clean, no code changes needed). |
+| K | Final production hardening, QA & release readiness | **Complete - three real findings fixed, verified locally/offline.** A focused code-level audit (not just re-reading prior stages) found and fixed a genuine "stale session after suspension" gap, a registration duplicate-account race condition, and an unvalidated worksheet-grading score input - see "Stage K detail" below. No schema change. Still not connected to live infrastructure (same blocker as Stages I/J). |
 
 ## Stage A detail
 
@@ -1365,3 +1366,237 @@ a documentation-only update recording this honest status, plus the
 re-verification described above. See the final report for the explicit
 YES/NO answers to every infrastructure-connection question this stage
 was asked to determine.
+
+## Stage K detail
+
+**Goal:** a final, focused hardening/QA pass across the whole application
+- not another feature stage. Preflight confirmed the same infrastructure
+state as Stage J (no `DATABASE_URL`/`DIRECT_URL`/`BLOB_READ_WRITE_TOKEN`/
+`SESSION_SECRET`/AI provider key anywhere in `.env.local` or the process
+environment), so, as in Stage J, no live-infrastructure step was
+performed or fabricated. Unlike Stage J, this pass **did** find and fix
+three real, previously-undiscovered issues by reading code specifically
+looking for them, rather than re-confirming prior stages' work.
+
+### Finding 1 (fixed) - stale session after suspension/rejection
+
+**Attack path:** an ACTIVE student logs in and receives a signed session
+cookie (valid 7 days, per `SESSION_COOKIE`'s `maxAge`). An admin later
+suspends that account. Before this fix, `getCurrentSession()`
+(`lib/auth/current-session.ts`) only verified the cookie's HMAC
+signature (`verifySession()`) - it never re-checked the account's live
+`AccountStatus`. Since virtually every protected page/server action
+ultimately calls `getCurrentSession()` (directly, or via `requireRole()`),
+the suspended student's existing session would have continued working -
+full access to every student route and server action - for up to 7 days
+or until they happened to log out. Suspension would have been
+effectively cosmetic for anyone already logged in.
+
+**Fix:** `getCurrentSession()` now re-verifies `User.status === "ACTIVE"`
+against the database on every call, but **only on the database-backed
+path** (`if (process.env.DATABASE_URL)`) - the fallback/demo accounts
+have no `AccountStatus` concept and are unaffected, exactly as with every
+other Stage I/J production-vs-fallback distinction. The check uses a
+dynamic `import("@/lib/prisma")` (same reasoning as
+`findUserInDatabase` in `lib/auth/users.ts`: never pull Prisma into a
+module graph that might run without a database) and a single indexed
+`User.findUnique({ where: { id }, select: { status: true } })` lookup - a
+primary-key lookup, not a scan. A non-ACTIVE or missing user makes
+`getCurrentSession()` return `null`, which every existing caller already
+treats as "not logged in" (`requireRole()` throws `UnauthorizedError`,
+page-level checks like `RealDataSection`'s `if (!session...) return
+null` already degrade gracefully) - no new error-handling code was
+needed anywhere else. **Why this couldn't live in `middleware.ts`
+instead:** middleware runs on Next.js's Edge runtime, which cannot
+import `lib/prisma.ts` in this project's configuration (classic Prisma
+Client, no edge-compatible driver adapter - see `docs/DATABASE.md`).
+`getCurrentSession()` is the correct choke point because it's the single
+place every real (Node-runtime) data-touching operation already passes
+through. **Known residual limitation, accepted and documented, not
+fixed:** middleware itself still allows a suspended user's browser to
+render a protected page's shell (it only checks the cookie's signature),
+so there's a narrow UX gap where the sidebar/shell renders before the
+first server action call reveals the account is no longer active. This
+is a UX rough edge, not a data-access hole - no real data is ever
+returned, since every real fetch goes through the now-fixed
+`getCurrentSession()`. Closing it fully would mean adding a database
+call to Edge middleware for every request, a materially larger and more
+invasive change than this stage's scope calls for.
+
+**Verified:** `npx tsc --noEmit` and `npm run build` both pass with this
+change (a change to this exact file was the highest-risk edit in this
+stage, since it's on nearly every request's critical path). Browser-
+verified via the Stage B fallback path that login/dashboard/cross-role
+behavior is byte-for-byte unchanged (the new check is a no-op when
+`DATABASE_URL` is unset, which is this environment's actual state) -
+this specifically confirms the fix doesn't regress the one path that
+*is* testable here. The actual suspension-takes-effect-mid-session
+behavior itself remains unverified against a live database, for the same
+reason every other Stage I/J/K live-DB item is unverified.
+
+### Finding 2 (fixed) - registration duplicate-account race condition
+
+**Attack path:** `registerStudent`/`registerTeacher`/`registerAdminRequest`
+(`lib/actions/registration.ts`) each call `assertNoDuplicateAccount()`
+(a `SELECT` check) *before* the `prisma.$transaction` that creates the
+`User` row - a classic check-then-create race. Two concurrent
+registration requests with the same username/email could both pass the
+check before either row exists. `User.username`/`User.email` are
+`@unique` in the schema, so the database itself already prevented an
+actual duplicate row from ever existing - this was never a data-
+integrity or security hole - but the *second* concurrent request would
+have hit an unhandled Prisma `P2002` unique-constraint error, surfaced
+to the client as a raw, unfriendly 500 instead of the same "already
+taken" message the (far more common) non-racing case already returns.
+
+**Fix:** each of the three transaction call sites is now wrapped in a
+`try/catch` that checks `e instanceof Prisma.PrismaClientKnownRequestError
+&& e.code === "P2002"` (via a small shared
+`isDuplicateAccountConstraintError()` helper) and returns the same
+friendly duplicate-account message, re-throwing anything else unchanged.
+This is a safety net for the narrow race window, not a replacement for
+the existing upfront check (which still handles the overwhelming
+majority of real duplicate attempts with zero wasted transaction work).
+
+### Finding 3 (fixed) - unvalidated worksheet-grading score input
+
+**Attack path:** `gradeExamAnswer` (`lib/actions/exams.ts`) validates
+`0 <= marksAwarded <= question.marks` server-side. `gradeWorksheetSubmission`
+(`lib/actions/worksheets.ts`) had no equivalent check at all - `score`
+and `maxScore` were persisted exactly as the client sent them, with no
+bound on negative values, `score > maxScore`, or non-finite numbers
+(`NaN`/`Infinity`). Worksheets don't have a fixed per-question mark
+scheme the way exams do (a worksheet is title+file+optional grade, not a
+question list), so the teacher legitimately supplies both `score` and
+`maxScore` together per submission - there's no schema-derived upper
+bound to check against, which is presumably why this validation was
+never added. A malformed or malicious value here wouldn't grant
+unauthorized access to anything, but would silently corrupt any future
+progress-percentage/analytics display that divides `score` by `maxScore`.
+
+**Fix:** `gradeWorksheetSubmission` now rejects (with a clear message,
+before touching the database) non-finite scores, `maxScore <= 0`, and
+`score` outside `[0, maxScore]` - the same shape of check
+`gradeExamAnswer` already applied, just against a teacher-supplied bound
+instead of a schema-derived one.
+
+### Other K-checklist areas audited, no new findings
+
+- **K1 (configuration):** `.env.example`'s Stage I classification
+  (`[REQUIRED IN PRODUCTION]`/`[OPTIONAL / PROVIDER]`/
+  `[DEVELOPMENT-ONLY]`) re-checked against every `process.env.*`
+  reference in the codebase (unchanged since Stage I - no new variables
+  introduced). **Deliberately did not create a new centralized
+  configuration module**: `SESSION_SECRET`'s lazy-resolution behavior
+  (Stage I) and `AI_PROVIDER`'s branch-per-vendor selection (Stage G)
+  are each tightly coupled to their subsystem's specific fail-closed
+  timing requirements: consolidating them into one generic module would
+  either be a no-op re-export (no real value) or risk disturbing
+  carefully-tuned behavior (e.g. `SESSION_SECRET` must resolve lazily,
+  never at module load, to avoid failing `next build` - see Stage I
+  detail) for no clear benefit. The existing fragmentation is
+  intentional, not accidental, and each piece is independently correct.
+- **K1/K13 (client bundle secret exposure):** searched the production
+  build's client-side chunks (`.next/static/chunks/`) for the literal
+  strings `DATABASE_URL`, `DIRECT_URL`, `SESSION_SECRET`,
+  `BLOB_READ_WRITE_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`. Three
+  files matched (`admin`, `ai-tutor`, `teacher` page chunks) - inspected
+  each match directly and confirmed all three are the literal
+  instructional string `DATABASE_URL` inside `DatabaseUnavailable`'s
+  rendered help text ("Set `DATABASE_URL` ... to enable it"), never an
+  actual secret value, and never any of the other five variable names.
+  No client-side secret exposure found.
+- **K2 (auth/authz):** re-read (not re-grepped) the specific attack
+  paths listed - IDOR, trusting client-supplied ids/roles, self-approval,
+  cross-teacher/class access, cross-student conversation access, admin/
+  super-admin boundaries, published/unpublished resource access. All
+  confirmed already correctly enforced by the existing
+  `requireOwnedAssignment`/`requireOwnedExam`/`requireSuperAdmin`/
+  `requireOwnStudentId`-style helpers documented across Stages F-J. Also
+  confirmed: no code path anywhere changes a user's `role` after
+  registration (only `AccountStatus` and, for admins,
+  `isSuperAdmin`-at-seed-time-only can ever change), so "stale session
+  after role change" was investigated and found not to be a reachable
+  scenario in this codebase - only the status case (Finding 1) applies.
+- **K2 (unpublished-resource IDOR):** confirmed `StudyMaterial` has no
+  student-facing single-item getter at all (only the pre-filtered
+  `listMaterialsForStudent()`), so there's no ID a student could probe.
+  `submitWorksheet`/`getExamForAttempt`/`startExamAttempt` all
+  independently re-check `isPublished`/`status === PUBLISHED` plus
+  `schoolClassId` ownership server-side, regardless of what a crafted
+  request supplies.
+- **K3 (migration correspondence):** re-ran
+  `prisma migrate diff --from-empty --to-schema-datamodel` and diffed
+  against the committed migration - still byte-identical (schema
+  unchanged since Stage I). Cross-checked structural counts: 53 Prisma
+  models -> 54 SQL tables (the extra one is `_SubjectPrompts`, Prisma's
+  implicit many-to-many join table for `PromptTemplate<->Subject` -
+  expected, not a discrepancy), 24 enums -> 24 SQL types (exact match),
+  90 foreign keys, 29 unique + 38 regular indexes.
+- **K4 (data integrity, beyond the two fixes above):** reviewed
+  `refreshStudentAnalytics`'s best-effort `Promise.all(...).catch(log)`
+  pattern (Stage D/E) and `deleteMaterial`'s swallowed Blob-delete
+  failure (Stage C) - both are deliberate, already-documented tradeoffs
+  (don't fail a grading action over a non-critical analytics recalc;
+  don't block removing a catalog entry over an orphaned Blob object),
+  not new findings.
+- **K9 (mock/fallback inventory):** the demo/fallback *authentication*
+  path is production-guarded (Stage I, re-verified unchanged this
+  stage). The remaining Step 1/2 mock **UI** screens never targeted by
+  Stages C-K (`/subjects`, `/study-plan`, `/assignments`,
+  `/practice-papers`, `/achievements`, `/calendar`, `/settings`,
+  `/parent`, and the non-analytics mock cards still on `/teacher`/
+  `/admin`) remain intentionally in place, per every prior stage's
+  explicit "preserve unrelated legacy mock screens" instruction - this
+  is documented, accepted demo/development content behind
+  authentication, not fake business data masquerading as real in a
+  production-critical path. No `TODO`/`FIXME` markers exist anywhere in
+  the source (verified by grep); all `console.error` call sites are
+  intentional server-side diagnostic logging with no secret values (4
+  total, all pre-existing from Stages G/H/I).
+- **K10 (N+1 queries):** `lib/actions/teacher-analytics.ts` and
+  `lib/actions/exams.ts`'s `getExamQuestionAnalytics` both confirmed to
+  fetch bulk data via `findMany` outside any loop, then reduce in JS
+  (`.filter()`/`.map()`/`for`) - no per-row database query in a loop
+  anywhere in the newer (Stage H+) analytics code.
+- **K11 (error handling):** confirmed every server action's catch block
+  only ever returns `.message` from the app's own typed error classes
+  (`UnauthorizedError`/`ForbiddenError`/`AIError`/
+  `AuthConfigurationError`/`StorageNotConfiguredError`) to the client -
+  any other thrown error is re-thrown unchanged, which Next.js's Server
+  Action error boundary automatically redacts to a generic message in
+  production (its built-in behavior, not something this app implements
+  itself).
+
+### Verification
+
+```
+TypeScript:       PASS (npx tsc --noEmit)
+Lint:              PASS (no findings)
+Build:             PASS (all routes, including the new getCurrentSession
+                   status check on the hot path of every protected page)
+Prisma validate:   PASS
+Prisma generate:   PASS
+Prisma migrate status: fails cleanly ("Environment variable not found:
+                   DIRECT_URL") - expected, no database configured
+Client-bundle secret scan: PASS (see K1/K13 above)
+```
+
+Browser-verified (fallback auth, no live database) - specifically to
+confirm the `getCurrentSession()` change is non-regressive: unauthenticated
+`/dashboard` redirects to `/login`; student fallback login reaches
+`/dashboard`/`/exams`/`/results`/`/performance`/`/weak-areas` (all
+graceful `DatabaseUnavailable`) and is bounced from `/teacher` back to
+`/dashboard`; teacher fallback login reaches `/teacher`/`/teacher/worksheets`
+and is bounced from `/admin` back to `/teacher`; admin fallback login
+reaches `/admin`. Every result identical to pre-Stage-K behavior - the
+fix is confirmed inert on the fallback path, as designed.
+
+### Not executed (no live database, no Blob token, no AI provider key)
+
+The actual suspension-takes-effect-mid-session behavior against a real
+session and a real database row; the registration-race fix under actual
+concurrent load; the worksheet-grading bounds check against a real
+submission; any other live-infrastructure item already listed as
+untested in Stages I/J. Nothing here was claimed as tested against live
+infrastructure.

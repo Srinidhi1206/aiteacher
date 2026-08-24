@@ -221,6 +221,20 @@ export async function gradeWorksheetSubmission(
     if (submission.worksheet.teacher.userId !== session.id) {
       return { ok: false, error: "You can only grade submissions for your own worksheets." };
     }
+    // Stage K: worksheets have no fixed per-question mark scheme the way
+    // exams do (see gradeExamAnswer's 0-to-question.marks check), so score
+    // and maxScore are both teacher-supplied per submission - but they
+    // still need bounds checking. Without this, a malformed or malicious
+    // value (negative, non-finite, score > maxScore) would be persisted
+    // as-is and silently corrupt any progress %/analytics that later
+    // divides score by maxScore.
+    if (!Number.isFinite(score) || !Number.isFinite(maxScore)) {
+      return { ok: false, error: "Score and max score must be valid numbers." };
+    }
+    if (maxScore <= 0) return { ok: false, error: "Max score must be greater than 0." };
+    if (score < 0 || score > maxScore) {
+      return { ok: false, error: `Score must be between 0 and ${maxScore}.` };
+    }
     await prisma.worksheetSubmission.update({
       where: { id: submissionId },
       data: { score, maxScore, feedback },
