@@ -24,6 +24,7 @@ stage is applied to `main`/production without an explicit go-ahead.
 | G | AI tutor (provider abstraction + real provider wiring) | **Code complete, locally validated where possible, not yet connected.** Provider-agnostic abstraction (`lib/ai/*`), Gemini implementation, conversation persistence reusing `AIConversation`/`AIMessage`, `/ai-tutor` upgraded from a canned mock to a real (database-backed) tutor with graceful "no database"/"AI not configured" states - see "Stage G detail" below. No `DATABASE_URL` and no `GEMINI_API_KEY` exist yet, so no real generation has ever executed. |
 | H | Analytics, reporting & performance | **Code complete, locally validated where possible, not yet connected.** Real student/teacher/admin analytics across `/performance`, `/weak-areas`, the new `/strengths`, `/teacher`, `/teacher/exams/[examId]`, and the admin dashboard - see "Stage H detail" below. No schema change. (Note: this letter was originally scoped as "notifications, audit logs, dashboards" in early planning; AuditLog writes and admin Logs/Notification UI wiring remain as described below, unrelated to the analytics work done here.) |
 | I | Production readiness & real data integration | **Code complete, locally/offline verified, not yet connected.** Offline-generated initial migration, production auth fail-closed hardening, real admin material upload UI, new `/teacher/worksheets` UI, focused authorization re-audit (no new issues beyond the two auth-fallback gaps fixed here) - see "Stage I detail" below. Zod validation and graceful empty/error states already existed throughout Stage C/D/E; rate limiting (AI Tutor only, Stage G) and a full a11y pass remain out of scope for this stage. |
+| J | Real infrastructure integration | **Attempted; blocked - no credentials available in this environment.** No `DATABASE_URL`, `DIRECT_URL`, `BLOB_READ_WRITE_TOKEN`, `SESSION_SECRET`, or AI provider key exists in `.env.local` or the process environment. Every live-infrastructure step (DB connection/migration apply/seed, real registration+approval, real material/Blob upload, real worksheet/exam pipelines, real analytics against real rows, real AI generation) requires credentials this environment does not have, and none was fabricated - see "Stage J detail" below for exactly what *was* re-verified (full local/offline suite + a browser regression pass, both clean, no code changes needed). |
 
 ## Stage A detail
 
@@ -1295,3 +1296,72 @@ registration/approval persisted to a database, and any real Gemini
 generation. Nothing here was claimed as tested against live
 infrastructure - see the "Migration readiness" and "Production auth"
 subsections above for exactly what *was* verified without one.
+
+## Stage J detail
+
+**Goal:** make the application genuinely operational against real
+infrastructure (Postgres, Vercel Blob, an AI provider) where credentials
+are available, and honestly document what remains untestable where they
+aren't.
+
+**Preflight finding: no real infrastructure credentials exist in this
+environment.** Checked both `.env.local` (existence and key names only,
+no values ever printed) and the process environment for `DATABASE_URL`,
+`DIRECT_URL`, `BLOB_READ_WRITE_TOKEN`, `SESSION_SECRET`, `AI_PROVIDER`,
+`GEMINI_API_KEY`, `OPENAI_API_KEY` - **none is present anywhere.**
+`.env.local` exists but contains only `NEXT_TELEMETRY_DISABLED`. This is
+the same state every prior stage (A through I) has run under.
+
+Per the task's own explicit instructions for this scenario ("do not
+fabricate connectivity," "do not claim migration application," "do not
+claim upload success," "do not claim live generation"), every step that
+requires a live database, Blob store, or AI provider was **not
+performed** - not attempted-and-hidden, not simulated. Specifically, none
+of the following happened in this stage: a database connection, a
+migration apply, a seed run, a real registration/approval persisted to a
+row, a real file upload to Blob, a real worksheet/exam create-submit-grade
+cycle against real rows, a real analytics computation over real rows, or
+a real Gemini API call. Anywhere this document or the final report
+mentions one of those, it means "verified the code path and/or graceful-
+degradation behavior," never "executed against live infrastructure."
+
+**What was genuinely re-verified in this stage:**
+- Full local/offline verification suite, re-run fresh (not assumed from
+  Stage I): `npx prisma validate` (pass), `npx prisma generate` (pass),
+  `npx tsc --noEmit` (pass), `npm run lint` (pass, no findings),
+  `npm run build` (pass, all routes including `/teacher/worksheets`
+  build cleanly). `npx prisma migrate status` was run and, as in every
+  prior stage, fails immediately with `Environment variable not found:
+  DIRECT_URL` - documented as "cannot reach a database," not a code
+  defect.
+- A browser regression pass via the Stage B fallback-auth path (the only
+  path exercisable without a database), confirming **no drift since the
+  Stage I commit**: `/register` renders; student fallback login reaches
+  `/dashboard`/`/materials`/`/ai-tutor` with the same graceful
+  `DatabaseUnavailable` states as before; teacher fallback login reaches
+  `/teacher/exams` with the same graceful state; admin fallback login
+  reaches `/admin`'s Users tab with the same graceful state. No new
+  console errors beyond the already-established benign dev-mode network
+  noise pattern documented in every prior stage's testing.
+- No code changes were made in this stage - nothing needed fixing, and
+  there was no live infrastructure to integrate against.
+
+**Steps not performed, and exactly why (per this stage's own instructions
+not to fabricate them):**
+
+| Step | Requires | Status |
+|---|---|---|
+| DB connection, migration apply, seed run | `DATABASE_URL`/`DIRECT_URL` | Not available - not attempted |
+| Real registration -> approval -> login lifecycle | Live database | Not available - not attempted |
+| Real material upload to Blob | `BLOB_READ_WRITE_TOKEN` + live database | Not available - not attempted |
+| Real worksheet create/submit/grade cycle | Live database | Not available - not attempted |
+| Real exam create/attempt/submit/grade cycle | Live database | Not available - not attempted |
+| Real analytics against real rows | Live database | Not available - not attempted |
+| Real AI Tutor generation | `AI_PROVIDER` + provider API key | Not available - not attempted |
+| Runtime auth security tests requiring a live DB (stale-session-after-suspension, role-change-mid-session) | Live database | Not available - not attempted (the two *configuration* fail-closed behaviors - missing `SESSION_SECRET`/`DATABASE_URL` in production - were already runtime-tested with `next start` in Stage I and are unchanged) |
+
+**Nothing in this stage's commit represents new functionality** - it is
+a documentation-only update recording this honest status, plus the
+re-verification described above. See the final report for the explicit
+YES/NO answers to every infrastructure-connection question this stage
+was asked to determine.

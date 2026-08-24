@@ -1,13 +1,18 @@
-# Database (Stages A-I)
+# Database (Stages A-J)
 
-Status: **schema, auth, and every server action through Stage H all exist
+Status: **schema, auth, and every server action through Stage I all exist
 and are verified (`prisma validate`, `prisma generate`, `tsc --noEmit`,
 `npm run build` all pass) - but no query has ever executed against a live
-database.** In development (`NODE_ENV !== "production"`), login falls
-back to hardcoded demo accounts when `DATABASE_URL` is unset; every
-materials/exam/progress page shows a graceful "database not connected"
-state (see `components/database-unavailable.tsx`) instead of pretending
-to work. **In production, this fallback is disabled** - see "Production
+database, and the initial migration (see "Migration status" below) has
+never been applied to one.** Stage J (see `docs/STEP_3_5.md` "Stage J
+detail") re-confirmed this is still true: no `DATABASE_URL`/`DIRECT_URL`
+exists in this environment, so no connection, migration apply, or seed
+run was possible - none was fabricated. In development
+(`NODE_ENV !== "production"`), login falls back to hardcoded demo
+accounts when `DATABASE_URL` is unset; every materials/exam/progress page
+shows a graceful "database not connected" state (see
+`components/database-unavailable.tsx`) instead of pretending to work.
+**In production, this fallback is disabled** - see "Production
 authentication policy" below. This document describes how to actually
 turn the database on - that step hasn't happened yet. See
 `docs/STEP_3_5.md` for the full stage-by-stage breakdown of what's built
@@ -42,10 +47,13 @@ Both behaviors were verified with a real `next build` + `next start` run
 (temporary process-env overrides only, `.env.local` untouched) - see
 `docs/STEP_3_5.md`'s Stage I section for the exact commands/results.
 
-## Migration status (Stage I)
+## Migration status (Stage I, re-confirmed unchanged in Stage J)
 
 **No migration has ever been applied to a real database** - there is no
-database to apply it to. What exists as of Stage I:
+database to apply it to. Stage J re-checked this (`npx prisma migrate
+status` still fails immediately with `Environment variable not found:
+DIRECT_URL`, since neither var is configured) and made no changes here.
+What exists as of Stage I:
 
 - `prisma/migrations/migration_lock.toml` (`provider = "postgresql"`) and
   `prisma/migrations/20260824190000_initial_schema/migration.sql` - the
@@ -135,6 +143,12 @@ confirm it or prompt to regenerate, rather than silently duplicating it.
    ```
 
 ## What's seeded (and what isn't)
+
+**Seed status: written and audited, never executed against a real
+database** (Stage J re-audited `prisma/seed.ts` line-by-line and made no
+changes - see `docs/STEP_3_5.md` "Stage I detail" for the full audit
+checklist result). Running `npm run db:seed` requires a real
+`DIRECT_URL`, which doesn't exist in this environment.
 
 As of Stage B, `prisma/seed.ts` **does** create the 7 demo `User`/
 `Student`/`Teacher`/`Admin` rows, bcrypt-hashed, matching the same

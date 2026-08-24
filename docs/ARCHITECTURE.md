@@ -314,6 +314,20 @@ audit (see `docs/STEP_3_5.md`) re-verified it by reading the relevant
 code, not just grepping for patterns, and found no new issues beyond the
 two auth-fallback gaps described above.
 
+**Stage J - real infrastructure connection status: none connected.**
+Stage J's objective was to make the above genuinely operational against
+a real Postgres database, Vercel Blob, and an AI provider wherever
+credentials were available. None were: this environment has no
+`DATABASE_URL`/`DIRECT_URL`/`BLOB_READ_WRITE_TOKEN`/`SESSION_SECRET`/
+`AI_PROVIDER`/`GEMINI_API_KEY`/`OPENAI_API_KEY` configured anywhere. Every
+architectural claim in this document remains exactly what it was after
+Stage I - a real, typechecked, server-authorized implementation that has
+never executed against live infrastructure - and Stage J re-verified that
+via a fresh full local/offline verification pass plus a browser
+regression pass, not by fabricating a connection. See `docs/STEP_3_5.md`
+"Stage J detail" for the complete list of steps that could not be
+performed and exactly why.
+
 ## 7. Known Gaps in This Build
 
 - Authentication (Stage B, see `docs/STEP_3_5.md`) has a real,
