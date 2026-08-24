@@ -23,7 +23,7 @@ stage is applied to `main`/production without an explicit go-ahead.
 | F | Registration + account approval | **Code complete, locally validated where possible, not yet connected.** Student/teacher/admin-request registration, `AccountStatus`/`RegistrationRequest` model, super-admin-gated approval workflow, suspend/reactivate, audit logging - see "Stage F detail" below. Same DB-connection blocker as Stages A/B: nothing here has executed against a live database. (Note: an earlier, unrelated "exam evaluation" item was previously tracked under the letter F; it was folded into Stage D and is documented there instead - this F is the registration/approval work described below.) |
 | G | AI tutor (provider abstraction + real provider wiring) | **Code complete, locally validated where possible, not yet connected.** Provider-agnostic abstraction (`lib/ai/*`), Gemini implementation, conversation persistence reusing `AIConversation`/`AIMessage`, `/ai-tutor` upgraded from a canned mock to a real (database-backed) tutor with graceful "no database"/"AI not configured" states - see "Stage G detail" below. No `DATABASE_URL` and no `GEMINI_API_KEY` exist yet, so no real generation has ever executed. |
 | H | Analytics, reporting & performance | **Code complete, locally validated where possible, not yet connected.** Real student/teacher/admin analytics across `/performance`, `/weak-areas`, the new `/strengths`, `/teacher`, `/teacher/exams/[examId]`, and the admin dashboard - see "Stage H detail" below. No schema change. (Note: this letter was originally scoped as "notifications, audit logs, dashboards" in early planning; AuditLog writes and admin Logs/Notification UI wiring remain as described below, unrelated to the analytics work done here.) |
-| I | Production hardening (validation, rate limiting, loading/error/empty states, a11y, mobile polish) | Partial - Zod validation and graceful empty/error states exist throughout Stage C/D/E; rate limiting and full a11y pass not done. |
+| I | Production readiness & real data integration | **Code complete, locally/offline verified, not yet connected.** Offline-generated initial migration, production auth fail-closed hardening, real admin material upload UI, new `/teacher/worksheets` UI, focused authorization re-audit (no new issues beyond the two auth-fallback gaps fixed here) - see "Stage I detail" below. Zod validation and graceful empty/error states already existed throughout Stage C/D/E; rate limiting (AI Tutor only, Stage G) and a full a11y pass remain out of scope for this stage. |
 
 ## Stage A detail
 
@@ -1059,3 +1059,239 @@ but no real row has ever been aggregated, because there is still no
 documented for Stage G (no test runner exists in this repository yet;
 `npx tsc --noEmit` plus the browser checks above are the substitute, per
 the "don't overbuild" instruction).
+
+## Stage I detail
+
+**Goal:** take the app from "fully implemented and typechecked without
+external infrastructure" to "safe and operational once a real Postgres
+database and Vercel Blob are connected" - without adding another
+feature. No Prisma schema changes were made or needed.
+
+### Migration readiness
+
+No `prisma/migrations/` existed before this stage. `prisma migrate dev`
+needs a live database (it computes a diff via a shadow database), so it
+couldn't be used here. Investigated and used instead:
+```bash
+npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script
+```
+This translates the schema straight into SQL using Prisma's built-in
+provider-specific generator, with **no database connection required** -
+confirmed by running it with `DATABASE_URL`/`DIRECT_URL` both unset
+(exit code 0, 1294 lines of valid SQL). The output was saved as
+`prisma/migrations/20260824190000_initial_schema/migration.sql`, plus
+the standard `prisma/migrations/migration_lock.toml`
+(`provider = "postgresql"`). **Correspondence verified**: re-running the
+same command and diffing its output against the committed file produces
+an exact match - the migration SQL is guaranteed to reflect the current
+schema. **What this does not verify**: that the SQL actually applies
+cleanly to a real Postgres database, or that Prisma's own migration-history
+bookkeeping is consistent - both require a live database
+(`--from-migrations` with a `--shadow-database-url`, tried and confirmed
+it needs real credentials: `Error: P1000 Authentication failed`). The
+migration is **not** marked or claimed as applied anywhere. `npx prisma
+migrate status` was also attempted and, as expected, fails immediately
+with `Environment variable not found: DIRECT_URL` - documented as "cannot
+reach database," not treated as a code defect.
+
+### Production auth fail-closed hardening (two real findings, both fixed)
+
+1. **`lib/auth/session.ts`** - `SESSION_SECRET` previously fell back to a
+   hardcoded string with no environment check at all. Fixed by moving
+   secret resolution into a `resolveSessionSecret()` function called
+   *lazily* inside `getKey()` (not at module load / not a top-level
+   `const`) - this matters because `session.ts` is imported by
+   `middleware.ts`, which Next.js evaluates while bundling for every
+   request and during `next build`'s page-data collection; a top-level
+   throw would have failed the build itself whenever `SESSION_SECRET`
+   is unset, which is this repo's normal state. Lazy resolution means the
+   check only fires when a session is actually signed/verified. In
+   production with no `SESSION_SECRET`, it throws instead of silently
+   using the dev secret; in development, the existing dev fallback is
+   unchanged. `verifySession()` was also restructured so `getKey()` is
+   called *outside* its try/catch - a config error propagates to the
+   caller instead of being swallowed into a misleading "not logged in."
+2. **`lib/auth/users.ts`** - `findUser()` previously chose the demo-account
+   fallback whenever `DATABASE_URL` was unset, with no `NODE_ENV` check -
+   meaning a production deployment that simply forgot to set
+   `DATABASE_URL` would have silently authenticated the well-known demo
+   credentials. Fixed: the fallback path now additionally requires
+   `NODE_ENV !== "production"`; production with no `DATABASE_URL` throws
+   a new typed `AuthConfigurationError`. `app/api/auth/login/route.ts`
+   catches this specifically and returns `503 { error: "Sign-in is
+   temporarily unavailable. Please try again later." }` - the real reason
+   is `console.error`-logged server-side only, never returned to the
+   client, and never surfaces as "invalid credentials." (Separately
+   confirmed already-correct, unchanged: a *configured but unreachable*
+   `DATABASE_URL` was already failing closed before this stage -
+   `findUserInDatabase` doesn't catch its own Prisma error, so it was
+   always propagating as a normal failed request, never a demo-account
+   fallback.)
+
+**Both behaviors were runtime-tested**, not just typechecked: built the
+app (`npm run build`) and ran `next start` on a separate port (3901)
+with `DATABASE_URL`/`SESSION_SECRET` unset via a temporary process-env
+override (`.env.local` untouched) —
+- `POST /api/auth/login` (admin/Admin@123, the real demo credentials) →
+  `503 {"error":"Sign-in is temporarily unavailable. Please try again
+  later."}` - demo login does **not** work in this configuration.
+- `GET /dashboard` with a malformed session cookie present (so
+  `verifySession` reaches the signature-check code path) → generic `500
+  Internal Server Error` HTML page, no stack trace, no secret value.
+- `GET /login` with **no** cookie at all → `200`, confirming the fix
+  doesn't affect requests that never need to verify a session (the check
+  is lazy, not blanket).
+- Server-side logs confirmed both real reasons were logged
+  (`[auth] login blocked by configuration error: DATABASE_URL is not
+  configured...` and `Error: SESSION_SECRET is not configured...`) -
+  useful for debugging, never exposed to the client.
+
+### Environment contract
+
+`.env.example` rewritten with an explicit classification header
+(`[REQUIRED IN PRODUCTION]` / `[OPTIONAL / PROVIDER]` /
+`[DEVELOPMENT-ONLY]`) on every variable, and updated `SESSION_SECRET`/
+`DATABASE_URL`/demo-password comments to describe the new fail-closed
+behavior. Cross-checked against every `process.env.X` reference in
+`lib/`, `app/`, `middleware.ts`, and `prisma/` (via `grep -rohE`) -
+confirmed `.env.example` already covered every variable the app actually
+reads; nothing was missing.
+
+### Seed audit (`prisma/seed.ts`) - no changes required
+
+Re-audited line-by-line against the Stage I checklist:
+`isSuperAdmin: true` appears in exactly one upsert (the bootstrap admin's
+`update`/`create` branches - same user, both branches), never anywhere
+else. `status: "ACTIVE"` is set on all 7 demo accounts. Passwords are
+hashed via the seed's own `hashPassword()` (bcrypt, `SALT_ROUNDS = 12`,
+duplicated from `lib/auth/password.ts` for the documented `server-only`-
+under-`tsx` reason - see the Stage A note in this file). 20
+upsert/findFirst/findUnique call sites confirm idempotency throughout;
+curriculum data is entirely table-driven, no hardcoded UI strings.
+`console.log` calls are all progress/count messages, never a credential
+value. No changes were made to this file in Stage I - it already met
+every requirement.
+
+### Admin material upload (real Blob integration)
+
+`components/admin/study-materials-card.tsx` was fully rewired from
+Step 1/2 local-state simulation to the real Stage C pipeline - no new
+server action was written; `createMaterial`/`setMaterialPublished`/
+`deleteMaterial`/`listMaterialsForAdmin` (all pre-existing, already
+authorized: admin unrestricted, teacher scoped to `TeacherAssignment`,
+ownership-checked publish/delete) were reused as-is. The new form drives
+a full State -> Board -> Class -> Subject -> Chapter -> optional Topic
+cascade via the existing `lib/actions/curriculum.ts` reads, plus title/
+description/material-type/file. Client-side MIME/size checks import
+`ALLOWED_MIME_TYPES`/`MAX_UPLOAD_BYTES`/`validateUploadFile` directly
+from `lib/storage/types.ts` (a UX nicety only - the server re-validates
+independently, unchanged). `StorageNotConfiguredError` and a missing-
+database fetch both render an explicit inline message; nothing pretends
+an upload succeeded. Browser-verified: the full cascading form renders
+with real curriculum selects, the existing-materials list shows
+`DatabaseUnavailable` gracefully, and submitting with no title shows
+"Title is required." without a crash (client validation working, no
+network round-trip needed to fail safely).
+
+### Teacher worksheet UI (new route, existing server actions)
+
+`/teacher/worksheets` is new; `lib/actions/worksheets.ts`'s
+`createWorksheet`/`setWorksheetPublished`/`deleteWorksheet`/
+`listWorksheetsForTeacher`/`gradeWorksheetSubmission` (all pre-existing
+from Stage C, already `TeacherAssignment`-scoped and ownership-checked)
+were reused unchanged. One new action was added -
+`updateWorksheet(worksheetId, input)` - because no edit capability
+existed at all; it follows the exact same `worksheet.teacher.userId ===
+session.id` ownership check already used by `setWorksheetPublished`/
+`deleteWorksheet`, and only edits title/instructions/chapter/topic/due
+date - not class/subject, since changing those would need a fresh
+assignment-scope decision (that's a new worksheet, not an edit).
+`CreateWorksheetForm` only ever offers class/subject pairs from the
+signed-in teacher's own `listMyTeacherAssignments()` (Stage D, reused
+unchanged); `createWorksheet` re-validates that pair against
+`TeacherAssignment` server-side regardless of what the client sent - a
+crafted request with an unassigned class/subject pair is rejected the
+same way the UI already prevents selecting one. A "Worksheets" entry
+card (`components/teacher/manage-worksheets-card.tsx`) was added to the
+existing `/teacher` mock dashboard, mirroring the pre-existing
+`CreateExamsCard`'s exact pattern - every other mock card on that page
+(`ClassSubjectSelector`, `CreateClassCard`, `UploadMaterialCard`,
+`GradeSubmissionsCard`) is untouched. Browser-verified: `/teacher/worksheets`
+renders with `DatabaseUnavailable`; the "Worksheets" card appears on
+`/teacher` alongside every existing card; an admin session hitting
+`/teacher/worksheets` is redirected to `/admin` by the pre-existing
+middleware role gate (the new route needed no middleware change - it
+already matches the `/teacher` prefix in `ROLE_ONLY`).
+
+### Authorization security audit
+
+Read (not merely grepped) the relevant server actions and authorization
+helpers across registration, login, approval/suspension, materials,
+worksheets, exams, analytics, AI tutor, and admin/teacher/student
+actions, against the 17-item checklist. **Result: no new vulnerabilities
+found beyond the two auth-fallback gaps above**, which are now fixed.
+Specifically re-confirmed by reading the actual code (not assumed from
+memory): `requireOwnedExam`/`requireOwnedAssignment`
+(`lib/actions/exams.ts`, also reused by the new
+`lib/actions/teacher-analytics.ts`) check `exam.teacher.userId`/a real
+`TeacherAssignment` row; `setWorksheetPublished`/`deleteWorksheet`/the
+new `updateWorksheet` check `worksheet.teacher.userId`;
+`saveExamAnswer`/`submitExam` check `submission.studentId`; every
+student analytics/tutor function derives `studentId` from
+`requireOwnStudentId()`/`requireRole("student")` and never accepts one
+as a parameter; `lib/actions/tutor.ts`'s `deleteConversation` uses
+`deleteMany({ where: { id, studentId } })` - a mismatched id simply
+matches nothing; `approveRegistration`/`rejectRegistration`/
+`suspendUser`/`reactivateUser` (Stage F) all still gate ADMIN-role
+targets behind `requireSuperAdmin()`, block self-approval
+(`request.userId === actor.userId`) and self-suspension, and
+unconditionally refuse to suspend the bootstrap super admin regardless of
+caller; `registerAdminRequest` still hardcodes `role: ADMIN` and
+`isSuperAdmin: false` server-side with no client-settable field for
+either. `lib/actions/exam-schedule.ts` (not previously covered in a
+Stage-specific write-up) was read fully for this audit: admin-only,
+intentionally not per-admin-owned (any admin may manage any schedule),
+no IDOR risk found.
+
+### Error handling / production failure modes
+
+Reviewed against the checklist (missing DB, missing Blob, malformed/
+unauthorized ids, duplicate registration/submission, invalid file
+types/oversized files, deleted curriculum rows). No gaps found requiring
+a code change beyond STEP 5/6's forms themselves following the same
+established patterns already used throughout Stages C-H
+(`DatabaseUnavailable`, typed `StorageNotConfiguredError`, Zod-validated
+inputs, ownership-checked mutations returning `{ok:false, error}` rather
+than throwing where the failure is a normal user-facing case).
+
+### Verification
+
+```
+Prisma validate:  PASS
+Prisma generate:  PASS
+TypeScript:       PASS (npx tsc --noEmit)
+Lint:              PASS (one real finding - an unescaped apostrophe in
+                   the new manage-worksheets-card.tsx - fixed, re-ran clean)
+Build:             PASS (all routes, including the new /teacher/worksheets,
+                   built successfully with no DATABASE_URL/SESSION_SECRET/
+                   BLOB_READ_WRITE_TOKEN configured)
+```
+
+Browser-verified (fallback auth, no live database): `/login` renders and
+the demo-account login flow still works in development; teacher session
+reaches `/teacher/worksheets` (graceful `DatabaseUnavailable`) and sees
+the new "Worksheets" card on `/teacher`; admin session reaches the
+Study Materials tab, sees the full real cascading upload form, gets
+client-side "Title is required." on an empty submit (no crash), and is
+correctly redirected away from `/teacher/worksheets`. Plus the separate
+`next start`-based production fail-closed tests described above.
+
+### Not executed (no live database, no Blob token, no AI provider key)
+
+Any real migration apply (`prisma migrate deploy`/`db:seed` against a
+live database), any actual material upload to Vercel Blob, any actual
+worksheet create/edit/delete/grade against real rows, any actual
+registration/approval persisted to a database, and any real Gemini
+generation. Nothing here was claimed as tested against live
+infrastructure - see the "Migration readiness" and "Production auth"
+subsections above for exactly what *was* verified without one.

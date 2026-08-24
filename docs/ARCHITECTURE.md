@@ -256,7 +256,65 @@ inside a React component).
   labeled in the UI as topic-level classification since no question-level
   Bloom field exists in the schema.
 
-## 6. Known Gaps in This Build
+## 6. Production Readiness (Stage I, see `docs/STEP_3_5.md` "Stage I detail" for the full writeup)
+
+**Production auth configuration.** Two things that degraded gracefully in
+earlier stages now fail closed once `NODE_ENV=production`:
+
+- `lib/auth/session.ts` resolves `SESSION_SECRET` lazily (inside
+  `getKey()`, not at module load) - a production process with no
+  `SESSION_SECRET` doesn't crash at startup, but the moment a session is
+  actually signed or verified it throws, rather than falling back to the
+  development secret hardcoded in this file.
+- `lib/auth/users.ts`'s `findUser()` only takes the demo-account fallback
+  path when `DATABASE_URL` is unset **and** `NODE_ENV !== "production"`.
+  In production with no `DATABASE_URL`, it throws
+  `AuthConfigurationError`, which `app/api/auth/login/route.ts` catches
+  and turns into a generic `503` - never "invalid credentials," and never
+  a path that reaches the demo accounts.
+
+**Development fallback authentication - unchanged, still scoped.** The 7
+hardcoded demo accounts (`docs/DEMO_CREDENTIALS.md`) remain fully
+available whenever `NODE_ENV !== "production"`, regardless of
+`DATABASE_URL` - this is what every browser-verification pass in this
+repo's history has used, and Stage I doesn't touch that workflow.
+
+**Material storage flow** (`components/admin/study-materials-card.tsx`,
+rewired in Stage I from Step 1/2 mock/local state): admin picks
+State -> Board -> Class -> Subject -> Chapter -> optional Topic (all via
+the existing `lib/actions/curriculum.ts` reads), fills in title/
+description/type, and uploads a file. The form calls `createMaterial()`
+(Stage C, unchanged) directly - client-side MIME/size checks
+(`lib/storage/types.ts`'s `validateUploadFile`/`ALLOWED_MIME_TYPES`/
+`MAX_UPLOAD_BYTES`, imported directly rather than re-declared) are UX
+only; the server re-validates independently. `StorageNotConfiguredError`
+and a missing-database `.catch()` both render an explicit inline message
+- never a fake "upload succeeded."
+
+**Teacher worksheet flow** (`/teacher/worksheets`, new in Stage I): a
+thin UI over the Stage C `lib/actions/worksheets.ts` actions, which were
+already fully authorized and just had no page to reach them from.
+`CreateWorksheetForm` only offers class/subject pairs from the teacher's
+own `listMyTeacherAssignments()` (Stage D); `createWorksheet` re-validates
+that pair against `TeacherAssignment` server-side regardless of what the
+client sent. One new action, `updateWorksheet`, was added following the
+exact same ownership-check pattern (`worksheet.teacher.userId ===
+session.id`) as the pre-existing `setWorksheetPublished`/
+`deleteWorksheet` - editing title/instructions/chapter/topic only, not
+class/subject (changing those would need a fresh assignment-scope
+decision, so that's a new worksheet, not an edit).
+
+**Authorization model - reaffirmed, not changed.** Every mutating action
+across the app re-derives its actor from the session
+(`getCurrentSession()`/`requireRole()`) and, where the action targets a
+specific row (an exam, a worksheet, a conversation, a class/subject
+pair), re-checks ownership/assignment against that actor - never a
+client-supplied id. This was true before Stage I; Stage I's focused
+audit (see `docs/STEP_3_5.md`) re-verified it by reading the relevant
+code, not just grepping for patterns, and found no new issues beyond the
+two auth-fallback gaps described above.
+
+## 7. Known Gaps in This Build
 
 - Authentication (Stage B, see `docs/STEP_3_5.md`) has a real,
   bcrypt-backed database path (`lib/auth/users.ts` -> `prisma.user`), used
@@ -286,6 +344,12 @@ inside a React component).
   ahead of the server's clock could see late-night activity attributed to
   the next server-local day. Documented, not fixed, in this stage - see
   the Stage H date-convention note.
+- Migration readiness (Stage I, see `docs/DATABASE.md`) - an initial
+  migration (`prisma/migrations/20260824190000_initial_schema/`) was
+  generated offline from the current schema and is committed, but has
+  never been applied to or verified against a real Postgres instance
+  (there isn't one). `npm run db:deploy` is the documented, correct
+  command to run once real `DATABASE_URL`/`DIRECT_URL` values exist.
 - No persistence across page reloads for most interactions (toasts, toggled
   checkboxes, generated exam plans, uploaded materials, entered marks,
   scheduled exams) beyond the current session - by design, since there is

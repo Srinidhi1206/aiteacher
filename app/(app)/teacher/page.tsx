@@ -3,6 +3,7 @@ import { ClassSubjectSelector } from "@/components/teacher/class-subject-selecto
 import { CreateClassCard } from "@/components/teacher/create-class-card";
 import { UploadMaterialCard } from "@/components/teacher/upload-material-card";
 import { CreateExamsCard } from "@/components/teacher/create-exams-card";
+import { ManageWorksheetsCard } from "@/components/teacher/manage-worksheets-card";
 import { GradeSubmissionsCard } from "@/components/teacher/grade-submissions-card";
 import { RealClassAnalytics } from "@/components/teacher/real-class-analytics";
 
@@ -14,6 +15,7 @@ export default function TeacherDashboardPage() {
         <ClassSubjectSelector />
         <CreateClassCard />
         <CreateExamsCard />
+        <ManageWorksheetsCard />
 
         <UploadMaterialCard />
 

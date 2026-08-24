@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { findUser, type Role } from "@/lib/auth/users";
+import { findUser, AuthConfigurationError, type Role } from "@/lib/auth/users";
 import { signSession, SESSION_COOKIE } from "@/lib/auth/session";
 
 const ROLE_HOME: Record<Role, string> = {
@@ -27,7 +27,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing role, username, or password." }, { status: 400 });
   }
 
-  const outcome = await findUser(role, username, password);
+  let outcome;
+  try {
+    outcome = await findUser(role, username, password);
+  } catch (err) {
+    if (err instanceof AuthConfigurationError) {
+      // Server-side only - the real reason never reaches the client, only
+      // a generic "try again later" message. Never becomes "invalid
+      // credentials," which would hide a real deployment misconfiguration.
+      console.error("[auth] login blocked by configuration error:", err.message);
+      return NextResponse.json({ error: "Sign-in is temporarily unavailable. Please try again later." }, { status: 503 });
+    }
+    throw err;
+  }
 
   if (outcome.kind === "invalid_credentials") {
     return NextResponse.json({ error: "Invalid username or password for that role." }, { status: 401 });

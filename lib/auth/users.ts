@@ -22,9 +22,30 @@
 // database-backed accounts are gated on `User.status` (see
 // findUserInDatabase below) - a PENDING/REJECTED/SUSPENDED account can
 // never reach a signed-in session, regardless of a correct password.
+//
+// Stage I: the fallback path above is now also gated on NODE_ENV. Without
+// this, a production deployment that simply forgot to set DATABASE_URL
+// would silently authenticate against the well-known demo credentials
+// documented in docs/DEMO_CREDENTIALS.md - a real account-takeover risk.
+// Development/test keep working exactly as before; production with no
+// DATABASE_URL now fails closed via AuthConfigurationError instead.
 
 import "server-only";
 import { verifyPassword } from "./password";
+
+/**
+ * Thrown when login can't proceed due to missing/invalid server
+ * configuration (not a wrong password, not an account-status block).
+ * Callers (see app/api/auth/login/route.ts) must never translate this into
+ * "invalid credentials" - doing so would hide a real deployment
+ * misconfiguration behind a misleading, seemingly-normal login failure.
+ */
+export class AuthConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthConfigurationError";
+  }
+}
 
 export type Role = "admin" | "teacher" | "student";
 
@@ -74,6 +95,11 @@ const ROLE_FROM_DB: Record<string, Role> = {
 export async function findUser(role: Role, username: string, password: string): Promise<LoginOutcome> {
   if (process.env.DATABASE_URL) {
     return findUserInDatabase(role, username, password);
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new AuthConfigurationError(
+      "DATABASE_URL is not configured. Refusing to authenticate against demo accounts in production - set DATABASE_URL to a real database."
+    );
   }
   return findUserInFallback(role, username, password);
 }

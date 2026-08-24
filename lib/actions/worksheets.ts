@@ -83,6 +83,43 @@ export async function createWorksheet(input: unknown, file?: File | null): Promi
   }
 }
 
+const worksheetUpdateSchema = z.object({
+  title: z.string().trim().min(1, "Title is required").max(200),
+  instructions: z.string().trim().max(4000).optional(),
+  chapterId: z.string().optional(),
+  topicId: z.string().optional(),
+  dueDate: z.string().datetime().optional(),
+});
+
+/** Edits a worksheet's descriptive fields. Class/subject are fixed at creation - changing them would need a fresh TeacherAssignment scope check, so a class/subject change is a new worksheet, not an edit. */
+export async function updateWorksheet(worksheetId: string, input: unknown): Promise<ActionResult> {
+  try {
+    const session = await requireRole("teacher");
+    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: true } });
+    if (!worksheet) return { ok: false, error: "Worksheet not found." };
+    if (worksheet.teacher.userId !== session.id) return { ok: false, error: "You can only edit your own worksheets." };
+
+    const parsed = worksheetUpdateSchema.safeParse(input);
+    if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+    const data = parsed.data;
+
+    await prisma.worksheet.update({
+      where: { id: worksheetId },
+      data: {
+        title: data.title,
+        description: data.instructions,
+        chapterId: data.chapterId || null,
+        topicId: data.topicId || null,
+        dueDate: data.dueDate ? new Date(data.dueDate) : null,
+      },
+    });
+    return { ok: true };
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    throw e;
+  }
+}
+
 export async function setWorksheetPublished(worksheetId: string, isPublished: boolean): Promise<ActionResult> {
   try {
     const session = await requireRole("teacher");

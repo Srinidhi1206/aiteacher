@@ -9,7 +9,34 @@
 import type { Role } from "./users";
 
 export const SESSION_COOKIE = "maiteacher_session";
-const SECRET = process.env.SESSION_SECRET || "dev-only-insecure-secret-change-me";
+
+// Deliberately NOT resolved at module load time (no top-level `const SECRET
+// = ...`): this module is imported by middleware.ts, which Next.js bundles
+// for every request, and by `next build`'s page-data collection - throwing
+// eagerly here would fail the build itself whenever SESSION_SECRET isn't
+// set, which is the normal state for this repo's local/CI environment (see
+// docs/DATABASE.md). Resolving lazily, inside getKey() below, means the
+// check only runs when a session is actually signed/verified at request
+// time - exactly when a missing secret in production actually matters.
+const DEV_FALLBACK_SECRET = "dev-only-insecure-secret-change-me";
+
+function resolveSessionSecret(): string {
+  const configured = process.env.SESSION_SECRET;
+  if (configured) return configured;
+
+  if (process.env.NODE_ENV === "production") {
+    // Fail closed: a production deployment with no SESSION_SECRET must
+    // never silently sign sessions with a secret that's published in this
+    // repo's source code. The error message names the missing variable,
+    // never its value (there is no value to expose here).
+    throw new Error("SESSION_SECRET is not configured. Set SESSION_SECRET to a strong random value before starting in production.");
+  }
+
+  // Development/test only - matches the pre-existing fallback/demo
+  // workflow (see docs/DEMO_CREDENTIALS.md) and lets local dev and the
+  // Stage B fallback-auth browser tests keep working without any setup.
+  return DEV_FALLBACK_SECRET;
+}
 
 export interface SessionPayload {
   id: string;
@@ -41,7 +68,7 @@ function fromBase64Url(input: string): ArrayBuffer {
 async function getKey() {
   return crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(SECRET),
+    new TextEncoder().encode(resolveSessionSecret()),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign", "verify"]
@@ -61,8 +88,13 @@ export async function verifySession(token: string | undefined | null): Promise<S
   if (!token) return null;
   const [payloadB64, sigB64] = token.split(".");
   if (!payloadB64 || !sigB64) return null;
+  // Resolved outside the try/catch below on purpose: a missing
+  // SESSION_SECRET in production is a configuration error, not "this
+  // particular cookie failed to verify" - it must propagate to the caller
+  // (middleware.ts / getCurrentSession()) rather than be swallowed into a
+  // misleadingly normal "not logged in" result.
+  const key = await getKey();
   try {
-    const key = await getKey();
     const valid = await crypto.subtle.verify(
       "HMAC",
       key,
