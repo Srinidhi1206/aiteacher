@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import dns from "node:dns/promises";
 import net from "node:net";
 import { prisma } from "@/lib/prisma";
+import { PrismaClient } from "@prisma/client";
 import { assertSessionSecretConfigured } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
@@ -77,6 +78,26 @@ export async function GET() {
     });
   } catch {
     out.hostFingerprint = "unparseable DATABASE_URL";
+  }
+
+  // Hypothesis test: same URL with sslmode=require added (read-only SELECT 1, separate short-lived client).
+  try {
+    const u = new URL(url);
+    if (!u.searchParams.has("sslmode")) u.searchParams.set("sslmode", "require");
+    if (u.hostname.includes("-pooler") && !u.searchParams.has("pgbouncer")) u.searchParams.set("pgbouncer", "true");
+    if (!u.searchParams.has("connect_timeout")) u.searchParams.set("connect_timeout", "15");
+    const probe = new PrismaClient({ datasourceUrl: u.toString() });
+    try {
+      await probe.$queryRaw`SELECT 1`;
+      out.withSslmodeRequire = "ok";
+      out.withSslmodeRequire_stateCount = await probe.state.count();
+    } catch (err) {
+      out.withSslmodeRequire = describe(err);
+    } finally {
+      await probe.$disconnect().catch(() => {});
+    }
+  } catch {
+    out.withSslmodeRequire = "skipped";
   }
   return NextResponse.json(out, { headers: { "Cache-Control": "no-store" } });
 }
