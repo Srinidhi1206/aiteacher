@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { GraduationCap, Check, ArrowLeft, ArrowRight, Loader2, DatabaseZap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useCurriculumSelect } from "@/lib/hooks/use-curriculum-select";
+import { useCurriculumSelect, expectList } from "@/lib/hooks/use-curriculum-select";
 import { listSubjectsForClass } from "@/lib/actions/curriculum";
 import { inputClass, labelClass } from "@/components/register/field-styles";
 
@@ -32,7 +32,7 @@ export default function OnboardingPage() {
     setAvailableSubjects([]);
     if (!curriculum.schoolClassId) return;
     listSubjectsForClass(curriculum.schoolClassId)
-      .then(setAvailableSubjects)
+      .then((v) => setAvailableSubjects(expectList(v)))
       .catch(() => setAvailableSubjects([]));
   }, [curriculum.schoolClassId]);
 

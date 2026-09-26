@@ -12,6 +12,14 @@ type Board = Awaited<ReturnType<typeof listBoards>>[number];
 type SchoolClass = Awaited<ReturnType<typeof listSchoolClasses>>[number];
 type School = Awaited<ReturnType<typeof listSchools>>[number];
 
+// Next 14 resolves a server action with `undefined` (it does not reject) when the response is not an
+// action payload - for example an HTML 500 from the host. Treat that like any other failed load so the
+// existing `.catch` fallbacks run instead of the page crashing on `undefined.map(...)`.
+export function expectList<T>(value: T[] | null | undefined): T[] {
+  if (!Array.isArray(value)) throw new Error("Unexpected server action response.");
+  return value;
+}
+
 export function useCurriculumSelect() {
   const [states, setStates] = React.useState<State[]>([]);
   const [boards, setBoards] = React.useState<Board[]>([]);
@@ -26,7 +34,7 @@ export function useCurriculumSelect() {
 
   React.useEffect(() => {
     listStates()
-      .then(setStates)
+      .then((v) => setStates(expectList(v)))
       .catch(() => {
         setStates([]);
         setUnavailable(true);
@@ -37,11 +45,11 @@ export function useCurriculumSelect() {
     setBoardId("");
     setBoards([]);
     listBoards(stateId || null)
-      .then(setBoards)
+      .then((v) => setBoards(expectList(v)))
       .catch(() => setBoards([]));
     setSchools([]);
     listSchools(stateId || null)
-      .then(setSchools)
+      .then((v) => setSchools(expectList(v)))
       .catch(() => setSchools([]));
   }, [stateId]);
 
@@ -50,7 +58,7 @@ export function useCurriculumSelect() {
     setSchoolClasses([]);
     if (!boardId) return;
     listSchoolClasses(boardId)
-      .then(setSchoolClasses)
+      .then((v) => setSchoolClasses(expectList(v)))
       .catch(() => setSchoolClasses([]));
   }, [boardId]);
 
