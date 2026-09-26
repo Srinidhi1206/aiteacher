@@ -1,5 +1,4 @@
 "use client";
-import { learningHeatmap } from "@/lib/mock-data/progress";
 import type { HeatmapDay } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -11,12 +10,10 @@ const intensityClasses = [
   "bg-success-700 dark:bg-success-500",
 ];
 
-// `data` is optional so the pre-existing dashboard usage (no prop) keeps
-// its original mock behavior unchanged (Stage H doesn't touch the
-// dashboard's mock Heatmap widget - see docs/STEP_3_5.md "Stage H
-// detail"); /performance passes real data from getMyActivityHeatmap().
+// Real activity only: /performance passes data from getMyActivityHeatmap();
+// with no data it renders empty rather than falling back to sample values.
 export function Heatmap({ data }: { data?: HeatmapDay[] } = {}) {
-  const source = data ?? learningHeatmap;
+  const source = data ?? [];
   // Group into weeks (columns), 7 days each
   const weeks: HeatmapDay[][] = [];
   for (let i = 0; i < source.length; i += 7) {

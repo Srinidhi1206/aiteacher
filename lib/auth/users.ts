@@ -32,6 +32,7 @@
 
 import "server-only";
 import { verifyPassword } from "./password";
+import { isKnownDefaultPassword } from "./known-defaults";
 
 /**
  * Thrown when login can't proceed due to missing/invalid server
@@ -93,6 +94,13 @@ const ROLE_FROM_DB: Record<string, Role> = {
 };
 
 export async function findUser(role: Role, username: string, password: string): Promise<LoginOutcome> {
+  // The publicly documented demo passwords never authenticate in production, whatever the
+  // database holds - a seeded row, a restored backup or a database reset must not be able to
+  // bring them back. Answered exactly like a wrong password. (See lib/auth/known-defaults.ts.)
+  if (process.env.NODE_ENV === "production" && isKnownDefaultPassword(password)) {
+    console.warn("[auth] refused a sign-in attempt that used a publicly documented demo password");
+    return { kind: "invalid_credentials" };
+  }
   if (process.env.DATABASE_URL) {
     return findUserInDatabase(role, username, password);
   }
@@ -111,6 +119,9 @@ async function findUserInDatabase(role: Role, username: string, password: string
 
   const dbUser = await prisma.user.findUnique({
     where: { username: username.toLowerCase() },
+    // The one deliberate opt-in: the shared client omits passwordHash by
+    // default (lib/prisma.ts), and this password check is the only reader.
+    omit: { passwordHash: false },
     include: {
       student: { include: { schoolClass: true } },
       teacher: { include: { assignments: { include: { schoolClass: true, subject: true } } } },

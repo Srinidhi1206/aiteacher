@@ -15,9 +15,9 @@ export function DetectionBanner() {
           <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">How weak areas are calculated</p>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
             A topic is flagged as weak when your average mastery on it drops below 50%, based on at least 2 graded
-            exam answers tagged to that topic - never off a single question. This is a deterministic calculation
-            over your real graded answers (not an AI judgment), and updates automatically every time a new exam is
-            graded.
+            answers on that topic from your exams and practice - never off a single question. This is a
+            deterministic calculation over your real graded answers (not an AI judgment), and updates
+            automatically every time an exam is graded or you finish a practice session.
           </p>
         </div>
       </CardContent>

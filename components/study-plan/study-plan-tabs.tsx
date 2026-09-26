@@ -1,44 +1,17 @@
 "use client";
-import * as React from "react";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
-import { PlanExplainer } from "@/components/study-plan/plan-explainer";
-import { ScheduleTimeline } from "@/components/study-plan/schedule-timeline";
-import { ExamPlannerForm } from "@/components/study-plan/exam-planner-form";
-import { ExamPlanResult } from "@/components/study-plan/exam-plan-result";
-import type { ExamPlanOutput } from "@/lib/types";
+// The Study Plan is the student's real learning path (lib/analytics/learning-path.ts
+// via lib/actions/analytics.ts). The old "Exam Planner" tab was removed: it
+// generated a sample plan from built-in subjects in the browser and saved
+// nothing.
+import { RealLearningPathView } from "@/components/study-plan/real-learning-path-view";
+import type { getMyLearningPath, getMyWeakAreas } from "@/lib/actions/analytics";
 
-export function StudyPlanTabs() {
-  const [plan, setPlan] = React.useState<ExamPlanOutput | null>(null);
-
-  return (
-    <Tabs defaultValue="my-plan" className="space-y-6">
-      <TabsList>
-        <TabsTrigger value="my-plan">My Plan</TabsTrigger>
-        <TabsTrigger value="exam-planner">Exam Planner</TabsTrigger>
-      </TabsList>
-
-      <TabsContent value="my-plan" className="space-y-6">
-        <PlanExplainer />
-        <ScheduleTimeline />
-      </TabsContent>
-
-      <TabsContent value="exam-planner" className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Build a plan for a specific exam</CardTitle>
-            <CardDescription className="hidden sm:block">
-              Enter the exam details and we&apos;ll generate a day-by-day study calendar, daily and weekly goals, a
-              revision schedule, mock test dates, and a last-minute revision checklist.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ExamPlannerForm onGenerate={setPlan} />
-          </CardContent>
-        </Card>
-
-        {plan && <ExamPlanResult plan={plan} />}
-      </TabsContent>
-    </Tabs>
-  );
+export function StudyPlanTabs({
+  learningPath,
+  weakAreas,
+}: {
+  learningPath: Awaited<ReturnType<typeof getMyLearningPath>> | null;
+  weakAreas: Awaited<ReturnType<typeof getMyWeakAreas>>;
+}) {
+  return <RealLearningPathView learningPath={learningPath} weakAreas={weakAreas} />;
 }

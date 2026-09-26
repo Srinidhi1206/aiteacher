@@ -1,50 +1,33 @@
-"use client";
-import * as React from "react";
-import Link from "next/link";
-import { useParams } from "next/navigation";
+// An open practice session. Only its creator can open it (getPracticePaper
+// checks ownership); an already-submitted session goes straight to its results.
+import { notFound, redirect } from "next/navigation";
 import { Topbar } from "@/components/layout/topbar";
-import { AttemptView } from "@/components/practice-papers/attempt-view";
-import { findAnyPaper } from "@/lib/paper-lookup";
-import { Paper } from "@/lib/types";
+import { DatabaseUnavailable } from "@/components/database-unavailable";
+import { PracticeAttempt } from "@/components/practice/practice-attempt";
+import { getPracticePaper } from "@/lib/actions/practice";
 
-export default function AttemptPage() {
-  const params = useParams<{ paperId: string }>();
-  const [paper, setPaper] = React.useState<Paper | null | undefined>(undefined);
-
-  React.useEffect(() => {
-    setPaper(findAnyPaper(params.paperId) ?? null);
-  }, [params.paperId]);
-
-  if (paper === undefined) {
+export default async function PracticeAttemptPage({ params }: { params: { paperId: string } }) {
+  let paper: Awaited<ReturnType<typeof getPracticePaper>>;
+  try {
+    paper = await getPracticePaper(params.paperId);
+  } catch {
     return (
       <>
-        <Topbar title="Loading paper..." />
-        <main className="flex-1 p-4 sm:p-6" />
-      </>
-    );
-  }
-
-  if (paper === null) {
-    return (
-      <>
-        <Topbar title="Paper Not Found" />
+        <Topbar title="Practice" />
         <main className="flex-1 p-4 sm:p-6">
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            We couldn&apos;t find that paper.{" "}
-            <Link href="/practice-papers" className="font-medium text-primary-600 hover:underline dark:text-primary-400">
-              Go back to Practice Papers
-            </Link>
-          </p>
+          <DatabaseUnavailable what="Practice" />
         </main>
       </>
     );
   }
+  if (!paper) notFound();
+  if (paper.status === "submitted") redirect(`/practice-papers/${params.paperId}/results`);
 
   return (
     <>
-      <Topbar title={paper.title} />
+      <Topbar title="Practice" />
       <main className="flex-1 p-4 sm:p-6">
-        <AttemptView paper={paper} />
+        <PracticeAttempt paperId={params.paperId} title={paper.title} questions={paper.questions} />
       </main>
     </>
   );

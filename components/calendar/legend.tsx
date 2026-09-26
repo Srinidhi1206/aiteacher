@@ -1,4 +1,4 @@
-import { eventTypeMeta } from "@/lib/mock-data/calendar";
+import { eventTypeMeta } from "@/lib/calendar-meta";
 import type { CalendarEventType } from "@/lib/types";
 
 const order: CalendarEventType[] = ["exam", "assignment", "revision", "mock-test", "study-session"];

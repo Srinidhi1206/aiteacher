@@ -5,14 +5,17 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CalendarLegend } from "@/components/calendar/legend";
 import { DayDetailModal } from "@/components/calendar/day-detail-modal";
-import { eventsForDate, eventTypeMeta } from "@/lib/mock-data/calendar";
+// Display metadata only (labels/colors per event type) - not sample events.
+import { eventTypeMeta } from "@/lib/calendar-meta";
+import type { CalendarEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-const TODAY = "2026-07-19";
 const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+// Local calendar date. (toISOString() is UTC, which shifts every cell by a day
+// in timezones ahead of UTC.)
 function toDateStr(d: Date) {
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function buildMonthGrid(year: number, month: number): Date[] {
@@ -26,8 +29,14 @@ function buildMonthGrid(year: number, month: number): Date[] {
   });
 }
 
-export function CalendarView() {
-  const todayDate = new Date(TODAY);
+export function CalendarView({ events: allEvents }: { events: CalendarEvent[] }) {
+  const todayDate = new Date();
+  const TODAY = toDateStr(todayDate);
+  const eventsByDate = React.useMemo(() => {
+    const map = new Map<string, CalendarEvent[]>();
+    for (const e of allEvents) map.set(e.date, [...(map.get(e.date) ?? []), e]);
+    return map;
+  }, [allEvents]);
   const [cursor, setCursor] = React.useState({ year: todayDate.getFullYear(), month: todayDate.getMonth() });
   const [selectedDate, setSelectedDate] = React.useState<string | null>(null);
 
@@ -85,7 +94,7 @@ export function CalendarView() {
           const dateStr = toDateStr(date);
           const isCurrentMonth = date.getMonth() === cursor.month;
           const isToday = dateStr === TODAY;
-          const events = eventsForDate(dateStr);
+          const events = eventsByDate.get(dateStr) ?? [];
 
           return (
             <button
@@ -126,7 +135,7 @@ export function CalendarView() {
         <CalendarLegend />
       </div>
 
-      <DayDetailModal date={selectedDate} onClose={() => setSelectedDate(null)} />
+      <DayDetailModal date={selectedDate} events={selectedDate ? eventsByDate.get(selectedDate) ?? [] : []} onClose={() => setSelectedDate(null)} />
     </Card>
   );
 }

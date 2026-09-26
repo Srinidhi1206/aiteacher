@@ -5,6 +5,13 @@ As of Stage B, there are two ways they get authenticated, and the app
 switches between them automatically based on whether a database is
 connected - see "How login works now" below.
 
+> **Production: these passwords never work.** When `NODE_ENV=production`,
+> login refuses `Admin@123`, `Teacher@123` and `Student@123` for every
+> account (`lib/auth/known-defaults.ts`), even if a database row still holds
+> them. Set up the real super admin with `npm run admin:set-password`
+> (`ADMIN_PASSWORD` env var) - see `docs/RELEASE_CHECKLIST.md`, step 10.
+> The defaults below remain a development convenience only.
+
 **These are demo credentials only. Change every password (via the env vars
 below) before sharing a deployed link with anyone outside your team, and
 never commit real production passwords to git.**

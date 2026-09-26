@@ -1,11 +1,10 @@
 import { Modal } from "@/components/ui/modal";
 import { Badge } from "@/components/ui/badge";
-import { eventsForDate, eventTypeMeta } from "@/lib/mock-data/calendar";
+import { eventTypeMeta } from "@/lib/calendar-meta";
+import type { CalendarEvent } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
 
-export function DayDetailModal({ date, onClose }: { date: string | null; onClose: () => void }) {
-  const events = date ? eventsForDate(date) : [];
-
+export function DayDetailModal({ date, events, onClose }: { date: string | null; events: CalendarEvent[]; onClose: () => void }) {
   return (
     <Modal
       open={Boolean(date)}

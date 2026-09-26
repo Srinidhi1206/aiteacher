@@ -5,7 +5,8 @@
 // components/admin/users-table.tsx / platform-analytics.tsx) since this
 // lives inside AdminTabs' client boundary.
 import * as React from "react";
-import { UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, DatabaseZap } from "lucide-react";
+import { upload as uploadToBlob } from "@vercel/blob/client";
+import { UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, DatabaseZap, Sparkles, Loader2 } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -15,7 +16,10 @@ import { inputClass, labelClass } from "@/components/register/field-styles";
 import { formatDate, cn } from "@/lib/utils";
 import { listStates, listBoards, listSchoolClasses, listSubjectsForClass, listChaptersForSubject } from "@/lib/actions/curriculum";
 import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin } from "@/lib/actions/materials";
-import { ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES, validateUploadFile } from "@/lib/storage/types";
+import { indexMaterial } from "@/lib/actions/material-index";
+import { importMaterialFromUrl } from "@/lib/actions/material-import";
+import { getMyAdminStatus } from "@/lib/actions/user-management";
+import { ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES, validateUploadFile, safeFilename } from "@/lib/storage/types";
 
 type State = Awaited<ReturnType<typeof listStates>>[number];
 type Board = Awaited<ReturnType<typeof listBoards>>[number];
@@ -49,11 +53,24 @@ export function StudyMaterialsCard() {
   const [file, setFile] = React.useState<File | null>(null);
   const [uploading, setUploading] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
+  const [mode, setMode] = React.useState<"upload" | "url">("upload");
+  const [importUrl, setImportUrl] = React.useState("");
+  const [rightsConfirmed, setRightsConfirmed] = React.useState(false);
 
   // Materials list
   const [materials, setMaterials] = React.useState<MaterialRow[] | null>(null);
   const [dbUnavailable, setDbUnavailable] = React.useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = React.useState<string | null>(null);
+  const [indexingId, setIndexingId] = React.useState<string | null>(null);
+  // Materials belong to a school. The platform super administrator is not attached to one, so
+  // there is nothing to upload to - say so instead of showing a form that can only fail.
+  const [noSchool, setNoSchool] = React.useState(false);
+
+  React.useEffect(() => {
+    getMyAdminStatus()
+      .then((me) => setNoSchool(me !== null && me.schoolId === null))
+      .catch(() => {});
+  }, []);
 
   const refreshMaterials = React.useCallback(() => {
     listMaterialsForAdmin()
@@ -105,12 +122,50 @@ export function StudyMaterialsCard() {
     setDescription("");
     setMaterialType("NOTES");
     setFile(null);
+    setImportUrl("");
+    setRightsConfirmed(false);
     setFormError(null);
+  }
+
+  async function handleImport() {
+    if (!title.trim()) return setFormError("Title is required.");
+    if (!boardId || !schoolClassId || !subjectId || !chapterId) return setFormError("Select board, class, subject, and chapter.");
+    if (!importUrl.trim()) return setFormError("Enter the web address of a PDF file.");
+    if (!rightsConfirmed) return setFormError("Please confirm that you have the right to use this file.");
+    setUploading(true);
+    try {
+      const result = await importMaterialFromUrl({
+        url: importUrl,
+        rightsConfirmed,
+        title,
+        description: description || undefined,
+        materialType,
+        boardId,
+        schoolClassId,
+        subjectId,
+        chapterId,
+        topicId: topicId || undefined,
+      });
+      if (!result.ok) {
+        setFormError(result.error ?? "Import failed.");
+        return;
+      }
+      const importedTitle = title;
+      showToast(`Imported "${importedTitle}"`, "The material is now visible to students once published.");
+      resetForm();
+      refreshMaterials();
+      if (result.data) void runIndex(result.data.id, importedTitle);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "Import failed.");
+    } finally {
+      setUploading(false);
+    }
   }
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
+    if (mode === "url") return handleImport();
 
     if (!title.trim()) return setFormError("Title is required.");
     if (!boardId || !schoolClassId || !subjectId || !chapterId) return setFormError("Select board, class, subject, and chapter.");
@@ -119,18 +174,48 @@ export function StudyMaterialsCard() {
     if (!fileCheck.ok) return setFormError(fileCheck.error);
 
     setUploading(true);
-    const result = await createMaterial(
-      { title, description: description || undefined, materialType, boardId, schoolClassId, subjectId, chapterId, topicId: topicId || undefined },
-      file
-    );
-    setUploading(false);
-
-    if (!result.ok) {
-      setFormError(result.error ?? "Upload failed.");
-      return;
+    try {
+      // Uploads directly from the browser to Vercel Blob via a short-lived
+      // token from /api/materials/upload - the file's bytes never pass
+      // through a Server Action or serverless function body, which is what
+      // blocked a real, large textbook PDF before (Next's ~1MB Server
+      // Action limit and Vercel's ~4.5MB request body limit, both far
+      // smaller than MAX_UPLOAD_BYTES ever was). createMaterial only
+      // receives the resulting pathname and independently re-verifies the
+      // upload server-side - see lib/actions/materials.ts.
+      const blob = await uploadToBlob(
+        `materials/${schoolClassId}/${subjectId}/${Date.now()}-${safeFilename(file.name)}`,
+        file,
+        { access: "public", contentType: file.type, handleUploadUrl: "/api/materials/upload" }
+      );
+      const result = await createMaterial(
+        { title, description: description || undefined, materialType, boardId, schoolClassId, subjectId, chapterId, topicId: topicId || undefined },
+        { storageKey: blob.pathname, fileName: file.name }
+      );
+      if (!result.ok) {
+        setFormError(result.error ?? "Upload failed.");
+        return;
+      }
+      showToast(`Uploaded "${title}"`, "The material is now visible to students once published.");
+      const uploadedTitle = title;
+      resetForm();
+      refreshMaterials();
+      // Make it searchable for the AI Tutor right away (runs on its own request,
+      // so a slow or failing index never blocks or fails the upload itself).
+      if (result.data && file.name.toLowerCase().endsWith(".pdf")) void runIndex(result.data.id, uploadedTitle);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setUploading(false);
     }
-    showToast(`Uploaded "${title}"`, "The material is now visible to students once published.");
-    resetForm();
+  }
+
+  async function runIndex(id: string, materialTitle: string) {
+    setIndexingId(id);
+    const res = await indexMaterial(id);
+    setIndexingId(null);
+    if (res.ok) showToast("AI Tutor can now use this material", `"${materialTitle}" was indexed (${res.data?.chunks ?? 0} passages).`);
+    else showToast("Could not index for the AI Tutor", res.error ?? "");
     refreshMaterials();
   }
 
@@ -152,6 +237,24 @@ export function StudyMaterialsCard() {
     }
     showToast(`Deleted "${title}"`);
     refreshMaterials();
+  }
+
+  if (noSchool) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <UploadCloud className="h-4 w-4 text-primary-500" /> Study Materials
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            Study materials belong to a school. Your account is not attached to a school, so there is nothing to upload to here. Sign in as a school
+            administrator to upload, import and manage a school&apos;s materials.
+          </p>
+        </CardContent>
+      </Card>
+    );
   }
 
   return (
@@ -244,28 +347,86 @@ export function StudyMaterialsCard() {
             </div>
           </div>
 
-          <label
-            className={cn(
-              "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed p-6 text-center transition-colors",
-              "border-gray-200 hover:border-primary-300 dark:border-gray-700"
-            )}
-          >
-            <UploadCloud className="h-7 w-7 text-gray-400" />
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-200">{file ? file.name : "Click to choose a file"}</p>
-            <p className="text-xs text-gray-400">PDF, Word, PowerPoint, images, or video, up to {MAX_UPLOAD_BYTES / (1024 * 1024)}MB</p>
-            <input
-              type="file"
-              className="hidden"
-              accept={ALLOWED_MIME_TYPES.join(",")}
-              disabled={uploading}
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
+          <div className="flex gap-1 rounded-lg bg-gray-100 p-1 text-xs font-medium dark:bg-gray-800" role="tablist" aria-label="How to add the material">
+            {(
+              [
+                ["upload", "Upload a file"],
+                ["url", "Import from a web address"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={mode === value}
+                disabled={uploading}
+                onClick={() => {
+                  setMode(value);
+                  setFormError(null);
+                }}
+                className={cn(
+                  "flex-1 rounded-md px-2 py-1.5 transition-colors",
+                  mode === value ? "bg-white text-primary-700 shadow-sm dark:bg-gray-900 dark:text-primary-300" : "text-gray-500 hover:text-gray-700 dark:text-gray-400"
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {mode === "upload" ? (
+            <label
+              className={cn(
+                "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed p-6 text-center transition-colors",
+                "border-gray-200 hover:border-primary-300 dark:border-gray-700"
+              )}
+            >
+              <UploadCloud className="h-7 w-7 text-gray-400" />
+              <p className="text-sm font-medium text-gray-700 dark:text-gray-200">{file ? file.name : "Click to choose a file"}</p>
+              <p className="text-xs text-gray-400">PDF, Word, PowerPoint, images, or video, up to {MAX_UPLOAD_BYTES / (1024 * 1024)}MB</p>
+              <input
+                type="file"
+                className="hidden"
+                accept={ALLOWED_MIME_TYPES.join(",")}
+                disabled={uploading}
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+          ) : (
+            <div className="space-y-2 rounded-xl border border-gray-200 p-3 dark:border-gray-700">
+              <div>
+                <label className={labelClass}>Web address of a PDF</label>
+                <input
+                  className={inputClass}
+                  type="url"
+                  inputMode="url"
+                  placeholder="https://example.org/path/to/book.pdf"
+                  value={importUrl}
+                  onChange={(e) => setImportUrl(e.target.value)}
+                  disabled={uploading}
+                />
+              </div>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Paste a direct link to a single PDF (https only, up to 25MB). Pages that need a sign-in or permission cannot be imported - download those
+                yourself and use the upload option instead.
+              </p>
+              <label className="flex items-start gap-2 text-xs text-gray-700 dark:text-gray-200">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={rightsConfirmed}
+                  onChange={(e) => setRightsConfirmed(e.target.checked)}
+                  disabled={uploading}
+                />
+                <span>I confirm this file is freely available or that I have the right to use it for teaching.</span>
+              </label>
+            </div>
+          )}
 
           {formError && <p className="text-sm text-red-600 dark:text-red-400">{formError}</p>}
 
           <Button type="submit" disabled={uploading} className="w-full">
-            {uploading ? "Uploading..." : "Upload material"}
+            {uploading ? (mode === "url" ? "Importing..." : "Uploading...") : mode === "url" ? "Import material" : "Upload material"}
           </Button>
         </form>
 
@@ -290,6 +451,24 @@ export function StudyMaterialsCard() {
                       <p className="text-sm font-medium text-gray-800 dark:text-gray-100">{m.title}</p>
                       <p className="text-xs text-gray-400">
                         {m.subject.name} - {m.schoolClass.label} - {m.chapter.name} - {(m.sizeKb / 1024).toFixed(1)} MB - {formatDate(m.uploadedAt)}
+                      </p>
+                      <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                        {indexingId === m.id ? (
+                          <span className="flex items-center gap-1 text-gray-500">
+                            <Loader2 className="h-3 w-3 animate-spin" /> Indexing for the AI Tutor...
+                          </span>
+                        ) : m.indexedAt ? (
+                          <span className="flex items-center gap-1 text-success-600 dark:text-success-400">
+                            <Sparkles className="h-3 w-3" /> AI Tutor ready ({m._count.chunks} passages)
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">{m.indexError ?? "Not yet searchable by the AI Tutor"}</span>
+                        )}
+                        {indexingId !== m.id && m.fileName.toLowerCase().endsWith(".pdf") && (
+                          <button onClick={() => runIndex(m.id, m.title)} className="font-medium text-primary-600 hover:underline dark:text-primary-300">
+                            {m.indexedAt ? "Re-index" : "Index for AI Tutor"}
+                          </button>
+                        )}
                       </p>
                     </div>
                   </div>

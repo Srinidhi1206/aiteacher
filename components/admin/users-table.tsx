@@ -7,7 +7,7 @@
 // actual authorization (e.g. "only a super admin may approve an admin") is
 // enforced server-side on every call, regardless of what this UI shows.
 import * as React from "react";
-import { Check, X, Ban, RotateCcw, ShieldAlert, Loader2 } from "lucide-react";
+import { Check, X, Ban, RotateCcw, ShieldAlert, Loader2, UserPlus, Copy, CheckCheck, KeyRound, BookUser } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import { Modal } from "@/components/ui/modal";
 import { DatabaseUnavailable } from "@/components/database-unavailable";
 import { useToast } from "@/components/ui/toast";
 import { formatDate } from "@/lib/utils";
+import { inputClass, labelClass } from "@/components/register/field-styles";
 import {
   listUsersForAdmin,
   approveRegistration,
@@ -22,7 +23,19 @@ import {
   suspendUser,
   reactivateUser,
   getMyAdminStatus,
+  createStudent,
+  resetUserPassword,
 } from "@/lib/actions/user-management";
+import { listAllBoardsWithClasses, listSchools, listSchoolClasses, listSubjectsForClass } from "@/lib/actions/curriculum";
+import {
+  listTeacherAssignments,
+  assignTeacherToClassSubject,
+  removeTeacherAssignment,
+  type TeacherAssignmentRow,
+} from "@/lib/actions/teacher-management";
+
+type BoardWithClasses = Awaited<ReturnType<typeof listAllBoardsWithClasses>>[number];
+type SchoolOption = Awaited<ReturnType<typeof listSchools>>[number];
 
 type AdminUserRow = Awaited<ReturnType<typeof listUsersForAdmin>>[number];
 
@@ -39,16 +52,50 @@ const statusVariant: Record<string, "success" | "danger" | "warning" | "default"
   PENDING: "warning",
 };
 
+// What a reviewer needs to see before approving an admin request: which school
+// it is for, and - the security-relevant part - whether the applicant is asking
+// to join a school that already exists rather than register a new one.
+function AdminRequestDetails({ details }: { details: unknown }) {
+  const d = (details ?? {}) as { schoolName?: string; joinSchoolId?: string; reason?: string };
+  if (!d.schoolName) return null;
+  return (
+    <span className="mt-0.5 block text-xs font-normal text-gray-500 dark:text-gray-400">
+      {d.joinSchoolId ? (
+        <span className="font-medium text-warning-700 dark:text-warning-400">Wants to join existing school: {d.schoolName}</span>
+      ) : (
+        <>New school: {d.schoolName}</>
+      )}
+      {d.reason ? <span className="block max-w-xs truncate" title={d.reason}>&ldquo;{d.reason}&rdquo;</span> : null}
+    </span>
+  );
+}
+
+// A teacher's requested class/subject pairs are applied automatically when the request is approved.
+function TeacherRequestDetails({ details }: { details: unknown }) {
+  const d = (details ?? {}) as { requestedAssignments?: unknown[] };
+  const count = Array.isArray(d.requestedAssignments) ? d.requestedAssignments.length : 0;
+  if (count === 0) return null;
+  return (
+    <span className="mt-0.5 block text-xs font-normal text-gray-500 dark:text-gray-400">
+      Teaches {count} class/subject combination{count === 1 ? "" : "s"} - applied when you approve (you can change them afterwards).
+    </span>
+  );
+}
+
 export function UsersTable() {
   const [users, setUsers] = React.useState<AdminUserRow[] | null>(null);
   const [dbUnavailable, setDbUnavailable] = React.useState(false);
   const [unauthorized, setUnauthorized] = React.useState(false);
   const [isSuperAdmin, setIsSuperAdmin] = React.useState(false);
+  const [myAdmin, setMyAdmin] = React.useState<Awaited<ReturnType<typeof getMyAdminStatus>>>(null);
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>("PENDING");
   const [roleFilter, setRoleFilter] = React.useState<RoleFilterValue>("ALL");
   const [actingUserId, setActingUserId] = React.useState<string | null>(null);
   const [rejectTarget, setRejectTarget] = React.useState<AdminUserRow | null>(null);
   const [rejectReason, setRejectReason] = React.useState("");
+  const [showCreateStudent, setShowCreateStudent] = React.useState(false);
+  const [resetTarget, setResetTarget] = React.useState<AdminUserRow | null>(null);
+  const [assignTarget, setAssignTarget] = React.useState<AdminUserRow | null>(null);
   const { showToast } = useToast();
 
   const refresh = React.useCallback(async () => {
@@ -56,6 +103,7 @@ export function UsersTable() {
       const [rows, status] = await Promise.all([listUsersForAdmin(), getMyAdminStatus()]);
       setUsers(rows);
       setIsSuperAdmin(status?.isSuperAdmin ?? false);
+      setMyAdmin(status);
       setDbUnavailable(false);
       setUnauthorized(false);
     } catch (err) {
@@ -146,6 +194,9 @@ export function UsersTable() {
     <Card>
       <CardHeader>
         <CardTitle>Users &amp; Registration Requests</CardTitle>
+        <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setShowCreateStudent(true)}>
+          <UserPlus className="h-3.5 w-3.5" /> Create Student
+        </Button>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex flex-wrap gap-1.5">
             {statusFilters.map((f) => (
@@ -183,7 +234,11 @@ export function UsersTable() {
         {users === null ? (
           <p className="py-8 text-center text-sm text-gray-400">Loading...</p>
         ) : visible.length === 0 ? (
-          <p className="py-8 text-center text-sm text-gray-400">No users match this filter.</p>
+          <p className="py-8 text-center text-sm text-gray-400">
+            {statusFilter === "PENDING" && roleFilter === "ALL"
+              ? 'No registrations are waiting for approval. Choose "all" above to see every user.'
+              : "No users match this filter."}
+          </p>
         ) : (
           <table className="w-full min-w-[720px] border-collapse text-sm">
             <thead>
@@ -206,6 +261,8 @@ export function UsersTable() {
                     <td className="py-2.5 pr-3 font-medium text-gray-800 dark:text-gray-100">
                       {u.name}
                       {isProtectedSuperAdmin && <Badge variant="primary" className="ml-1.5">Super Admin</Badge>}
+                      {u.status === "PENDING" && u.role === "ADMIN" && <AdminRequestDetails details={u.registrationRequest?.requestedDetails} />}
+                      {u.status === "PENDING" && u.role === "TEACHER" && <TeacherRequestDetails details={u.registrationRequest?.requestedDetails} />}
                     </td>
                     <td className="py-2.5 pr-3 text-gray-500 dark:text-gray-400">{u.email}</td>
                     <td className="py-2.5 pr-3">
@@ -239,6 +296,16 @@ export function UsersTable() {
                               <X className="h-3.5 w-3.5" /> Reject
                             </Button>
                           </>
+                        )}
+                        {u.status === "ACTIVE" && u.role === "TEACHER" && (
+                          <Button size="sm" variant="outline" disabled={acting} onClick={() => setAssignTarget(u)}>
+                            <BookUser className="h-3.5 w-3.5" /> Assignments
+                          </Button>
+                        )}
+                        {u.status === "ACTIVE" && (u.role === "STUDENT" || u.role === "TEACHER") && (
+                          <Button size="sm" variant="outline" disabled={acting} onClick={() => setResetTarget(u)}>
+                            <KeyRound className="h-3.5 w-3.5" /> Reset password
+                          </Button>
                         )}
                         {u.status === "ACTIVE" && !isProtectedSuperAdmin && (
                           <Button
@@ -291,6 +358,487 @@ export function UsersTable() {
           </Button>
         </div>
       </Modal>
+
+      <ResetPasswordModal target={resetTarget} onClose={() => setResetTarget(null)} />
+
+      <TeacherAssignmentsModal target={assignTarget} onClose={() => setAssignTarget(null)} />
+
+      <CreateStudentModal
+        open={showCreateStudent}
+        onClose={() => setShowCreateStudent(false)}
+        onCreated={refresh}
+        myAdmin={myAdmin}
+      />
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Teacher assignments (lib/actions/teacher-management.ts): which class and
+// subject a teacher teaches. Every exam, worksheet and analytics screen a
+// teacher uses is gated on these. Classes offered are the teacher's school's
+// board only, and subjects are the ones that class really offers - both read
+// from the database; the server re-checks all of it on every call.
+// ---------------------------------------------------------------------------
+function TeacherAssignmentsModal({ target, onClose }: { target: AdminUserRow | null; onClose: () => void }) {
+  const { showToast } = useToast();
+  const [assignments, setAssignments] = React.useState<TeacherAssignmentRow[] | null>(null);
+  const [classes, setClasses] = React.useState<Awaited<ReturnType<typeof listSchoolClasses>>>([]);
+  const [subjects, setSubjects] = React.useState<Awaited<ReturnType<typeof listSubjectsForClass>>>([]);
+  const [classId, setClassId] = React.useState("");
+  const [subjectId, setSubjectId] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const teacherId = target?.id ?? null;
+
+  const load = React.useCallback(async () => {
+    if (!teacherId) return;
+    setError(null);
+    const res = await listTeacherAssignments(teacherId);
+    if (!res.ok || !res.data) {
+      setError(res.error || "Could not load assignments.");
+      setAssignments([]);
+      return;
+    }
+    // Classes are loaded BEFORE the list is shown, so "no board set" can never flash up
+    // while the class list is still on its way.
+    const offered = res.data.boardId ? await listSchoolClasses(res.data.boardId) : [];
+    setClasses(offered);
+    setAssignments(res.data.assignments);
+  }, [teacherId]);
+
+  React.useEffect(() => {
+    setAssignments(null);
+    setClassId("");
+    setSubjectId("");
+    setSubjects([]);
+    load();
+  }, [load]);
+
+  React.useEffect(() => {
+    setSubjectId("");
+    if (!classId) {
+      setSubjects([]);
+      return;
+    }
+    listSubjectsForClass(classId).then(setSubjects);
+  }, [classId]);
+
+  async function add() {
+    if (!teacherId || !classId || !subjectId) return;
+    setBusy(true);
+    setError(null);
+    const res = await assignTeacherToClassSubject(teacherId, classId, subjectId);
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.error || "Could not assign.");
+      return;
+    }
+    showToast("Assignment added", `${target?.name} can now create exams and worksheets for it.`);
+    setSubjectId("");
+    load();
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    const res = await removeTeacherAssignment(id);
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.error || "Could not remove.");
+      return;
+    }
+    showToast("Assignment removed", `${target?.name} can no longer create new exams for it.`);
+    load();
+  }
+
+  return (
+    <Modal
+      open={!!target}
+      onClose={onClose}
+      title="Class & subject assignments"
+      description={target ? `What "${target.name}" teaches. A teacher can only create exams and worksheets for these.` : undefined}
+    >
+      <div className="space-y-4">
+        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+
+        <div>
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-400">Current</p>
+          {assignments === null ? (
+            <p className="text-sm text-gray-400">Loading...</p>
+          ) : assignments.length === 0 ? (
+            <p className="text-sm text-gray-500 dark:text-gray-400">No assignments yet, so this teacher can&apos;t create exams or worksheets.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {assignments.map((a) => (
+                <li key={a.id} className="flex items-center justify-between gap-2 rounded-lg border border-gray-100 px-3 py-2 text-sm dark:border-gray-800">
+                  <span className="text-gray-700 dark:text-gray-200">
+                    {a.classLabel} - {a.subjectName}
+                  </span>
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => remove(a.id)} aria-label={`Remove ${a.classLabel} - ${a.subjectName}`}>
+                    <X className="h-3.5 w-3.5" /> Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="space-y-2 border-t border-gray-100 pt-3 dark:border-gray-800">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Add</p>
+          {assignments !== null && classes.length === 0 ? (
+            <p className="text-sm text-gray-500 dark:text-gray-400">This teacher&apos;s school has no board set, so there are no classes to offer.</p>
+          ) : (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div>
+                <label className={labelClass}>Class</label>
+                <select className={`${inputClass} !py-2 !text-xs`} value={classId} onChange={(e) => setClassId(e.target.value)} disabled={busy}>
+                  <option value="">Select</option>
+                  {classes.map((c) => (
+                    <option key={c.id} value={c.id}>{c.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={labelClass}>Subject</label>
+                <select className={`${inputClass} !py-2 !text-xs`} value={subjectId} onChange={(e) => setSubjectId(e.target.value)} disabled={busy || !classId}>
+                  <option value="">Select</option>
+                  {subjects.map((sb) => (
+                    <option key={sb.id} value={sb.id}>{sb.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="ghost" onClick={onClose}>
+              Done
+            </Button>
+            <Button disabled={busy || !classId || !subjectId} onClick={add}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BookUser className="h-3.5 w-3.5" />} Assign
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Reset password (resetUserPassword in lib/actions/user-management.ts). Two
+// steps: confirm, then the new password is shown exactly once from that
+// action's response only - it lives in this component's local state and is
+// gone when the dialog closes or the page refreshes; only the bcrypt hash is
+// ever stored, so there is nothing to look up again.
+// ---------------------------------------------------------------------------
+function ResetPasswordModal({ target, onClose }: { target: AdminUserRow | null; onClose: () => void }) {
+  const { showToast } = useToast();
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [result, setResult] = React.useState<{ username: string; password: string } | null>(null);
+  const [copied, setCopied] = React.useState(false);
+
+  function close() {
+    setResult(null);
+    setError(null);
+    setCopied(false);
+    onClose();
+  }
+
+  async function confirmReset() {
+    if (!target) return;
+    setSubmitting(true);
+    setError(null);
+    const res = await resetUserPassword(target.id);
+    setSubmitting(false);
+    if (!res.ok || !res.data) {
+      setError(res.error || "Could not reset the password.");
+      return;
+    }
+    setResult({ username: res.data.username, password: res.data.newPassword });
+    showToast("Password reset", `${target.name}'s old password no longer works.`);
+  }
+
+  async function copy() {
+    if (!result) return;
+    await navigator.clipboard.writeText(`Student ID: ${result.username}\nPassword: ${result.password}`);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <Modal
+      open={!!target}
+      onClose={close}
+      title={result ? "New password issued" : "Reset password"}
+      description={!result && target ? `Issue a new password for "${target.name}". Their current password will stop working.` : undefined}
+    >
+      {result ? (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-warning-200 bg-warning-50 p-4 text-sm dark:border-warning-900/40 dark:bg-warning-900/20">
+            <p className="mb-3 font-medium text-warning-800 dark:text-warning-300">
+              Save this password now. It will not be shown again.
+            </p>
+            <div className="space-y-1.5 rounded-lg bg-white p-3 font-mono text-xs dark:bg-gray-950">
+              <p className="text-gray-700 dark:text-gray-200">
+                <span className="text-gray-400">Student ID:</span> {result.username}
+              </p>
+              <p className="text-gray-700 dark:text-gray-200">
+                <span className="text-gray-400">Password:</span> {result.password}
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" className="gap-1.5" onClick={copy}>
+              {copied ? <CheckCheck className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />} {copied ? "Copied" : "Copy"}
+            </Button>
+            <Button onClick={close}>Done</Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={close} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={confirmReset} disabled={submitting}>
+              {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />} Reset password
+            </Button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Create Student - admin-initiated account creation (createStudent in
+// lib/actions/user-management.ts). Board -> Class cascades from one real
+// query (listAllBoardsWithClasses, already used by the Board & Classes
+// admin screen) - no hard-coded board/class lists. On success, the
+// initial password is shown exactly once, from this action's response
+// only; it is never re-fetched from the database (it can't be - only the
+// bcrypt hash is stored) and disappears the moment the modal is closed or
+// the page is refreshed, since it only ever lives in this component's
+// local state.
+// ---------------------------------------------------------------------------
+
+function CreateStudentModal({
+  open,
+  onClose,
+  onCreated,
+  myAdmin,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+  myAdmin: Awaited<ReturnType<typeof getMyAdminStatus>>;
+}) {
+  const [boards, setBoards] = React.useState<BoardWithClasses[] | null>(null);
+  const [schools, setSchools] = React.useState<SchoolOption[] | null>(null);
+  const [name, setName] = React.useState("");
+  const [username, setUsername] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [schoolId, setSchoolId] = React.useState("");
+  const [boardId, setBoardId] = React.useState("");
+  const [schoolClassId, setSchoolClassId] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [created, setCreated] = React.useState<{ username: string; password: string } | null>(null);
+  const [copied, setCopied] = React.useState(false);
+  const { showToast } = useToast();
+
+  // A school-scoped admin (myAdmin.schoolId set) always creates students for
+  // their own school - the School field is locked to it, and if that school
+  // already has a board assigned, Board is locked too. This mirrors exactly
+  // what createStudent enforces server-side (never trusting client input for
+  // schoolId/boardId once an admin is school-scoped) - the UI reflects the
+  // real constraint instead of offering choices the server would override.
+  const lockedSchoolId = myAdmin?.schoolId ?? null;
+  const lockedBoardId = myAdmin?.schoolBoardId ?? null;
+
+  React.useEffect(() => {
+    if (!open || boards !== null) return;
+    Promise.all([listAllBoardsWithClasses(), listSchools()])
+      .then(([b, s]) => {
+        setBoards(b);
+        setSchools(s);
+        if (lockedSchoolId) setSchoolId(lockedSchoolId);
+        if (lockedBoardId) setBoardId(lockedBoardId);
+      })
+      .catch(() => setError("Could not load boards/classes. Is the database connected?"));
+  }, [open, boards, lockedSchoolId, lockedBoardId]);
+
+  function resetForm() {
+    setName("");
+    setUsername("");
+    setPassword("");
+    setSchoolId(lockedSchoolId ?? "");
+    setBoardId(lockedBoardId ?? "");
+    setSchoolClassId("");
+    setError(null);
+    setCreated(null);
+    setCopied(false);
+  }
+
+  function handleClose() {
+    resetForm();
+    onClose();
+  }
+
+  const selectedBoard = boards?.find((b) => b.id === boardId) ?? null;
+  const availableClasses = (selectedBoard?.schoolClasses ?? []).filter((c) => c.isEnabled);
+  const enabledBoards = (boards ?? []).filter((b) => b.isEnabled);
+  const enabledSchools = (schools ?? []).filter((s) => s.isEnabled);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setSubmitting(true);
+    const result = await createStudent({
+      name,
+      username,
+      password,
+      boardId,
+      schoolClassId,
+      schoolId: schoolId || undefined,
+    });
+    setSubmitting(false);
+    if (!result.ok || !result.data) {
+      setError(result.error || "Could not create student.");
+      return;
+    }
+    setCreated({ username: result.data.username, password: result.data.initialPassword });
+    showToast("Student created", `${name} can now sign in.`);
+    onCreated();
+  }
+
+  async function copyCredentials() {
+    if (!created) return;
+    await navigator.clipboard.writeText(`Student ID: ${created.username}\nPassword: ${created.password}`);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title={created ? "Student account created" : "Create student"}
+      description={created ? undefined : "Assign a board and class from the real curriculum - the student will only see that curriculum."}
+    >
+      {created ? (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-warning-200 bg-warning-50 p-4 text-sm dark:border-warning-900/40 dark:bg-warning-900/20">
+            <p className="mb-3 font-medium text-warning-800 dark:text-warning-300">
+              Save these credentials now. The password will not be shown again.
+            </p>
+            <div className="space-y-1.5 rounded-lg bg-white p-3 font-mono text-xs dark:bg-gray-950">
+              <p className="text-gray-700 dark:text-gray-200">
+                <span className="text-gray-400">Student ID:</span> {created.username}
+              </p>
+              <p className="text-gray-700 dark:text-gray-200">
+                <span className="text-gray-400">Password:</span> {created.password}
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" className="gap-1.5" onClick={copyCredentials}>
+              {copied ? <CheckCheck className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />} {copied ? "Copied" : "Copy"}
+            </Button>
+            <Button onClick={handleClose}>Done</Button>
+          </div>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div>
+            <label className={labelClass}>Student name</label>
+            <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} required disabled={submitting} />
+          </div>
+          <div>
+            <label className={labelClass}>Student ID / Username</label>
+            <input className={inputClass} value={username} onChange={(e) => setUsername(e.target.value)} required disabled={submitting} />
+          </div>
+          <div>
+            <label className={labelClass}>Initial password</label>
+            <input
+              type="text"
+              className={inputClass}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              disabled={submitting}
+              placeholder="At least 8 characters, letters and numbers"
+            />
+          </div>
+          <div>
+            <label className={labelClass}>School</label>
+            {lockedSchoolId ? (
+              <p className={`${inputClass} bg-gray-50 text-gray-500 dark:bg-gray-800`}>
+                {myAdmin?.schoolName ?? "Your school"} <span className="text-xs">(your school)</span>
+              </p>
+            ) : (
+              <select className={inputClass} value={schoolId} onChange={(e) => setSchoolId(e.target.value)} disabled={submitting}>
+                <option value="">No school</option>
+                {enabledSchools.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+          <div>
+            <label className={labelClass}>Board</label>
+            {lockedBoardId ? (
+              <p className={`${inputClass} bg-gray-50 text-gray-500 dark:bg-gray-800`}>
+                {enabledBoards.find((b) => b.id === lockedBoardId)?.shortName ?? "Your school&apos;s board"} <span className="text-xs">(your school&apos;s board)</span>
+              </p>
+            ) : (
+              <select
+                className={inputClass}
+                value={boardId}
+                onChange={(e) => {
+                  setBoardId(e.target.value);
+                  setSchoolClassId("");
+                }}
+                required
+                disabled={submitting || boards === null}
+              >
+                <option value="">{boards === null ? "Loading..." : "Select a board"}</option>
+                {enabledBoards.map((b) => (
+                  <option key={b.id} value={b.id}>{b.shortName} - {b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+          <div>
+            <label className={labelClass}>Class</label>
+            <select
+              className={inputClass}
+              value={schoolClassId}
+              onChange={(e) => setSchoolClassId(e.target.value)}
+              required
+              disabled={submitting || !boardId}
+            >
+              <option value="">{boardId ? "Select a class" : "Select a board first"}</option>
+              {availableClasses.map((c) => (
+                <option key={c.id} value={c.id}>{c.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+
+          <div className="flex justify-end gap-2 pt-1">
+            <Button type="button" variant="ghost" onClick={handleClose} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={submitting || !boardId || !schoolClassId}>
+              {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Create student
+            </Button>
+          </div>
+        </form>
+      )}
+    </Modal>
   );
 }

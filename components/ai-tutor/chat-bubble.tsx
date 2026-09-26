@@ -1,16 +1,18 @@
+"use client";
 import { Sparkles } from "lucide-react";
 import { ChatMessage } from "@/lib/types";
 import { Avatar } from "@/components/ui/avatar";
-import { currentStudent } from "@/lib/mock-data/students";
+import { useSessionUser } from "@/components/layout/session-user-context";
 import { cn } from "@/lib/utils";
 
 export function ChatBubble({ message }: { message: ChatMessage }) {
+  const user = useSessionUser();
   const isStudent = message.role === "student";
 
   return (
     <div className={cn("flex items-end gap-2", isStudent ? "flex-row-reverse" : "flex-row")}>
       {isStudent ? (
-        <Avatar initials={currentStudent.avatarInitials} colorClassName={currentStudent.avatarColor} size="sm" />
+        <Avatar initials={user ? user.name.slice(0, 2).toUpperCase() : "?"} colorClassName="bg-primary-500" size="sm" />
       ) : (
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary-600 text-white">
           <Sparkles className="h-4 w-4" />

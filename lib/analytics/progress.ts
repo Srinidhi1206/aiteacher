@@ -21,9 +21,10 @@ function topicStatusFor(masteryPct: number): TopicStatus {
 }
 
 /**
- * Recomputes mastery for every topic the student has graded exam answers
- * for, from real ExamAnswer rows (marksAwarded/marks), most recent first.
- * Persists to StudentTopicProgress. Returns the topics touched, so callers
+ * Recomputes mastery for every topic the student has graded results for,
+ * from real ExamAnswer rows (marksAwarded/marks) AND real practice Score rows
+ * (marksScored/marksTotal; Score.topic holds the topic id), so tests and
+ * practice feed one mastery number. Persists to StudentTopicProgress. Returns the topics touched, so callers
  * (weakness/strength detection) don't need to re-query.
  */
 export async function recalculateTopicProgress(studentId: string): Promise<{ topicId: string; masteryPct: number; attemptCount: number }[]> {
@@ -49,8 +50,29 @@ export async function recalculateTopicProgress(studentId: string): Promise<{ top
     byTopic.set(topicId, bucket);
   }
 
+  // Practice results count toward the same per-topic mastery. Score.topic is a
+  // free-text column; practice stores the topic id in it (see lib/actions/practice.ts).
+  const practiceScores = await prisma.score.findMany({
+    where: { attempt: { studentId } },
+    include: { attempt: { select: { createdAt: true } } },
+  });
+  for (const sc of practiceScores) {
+    const bucket = byTopic.get(sc.topic) ?? { scored: 0, total: 0, lastPracticedAt: null, count: 0 };
+    bucket.scored += sc.marksScored;
+    bucket.total += sc.marksTotal;
+    bucket.count += 1;
+    if (!bucket.lastPracticedAt || sc.attempt.createdAt > bucket.lastPracticedAt) bucket.lastPracticedAt = sc.attempt.createdAt;
+    byTopic.set(sc.topic, bucket);
+  }
+
+  // Only real topics of this student's curriculum may get a progress row.
+  const knownTopics = new Set(
+    (await prisma.topic.findMany({ where: { id: { in: [...byTopic.keys()] } }, select: { id: true } })).map((t) => t.id)
+  );
+
   const results: { topicId: string; masteryPct: number; attemptCount: number }[] = [];
   for (const [topicId, bucket] of byTopic) {
+    if (!knownTopics.has(topicId)) continue;
     const masteryPct = bucket.total > 0 ? Math.round((bucket.scored / bucket.total) * 100) : 0;
     await prisma.studentTopicProgress.upsert({
       where: { studentId_topicId: { studentId, topicId } },
@@ -60,6 +82,47 @@ export async function recalculateTopicProgress(studentId: string): Promise<{ top
     results.push({ topicId, masteryPct, attemptCount: bucket.count });
   }
   return results;
+}
+
+export interface TopicResult {
+  pct: number; // 0-100 for this one question
+  correct: boolean;
+  at: Date;
+}
+
+/**
+ * The student's most recent graded results on one topic, newest first, from
+ * exams AND practice - what the weak-area / strength engines use for their
+ * reason text and trend so both signals are treated the same way.
+ */
+export async function getRecentTopicResults(studentId: string, topicId: string, take = 5): Promise<TopicResult[]> {
+  const [answers, scores] = await Promise.all([
+    prisma.examAnswer.findMany({
+      where: { question: { topicId }, submission: { studentId }, marksAwarded: { not: null } },
+      include: { question: true, submission: true },
+      orderBy: { submission: { submittedAt: "desc" } },
+      take,
+    }),
+    prisma.score.findMany({
+      where: { topic: topicId, attempt: { studentId } },
+      include: { attempt: { select: { createdAt: true } } },
+      orderBy: { attempt: { createdAt: "desc" } },
+      take,
+    }),
+  ]);
+  const items: TopicResult[] = [
+    ...answers.map((a) => ({
+      pct: a.question.marks > 0 ? Math.round(((a.marksAwarded ?? 0) / a.question.marks) * 100) : 0,
+      correct: (a.marksAwarded ?? 0) >= a.question.marks,
+      at: a.submission.submittedAt ?? new Date(0),
+    })),
+    ...scores.map((sc) => ({
+      pct: sc.marksTotal > 0 ? Math.round((sc.marksScored / sc.marksTotal) * 100) : 0,
+      correct: sc.isCorrect,
+      at: sc.attempt.createdAt,
+    })),
+  ];
+  return items.sort((a, b) => b.at.getTime() - a.at.getTime()).slice(0, take);
 }
 
 /** Subject-level progress = average of its topics' mastery, weighted by attempt count; completion = % of the subject's topics with at least one attempt. */

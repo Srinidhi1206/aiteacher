@@ -31,13 +31,22 @@ async function getOwnedExamIds(schoolClassId: string, subjectId: string, teacher
   return exams.map((e) => e.id);
 }
 
+// A class (board + grade) is shared by every school on that board, so the
+// roster is always "this class, in the teacher's own school" - the school
+// comes from the teacher's own row (requireOwnedAssignment), never from the
+// client - and only accounts that can actually sign in (ACTIVE), not
+// rejected/pending/suspended ones.
+function classRosterWhere(schoolClassId: string, schoolId: string) {
+  return { schoolClassId, schoolId, user: { status: "ACTIVE" as const } };
+}
+
 export async function getClassOverview(schoolClassId: string, subjectId: string): Promise<ClassOverview> {
-  const { teacher } = await requireOwnedAssignment(schoolClassId, subjectId);
+  const { teacher, schoolId } = await requireOwnedAssignment(schoolClassId, subjectId);
 
   const [schoolClass, subject, studentCount, examIds] = await Promise.all([
     prisma.schoolClass.findUnique({ where: { id: schoolClassId }, select: { label: true } }),
     prisma.subject.findUnique({ where: { id: subjectId }, select: { name: true } }),
-    prisma.student.count({ where: { schoolClassId } }),
+    prisma.student.count({ where: classRosterWhere(schoolClassId, schoolId) }),
     getOwnedExamIds(schoolClassId, subjectId, teacher.id),
   ]);
 
@@ -78,10 +87,10 @@ export interface StudentPerformanceRow {
 }
 
 export async function getStudentPerformanceTable(schoolClassId: string, subjectId: string): Promise<StudentPerformanceRow[]> {
-  const { teacher } = await requireOwnedAssignment(schoolClassId, subjectId);
+  const { teacher, schoolId } = await requireOwnedAssignment(schoolClassId, subjectId);
 
   const students = await prisma.student.findMany({
-    where: { schoolClassId },
+    where: classRosterWhere(schoolClassId, schoolId),
     include: { user: { select: { name: true } } },
     orderBy: { user: { name: "asc" } },
   });

@@ -36,12 +36,39 @@ async function requireAdminOrTeacher() {
 }
 
 /**
- * Creates a StudyMaterial. `file` must already have been validated by the
- * caller's form (client-side) - it is re-validated here server-side
- * regardless, since client-side checks are only a UX nicety, never a
- * security boundary.
+ * Resolves the school the acting admin/teacher belongs to, straight from
+ * their own profile row - never trusted from client input, same pattern as
+ * requireAdminActor's schoolId in lib/actions/user-management.ts. Returns
+ * null when the actor has no school (a global/legacy admin, or a teacher
+ * with no school set) - callers decide what "no school" means for their
+ * case: reject a create, return an empty list, or deny a mutation.
  */
-export async function createMaterial(input: unknown, file: File): Promise<ActionResult<{ id: string }>> {
+async function resolveActorSchool(session: { id: string; role: string }): Promise<{ schoolId: string; boardId: string | null } | null> {
+  if (session.role === "admin") {
+    const admin = await prisma.admin.findUnique({ where: { userId: session.id }, include: { school: true } });
+    if (!admin?.school) return null;
+    return { schoolId: admin.school.id, boardId: admin.school.boardId };
+  }
+  const teacher = await prisma.teacher.findUnique({ where: { userId: session.id }, include: { school: true } });
+  if (!teacher?.school) return null;
+  return { schoolId: teacher.school.id, boardId: teacher.school.boardId };
+}
+
+/**
+ * Creates a StudyMaterial for a file already uploaded directly from the
+ * browser to Blob storage (see app/api/materials/upload/route.ts and
+ * components/admin/study-materials-card.tsx) - this action never receives
+ * or re-uploads the file's bytes itself, only the pathname the client
+ * uploaded to. That pathname is not a secret and isn't trusted for
+ * anything: `storage.getMetadata()` re-derives the real size/contentType/
+ * url directly from the storage provider before anything is validated or
+ * written, so a crafted `fileRef` pointing at an arbitrary/nonexistent
+ * pathname fails the metadata lookup rather than creating a row.
+ */
+export async function createMaterial(
+  input: unknown,
+  fileRef: { storageKey: string; fileName: string }
+): Promise<ActionResult<{ id: string }>> {
   try {
     const session = await requireAdminOrTeacher();
     const parsed = materialInputSchema.safeParse(input);
@@ -50,12 +77,39 @@ export async function createMaterial(input: unknown, file: File): Promise<Action
     }
     const data = parsed.data;
 
-    const fileCheck = validateUploadFile({ type: file.type, size: file.size });
-    if (!fileCheck.ok) return { ok: false, error: fileCheck.error };
+    // The material's school is always derived from the uploader's own
+    // school - never accepted from the form/browser. An actor with no
+    // school at all cannot create a material that would have no owner.
+    const actorSchool = await resolveActorSchool(session);
+    if (!actorSchool) {
+      return {
+        ok: false,
+        error: "Your account isn't associated with a school yet. Contact a super administrator before uploading materials.",
+      };
+    }
+    // A school with a board already set only ever teaches that board - a
+    // material for a different board would never be visible to any of
+    // that school's students anyway. Schools that predate this feature
+    // (no board set yet) skip this check rather than blocking uploads for
+    // an admin who has no way to fix it themselves.
+    if (actorSchool.boardId && actorSchool.boardId !== data.boardId) {
+      return { ok: false, error: "Selected board does not match your school's board." };
+    }
 
     if (!storage.isConfigured) {
       return { ok: false, error: "File storage is not configured. Set BLOB_READ_WRITE_TOKEN to enable uploads (see docs/DATABASE.md)." };
     }
+
+    let meta;
+    try {
+      meta = await storage.getMetadata(fileRef.storageKey);
+    } catch (e) {
+      if (e instanceof StorageNotConfiguredError) return { ok: false, error: e.message };
+      return { ok: false, error: "Could not verify the uploaded file - please try uploading again." };
+    }
+
+    const fileCheck = validateUploadFile({ type: meta.contentType, size: meta.size });
+    if (!fileCheck.ok) return { ok: false, error: fileCheck.error };
 
     // Teachers may only attach material to a class/subject they're actually
     // assigned to - admins aren't restricted.
@@ -68,30 +122,19 @@ export async function createMaterial(input: unknown, file: File): Promise<Action
       if (!assigned) return { ok: false, error: "You are not assigned to this class/subject." };
     }
 
-    let uploadResult;
-    try {
-      uploadResult = await storage.upload({
-        file,
-        pathname: `materials/${data.schoolClassId}/${data.subjectId}/${Date.now()}-${safeFilename(file.name)}`,
-        contentType: file.type,
-      });
-    } catch (e) {
-      if (e instanceof StorageNotConfiguredError) return { ok: false, error: e.message };
-      throw e;
-    }
-
     const teacherProfile = session.role === "teacher" ? await prisma.teacher.findUnique({ where: { userId: session.id } }) : null;
 
     const material = await prisma.studyMaterial.create({
       data: {
         title: data.title,
         description: data.description,
-        fileName: safeFilename(file.name),
-        fileUrl: uploadResult.url,
-        storageKey: uploadResult.storageKey,
+        fileName: safeFilename(fileRef.fileName),
+        fileUrl: meta.url,
+        storageKey: fileRef.storageKey,
         materialType: data.materialType,
-        sizeKb: Math.ceil(uploadResult.sizeBytes / 1024),
+        sizeKb: Math.ceil(meta.size / 1024),
         status: "READY",
+        schoolId: actorSchool.schoolId,
         boardId: data.boardId,
         schoolClassId: data.schoolClassId,
         subjectId: data.subjectId,
@@ -116,8 +159,14 @@ export async function createMaterial(input: unknown, file: File): Promise<Action
 export async function setMaterialPublished(materialId: string, isPublished: boolean): Promise<ActionResult> {
   try {
     const session = await requireAdminOrTeacher();
+    const actorSchool = await resolveActorSchool(session);
     const material = await prisma.studyMaterial.findUnique({ where: { id: materialId } });
-    if (!material) return { ok: false, error: "Material not found." };
+    // Deliberately the same "Material not found" message for a real
+    // cross-school id as for a genuinely missing one - an admin/teacher
+    // from another school shouldn't be able to tell the two apart.
+    if (!material || !actorSchool || material.schoolId !== actorSchool.schoolId) {
+      return { ok: false, error: "Material not found." };
+    }
     if (session.role === "teacher" && material.uploadedByUserId !== session.id) {
       return { ok: false, error: "You can only publish/unpublish your own uploads." };
     }
@@ -132,8 +181,11 @@ export async function setMaterialPublished(materialId: string, isPublished: bool
 export async function deleteMaterial(materialId: string): Promise<ActionResult> {
   try {
     const session = await requireAdminOrTeacher();
+    const actorSchool = await resolveActorSchool(session);
     const material = await prisma.studyMaterial.findUnique({ where: { id: materialId } });
-    if (!material) return { ok: false, error: "Material not found." };
+    if (!material || !actorSchool || material.schoolId !== actorSchool.schoolId) {
+      return { ok: false, error: "Material not found." };
+    }
     if (session.role === "teacher" && material.uploadedByUserId !== session.id) {
       return { ok: false, error: "You can only delete your own uploads." };
     }
@@ -157,34 +209,45 @@ export async function deleteMaterial(materialId: string): Promise<ActionResult> 
   }
 }
 
+/**
+ * Materials visible to the acting admin/teacher: their own school only,
+ * derived from their own profile row - never a client-supplied schoolId.
+ * An actor with no school sees an empty list rather than every school's
+ * materials (the safe default, not a crash).
+ */
 export async function listMaterialsForAdmin(filters?: { boardId?: string; schoolClassId?: string; subjectId?: string }) {
-  await requireAdminOrTeacher();
+  const session = await requireAdminOrTeacher();
+  const actorSchool = await resolveActorSchool(session);
+  if (!actorSchool) return [];
+
   return prisma.studyMaterial.findMany({
     where: {
+      schoolId: actorSchool.schoolId,
       boardId: filters?.boardId,
       schoolClassId: filters?.schoolClassId,
       subjectId: filters?.subjectId,
     },
-    include: { board: true, schoolClass: true, subject: true, chapter: true, topic: true, uploadedBy: true },
+    include: { board: true, schoolClass: true, subject: true, chapter: true, topic: true, uploadedBy: { omit: { passwordHash: true } }, _count: { select: { chunks: true } } },
     orderBy: { uploadedAt: "desc" },
   });
 }
 
 /**
  * Materials visible to the logged-in student: published only, and scoped
- * to their own board/class (never another board/class's material), read
- * from their current Student row - not from the session payload, which
- * could be stale if their class changed since they last logged in.
+ * to their own school + board + class (never another school's or another
+ * board/class's material), read from their current Student row - not from
+ * the session payload, which could be stale if their school/class changed
+ * since they last logged in.
  */
 export async function listMaterialsForStudent() {
   const session = await getCurrentSession();
   if (!session || session.role !== "student") throw new ForbiddenError("Students only.");
 
   const student = await prisma.student.findUnique({ where: { userId: session.id } });
-  if (!student?.schoolClassId) return [];
+  if (!student?.schoolClassId || !student.schoolId) return [];
 
   return prisma.studyMaterial.findMany({
-    where: { schoolClassId: student.schoolClassId, boardId: student.boardId ?? undefined, isPublished: true },
+    where: { schoolId: student.schoolId, schoolClassId: student.schoolClassId, boardId: student.boardId ?? undefined, isPublished: true },
     include: { subject: true, chapter: true, topic: true },
     orderBy: [{ subject: { name: "asc" } }, { chapter: { order: "asc" } }],
   });

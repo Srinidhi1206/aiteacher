@@ -20,10 +20,22 @@ const worksheetInputSchema = z.object({
   dueDate: z.string().datetime().optional(),
 });
 
+const PAST_DUE_MESSAGE = "The due date can't be in the past.";
+
+/** A due date is a calendar day picked in the teacher's own timezone, so allow a day and a half of slack rather than comparing to the exact instant. */
+function isPastDue(dueDate: string): boolean {
+  return new Date(dueDate).getTime() < Date.now() - 36 * 60 * 60 * 1000;
+}
+
 async function requireOwnedTeacherAssignment(schoolClassId: string, subjectId: string) {
   const session = await requireRole("teacher");
   const teacher = await prisma.teacher.findUnique({ where: { userId: session.id } });
   if (!teacher) throw new ForbiddenError("Teacher profile not found.");
+  // A worksheet's school is its author's school (there is no column of its
+  // own) - see the note on requireOwnedAssignment in exams.ts.
+  if (!teacher.schoolId) {
+    throw new ForbiddenError("Your account isn't associated with a school yet. Contact a school administrator.");
+  }
   const assigned = await prisma.teacherAssignment.findFirst({
     where: { teacherId: teacher.id, schoolClassId, subjectId },
   });
@@ -60,6 +72,8 @@ export async function createWorksheet(input: unknown, file?: File | null): Promi
         throw e;
       }
     }
+
+    if (data.dueDate && isPastDue(data.dueDate)) return { ok: false, error: PAST_DUE_MESSAGE };
 
     const worksheet = await prisma.worksheet.create({
       data: {
@@ -102,15 +116,20 @@ export async function updateWorksheet(worksheetId: string, input: unknown): Prom
     const parsed = worksheetUpdateSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
+    // Editing other fields of an already-overdue worksheet is fine; only a NEW past date is refused.
+    const dueChanged = !worksheet.dueDate || !data.dueDate || worksheet.dueDate.getTime() !== new Date(data.dueDate).getTime();
+    if (data.dueDate && dueChanged && isPastDue(data.dueDate)) return { ok: false, error: PAST_DUE_MESSAGE };
 
     await prisma.worksheet.update({
       where: { id: worksheetId },
+      // Only fields the caller actually sent are changed - an edit that sends just a
+      // new title must not wipe the due date, chapter or topic.
       data: {
         title: data.title,
-        description: data.instructions,
-        chapterId: data.chapterId || null,
-        topicId: data.topicId || null,
-        dueDate: data.dueDate ? new Date(data.dueDate) : null,
+        ...(data.instructions !== undefined ? { description: data.instructions || null } : {}),
+        ...(data.chapterId !== undefined ? { chapterId: data.chapterId || null } : {}),
+        ...(data.topicId !== undefined ? { topicId: data.topicId || null } : {}),
+        ...(data.dueDate !== undefined ? { dueDate: new Date(data.dueDate) } : {}),
       },
     });
     return { ok: true };
@@ -170,9 +189,9 @@ export async function listWorksheetsForStudent() {
   const session = await getCurrentSession();
   if (!session || session.role !== "student") throw new ForbiddenError("Students only.");
   const student = await prisma.student.findUnique({ where: { userId: session.id } });
-  if (!student?.schoolClassId) return [];
+  if (!student?.schoolClassId || !student.schoolId) return [];
   return prisma.worksheet.findMany({
-    where: { schoolClassId: student.schoolClassId, isPublished: true },
+    where: { schoolClassId: student.schoolClassId, isPublished: true, teacher: { schoolId: student.schoolId } },
     include: {
       subject: true,
       chapter: true,
@@ -188,10 +207,21 @@ export async function submitWorksheet(worksheetId: string): Promise<ActionResult
     const student = await prisma.student.findUnique({ where: { userId: session.id } });
     if (!student) return { ok: false, error: "Student profile not found." };
 
-    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId } });
-    if (!worksheet || !worksheet.isPublished || worksheet.schoolClassId !== student.schoolClassId) {
+    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: { select: { schoolId: true } } } });
+    if (
+      !worksheet ||
+      !worksheet.isPublished ||
+      worksheet.schoolClassId !== student.schoolClassId ||
+      !student.schoolId ||
+      worksheet.teacher.schoolId !== student.schoolId
+    ) {
       return { ok: false, error: "Worksheet not found." };
     }
+
+    // Once a teacher has graded it, the work is final - a later "submit" must
+    // not silently reset the submission time under a score already given.
+    const existing = await prisma.worksheetSubmission.findUnique({ where: { worksheetId_studentId: { worksheetId, studentId: student.id } } });
+    if (existing?.score != null) return { ok: false, error: "This assignment has already been graded." };
 
     await prisma.worksheetSubmission.upsert({
       where: { worksheetId_studentId: { worksheetId, studentId: student.id } },
@@ -199,6 +229,61 @@ export async function submitWorksheet(worksheetId: string): Promise<ActionResult
       create: { worksheetId, studentId: student.id, submittedAt: new Date() },
     });
     return { ok: true };
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    throw e;
+  }
+}
+
+export interface WorksheetSubmissionRow {
+  studentId: string;
+  name: string;
+  submissionId: string | null;
+  submittedAt: Date | null;
+  score: number | null;
+  maxScore: number | null;
+  feedback: string | null;
+}
+
+/**
+ * Who has and hasn't handed in one of the teacher's own worksheets: the
+ * ACTIVE students of that class in the teacher's own school (a class row is
+ * shared by every school on the board, so the school has to match too), each
+ * with their submission if any. Only the worksheet's own teacher may look.
+ */
+export async function listWorksheetSubmissions(worksheetId: string): Promise<ActionResult<{ rows: WorksheetSubmissionRow[] }>> {
+  try {
+    const session = await requireRole("teacher");
+    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: { select: { userId: true, schoolId: true } } } });
+    if (!worksheet || worksheet.teacher.userId !== session.id || !worksheet.teacher.schoolId) {
+      return { ok: false, error: "Worksheet not found." };
+    }
+    const students = await prisma.student.findMany({
+      where: { schoolClassId: worksheet.schoolClassId, schoolId: worksheet.teacher.schoolId, user: { status: "ACTIVE" } },
+      select: { id: true, user: { select: { name: true } } },
+      orderBy: { user: { name: "asc" } },
+    });
+    const submissions = await prisma.worksheetSubmission.findMany({
+      where: { worksheetId, studentId: { in: students.map((s) => s.id) } },
+    });
+    const byStudent = new Map(submissions.map((s) => [s.studentId, s]));
+    return {
+      ok: true,
+      data: {
+        rows: students.map((s) => {
+          const sub = byStudent.get(s.id);
+          return {
+            studentId: s.id,
+            name: s.user.name,
+            submissionId: sub?.submittedAt ? sub.id : null,
+            submittedAt: sub?.submittedAt ?? null,
+            score: sub?.score ?? null,
+            maxScore: sub?.maxScore ?? null,
+            feedback: sub?.feedback ?? null,
+          };
+        }),
+      },
+    };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
     throw e;
@@ -221,6 +306,7 @@ export async function gradeWorksheetSubmission(
     if (submission.worksheet.teacher.userId !== session.id) {
       return { ok: false, error: "You can only grade submissions for your own worksheets." };
     }
+    if (!submission.submittedAt) return { ok: false, error: "This student has not submitted yet." };
     // Stage K: worksheets have no fixed per-question mark scheme the way
     // exams do (see gradeExamAnswer's 0-to-question.marks check), so score
     // and maxScore are both teacher-supplied per submission - but they

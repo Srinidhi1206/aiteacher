@@ -1,13 +1,37 @@
 import Link from "next/link";
 import { CheckCircle2, Clock } from "lucide-react";
 
-// Stage F: shown after any registration submits successfully. Deliberately
-// does NOT auto-sign-in the new account - status is PENDING until an admin
-// (or, for an admin request, the super admin) approves it, so there is
-// nothing to sign in to yet.
-export function RegistrationSuccess({ kind }: { kind: "student" | "teacher" | "admin" }) {
-  const copy =
-    kind === "admin"
+// Same NODE_ENV detection as registerAdminRequest's AUTO_APPROVE_ADMIN_IN_DEV
+// (lib/actions/registration.ts) - copy only, the actual account status is
+// always decided server-side.
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+// Stage F: shown after any registration submits successfully. Student/
+// teacher/production-admin requests deliberately do NOT auto-sign-in the
+// new account - status is PENDING until an admin (or, for an admin
+// request, the super admin) approves it, so there is nothing to sign in to
+// yet. A development-mode admin request is the one exception: the account
+// really is already ACTIVE by the time this screen renders (see
+// registerAdminRequest), so saying "pending approval" here would be wrong,
+// not just old copy.
+export function RegistrationSuccess({ kind, joinPending = false }: { kind: "student" | "teacher" | "admin"; joinPending?: boolean }) {
+  // Asking to join a school that already exists is never auto-activated, even
+  // in development - the account stays pending until the super administrator
+  // approves the join (registerAdminRequest).
+  const isDevAdmin = kind === "admin" && IS_DEV && !joinPending;
+
+  const copy = joinPending
+    ? {
+        title: "Request to join sent",
+        body:
+          "That school already exists, so you have not been made an administrator of it. Your request to join has been sent to the super administrator, and you can sign in once it is approved.",
+      }
+    : isDevAdmin
+    ? {
+        title: "Admin account created successfully",
+        body: "You can now sign in to your Admin Dashboard.",
+      }
+    : kind === "admin"
       ? {
           title: "Admin access requested",
           body:
@@ -26,9 +50,11 @@ export function RegistrationSuccess({ kind }: { kind: "student" | "teacher" | "a
         </div>
         <h1 className="mb-2 text-xl font-semibold text-gray-900 dark:text-gray-50">{copy.title}</h1>
         <p className="mb-6 text-sm text-gray-500 dark:text-gray-400">{copy.body}</p>
-        <div className="mb-6 flex items-center justify-center gap-1.5 rounded-xl bg-warning-50 px-3 py-2 text-xs font-medium text-warning-700 dark:bg-warning-900/20 dark:text-warning-400">
-          <Clock className="h-3.5 w-3.5" /> Status: Pending approval
-        </div>
+        {!isDevAdmin && (
+          <div className="mb-6 flex items-center justify-center gap-1.5 rounded-xl bg-warning-50 px-3 py-2 text-xs font-medium text-warning-700 dark:bg-warning-900/20 dark:text-warning-400">
+            <Clock className="h-3.5 w-3.5" /> Status: Pending approval
+          </div>
+        )}
         <Link href="/login" className="text-sm font-medium text-primary-600 hover:underline dark:text-primary-400">
           Back to sign in
         </Link>

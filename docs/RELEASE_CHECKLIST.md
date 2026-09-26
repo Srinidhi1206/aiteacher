@@ -82,12 +82,34 @@ Environment Variables) for staging/production.
 9. **Start/deploy:** `npm start` (self-hosted) or your platform's normal
    deploy flow (e.g. `vercel deploy` - **not run by this project's
    tooling automatically**; a human decides when to actually deploy).
-10. **Create/approve the initial super admin safely.** The bootstrap
-    super admin is created by the seed step (step 4), not by the
-    registration flow - `lib/actions/registration.ts` can never create
-    or self-elevate a super admin (see "Security" test matrix below).
-    Change that account's password immediately after first login if the
-    seeded `ADMIN_PASSWORD` was only a placeholder.
+10. **Create the initial super admin safely - do not seed demo accounts
+    in production.** No registration or approval flow can create or
+    promote a super admin, so an operator does it with direct database
+    access using the dedicated tool (it never prints the password):
+
+    ```
+    ADMIN_PASSWORD='<a strong secret from your secret manager>' npm run admin:set-password
+    # optional: SUPER_ADMIN_USERNAME (default "admin"), SUPER_ADMIN_EMAIL, SUPER_ADMIN_NAME
+    # locally, load the env file:  npx tsx --env-file=.env.local scripts/set-super-admin.ts
+    ```
+
+    It creates the super admin, or rotates the password of an existing
+    one. It refuses anything under 12 characters, without a letter and a
+    number, or equal to a documented demo password. Environment variable
+    that must be configured: **`ADMIN_PASSWORD`** (plus `SESSION_SECRET`
+    and `DATABASE_URL`).
+
+    **Safety net.** In production, login refuses the publicly documented
+    demo passwords (`Admin@123`, `Teacher@123`, `Student@123`) for every
+    account, whatever the database holds, and password setting refuses
+    them too (`lib/auth/known-defaults.ts`). So even if the demo seed is
+    run against a production database, or a database is reset or restored
+    from a development dump, the known credentials do not work - the
+    affected account simply cannot sign in until an operator rotates it
+    with the tool above. `prisma/seed.ts` also refuses, in production,
+    any demo `*_PASSWORD` that is missing, documented or weak. Because a
+    seed run from a laptop may not have `NODE_ENV=production`, treat
+    `db:seed` as development-only.
 11. **Run the live smoke-test matrix** - section 8 below.
 
 ---

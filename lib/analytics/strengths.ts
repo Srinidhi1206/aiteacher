@@ -3,7 +3,7 @@
 // off a single question (MIN_ATTEMPTS_FOR_STRENGTH below).
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { recalculateTopicProgress, MASTERY_THRESHOLDS } from "./progress";
+import { recalculateTopicProgress, getRecentTopicResults, MASTERY_THRESHOLDS } from "./progress";
 
 const MIN_ATTEMPTS_FOR_STRENGTH = 3;
 
@@ -28,31 +28,26 @@ export async function recalculateStrengths(studentId: string) {
     if (t.attemptCount < MIN_ATTEMPTS_FOR_STRENGTH) continue; // one question doesn't make a strength
     strongTopicIds.add(t.topicId);
 
-    const recentAnswers = await prisma.examAnswer.findMany({
-      where: { question: { topicId: t.topicId }, submission: { studentId }, marksAwarded: { not: null } },
-      include: { question: true, submission: true },
-      orderBy: { submission: { submittedAt: "desc" } },
-      take: 5,
-    });
-    const history = recentAnswers.map((a) => Math.round(((a.marksAwarded ?? 0) / a.question.marks) * 100));
+    const recent = await getRecentTopicResults(studentId, t.topicId, 5);
+    const history = recent.map((r) => r.pct);
 
     await prisma.strengthProfile.upsert({
       where: { studentId_topicId: { studentId, topicId: t.topicId } },
       update: {
-        reason: buildReason(t.masteryPct, recentAnswers.length),
+        reason: buildReason(t.masteryPct, recent.length),
         mastery: t.masteryPct,
         trend: trendFor(history),
         trendHistory: history,
-        lastPracticed: recentAnswers[0]?.submission.submittedAt ?? new Date(),
+        lastPracticed: recent[0]?.at ?? new Date(),
       },
       create: {
         studentId,
         topicId: t.topicId,
-        reason: buildReason(t.masteryPct, recentAnswers.length),
+        reason: buildReason(t.masteryPct, recent.length),
         mastery: t.masteryPct,
         trend: trendFor(history),
         trendHistory: history,
-        lastPracticed: recentAnswers[0]?.submission.submittedAt ?? new Date(),
+        lastPracticed: recent[0]?.at ?? new Date(),
       },
     });
   }

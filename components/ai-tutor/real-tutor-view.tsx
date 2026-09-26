@@ -17,6 +17,28 @@ interface Message {
   createdAt: Date | string;
 }
 
+const UNREACHABLE: Awaited<ReturnType<typeof sendMessage>> = { ok: false, error: "The AI tutor couldn't be reached right now. Please try again in a moment." };
+
+// The server gives the model 40s per call (plus one retry); if nothing has come back well after
+// that, stop waiting so the chat can never sit on "thinking" indefinitely. The reply, if it
+// does arrive later, is saved server-side and appears when the conversation is reopened.
+const REPLY_WATCHDOG_MS = 110_000;
+function withWatchdog(pending: Promise<Awaited<ReturnType<typeof sendMessage>>>): Promise<Awaited<ReturnType<typeof sendMessage>>> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ ok: false, error: "The AI tutor is taking too long to answer. Please try again." }), REPLY_WATCHDOG_MS);
+    pending.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(UNREACHABLE);
+      }
+    );
+  });
+}
+
 const SUGGESTED_PROMPTS = [
   "Explain this topic to me",
   "Help me understand my weak areas",
@@ -35,6 +57,8 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [showHistory, setShowHistory] = React.useState(false);
+  const [startingChat, setStartingChat] = React.useState(false);
   const startedFromTopic = React.useRef(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
@@ -95,16 +119,31 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
   }, []);
 
   async function handleNewChat() {
+    if (startingChat) return;
     setError(null);
-    const created = await createConversation();
-    if (!created.ok || !created.data) {
-      setError(created.error ?? "Couldn't start a new conversation.");
+    // The open conversation has nothing in it yet: a new chat would just be an identical empty
+    // one, so keep it and only clear what was typed.
+    if (activeId && messages.length === 0) {
+      setInput("");
       return;
     }
-    await refreshConversations();
-    setActiveId(created.data.id);
-    setMessages([]);
-    setInput("");
+    // Until the new conversation is open, typing must not go to the old one still on screen.
+    setStartingChat(true);
+    try {
+      const created = await createConversation();
+      if (!created.ok || !created.data) {
+        setError(created.error ?? "Couldn't start a new conversation.");
+        return;
+      }
+      await refreshConversations();
+      setActiveId(created.data.id);
+      setMessages([]);
+      setInput("");
+    } catch {
+      setError("Couldn't start a new conversation. Please try again.");
+    } finally {
+      setStartingChat(false);
+    }
   }
 
   async function handleDelete(id: string) {
@@ -117,6 +156,7 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
     if (activeId === id) {
       setActiveId(null);
       setMessages([]);
+      setError(null);
     }
   }
 
@@ -143,7 +183,9 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
     // regardless of outcome, so it never lies about what was actually saved.
     setMessages((prev) => [...prev, { id: `pending-${Date.now()}`, role: "STUDENT", content: trimmed, createdAt: new Date() }]);
 
-    const result = await sendMessage(conversationId, trimmed);
+    // A server action that throws (database or network hiccup) must never leave
+    // the chat stuck in its "sending" state - treat it like any other failure.
+    const result = await withWatchdog(sendMessage(conversationId, trimmed));
     await syncAfterSend(conversationId, result);
   }
 
@@ -151,7 +193,7 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
     if (!activeId || sending) return;
     setError(null);
     setSending(true);
-    const result = await retryLastReply(activeId);
+    const result = await withWatchdog(retryLastReply(activeId));
     await syncAfterSend(activeId, result);
   }
 
@@ -160,7 +202,7 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
     // user message actually persisted (it does for some failure modes -
     // e.g. the AI provider being unreachable - and doesn't for others -
     // e.g. rate limiting, which is checked before anything is saved).
-    const fresh = await getMyConversation(conversationId);
+    const fresh = await getMyConversation(conversationId).catch(() => null);
     if (fresh) setMessages(fresh.messages);
     setSending(false);
     if (!result.ok) {
@@ -181,7 +223,10 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
   }
 
   const lastMessage = messages[messages.length - 1];
-  const canRetry = !sending && !!lastMessage && lastMessage.role === "STUDENT" && !!error;
+  // A student message with no reply after it - the last attempt failed, or the page was closed or
+  // reloaded before the answer arrived (the message itself is saved). Offer the retry either way.
+  const unanswered = !sending && !startingChat && !!lastMessage && lastMessage.role === "STUDENT";
+  const canRetry = unanswered;
 
   return (
     <div className="flex h-[calc(100vh-88px)] gap-4">
@@ -190,6 +235,26 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
       </Card>
 
       <Card className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {/* The conversation list is a side panel on large screens; on phones and tablets it lives here so chats can still be started, switched and deleted. */}
+        <div className="flex items-center gap-2 border-b border-gray-100 p-2 dark:border-gray-800 lg:hidden">
+          <Button size="sm" variant="primary" onClick={() => { setShowHistory(false); handleNewChat(); }}>
+            New chat
+          </Button>
+          <Button size="sm" variant="outline" aria-expanded={showHistory} onClick={() => setShowHistory((v) => !v)}>
+            History ({conversations.length})
+          </Button>
+        </div>
+        {showHistory && (
+          <div className="max-h-64 overflow-y-auto border-b border-gray-100 dark:border-gray-800 lg:hidden">
+            <RealConversationSidebar
+              conversations={conversations}
+              activeId={activeId}
+              onSelect={(id) => { setShowHistory(false); openConversation(id); }}
+              onNewChat={() => { setShowHistory(false); handleNewChat(); }}
+              onDelete={handleDelete}
+            />
+          </div>
+        )}
         <div className="flex items-start gap-2 border-b border-gray-100 bg-primary-50/60 p-4 dark:border-gray-800 dark:bg-primary-950/30">
           <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary-600 dark:text-primary-400" />
           <p className="text-xs text-primary-800 dark:text-primary-300">
@@ -229,9 +294,9 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
           {sending && <TypingIndicator />}
         </div>
 
-        {error && (
+        {(error || unanswered) && (
           <div className="flex items-center justify-between gap-2 border-t border-gray-100 bg-red-50 px-4 py-2 text-xs text-red-700 dark:border-gray-800 dark:bg-red-950/30 dark:text-red-400">
-            <span>{error}</span>
+            <span>{error ?? "Your last message hasn't been answered yet."}</span>
             {canRetry && (
               <button onClick={handleRetry} className="flex shrink-0 items-center gap-1 font-medium hover:underline">
                 <RotateCcw className="h-3 w-3" /> Retry
@@ -268,11 +333,11 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
               }
             }}
             rows={1}
-            placeholder={aiConfigured === false ? "AI Tutor is not configured yet..." : "Ask a question about anything in your syllabus..."}
-            disabled={sending || aiConfigured === false}
+            placeholder={aiConfigured === false ? "AI Tutor is not configured yet..." : startingChat ? "Starting a new chat..." : "Ask a question about anything in your syllabus..."}
+            disabled={sending || startingChat || aiConfigured === false}
             className="max-h-32 flex-1 resize-none rounded-xl border border-gray-200 bg-transparent px-4 py-2.5 text-sm text-gray-800 outline-none focus:border-primary-400 disabled:opacity-50 dark:border-gray-700 dark:text-gray-100"
           />
-          <Button type="submit" size="icon" disabled={!input.trim() || sending || aiConfigured === false}>
+          <Button type="submit" size="icon" disabled={!input.trim() || sending || startingChat || aiConfigured === false}>
             <Send className="h-4 w-4" />
           </Button>
         </form>

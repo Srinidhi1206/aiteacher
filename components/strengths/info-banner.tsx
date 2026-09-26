@@ -14,8 +14,8 @@ export function StrengthsInfoBanner() {
           <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">How strengths are calculated</p>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
             A topic is flagged as a strength when your average mastery on it is 80% or higher, based on at least 3
-            graded exam answers tagged to that topic - never off one good result. This is a deterministic
-            calculation over your real graded answers, and updates automatically as you keep practicing.
+            graded answers on that topic from your exams and practice - never off one good result. This is a
+            deterministic calculation over your real graded answers, and updates automatically as you keep practicing.
           </p>
         </div>
       </CardContent>

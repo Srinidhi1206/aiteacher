@@ -26,6 +26,9 @@ interface ExamData {
   maxMarks: number;
   instructions: string | null;
   questions: ExamQuestion[];
+  /** Seconds left on the server-side clock, and answers already saved (both survive a reload). */
+  remainingSeconds: number;
+  savedAnswers: Record<string, string>;
 }
 
 export default function ExamAttemptPage() {
@@ -53,7 +56,10 @@ export default function ExamAttemptPage() {
       setSubmissionId(startResult.data.submissionId);
       const data = await getExamForAttempt(params.examId);
       setExam(data as ExamData | null);
-      if (data) setSecondsLeft(data.durationMinutes * 60);
+      if (data) {
+        setSecondsLeft(data.remainingSeconds);
+        setAnswers(data.savedAnswers ?? {});
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.examId]);

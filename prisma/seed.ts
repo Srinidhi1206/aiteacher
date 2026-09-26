@@ -14,6 +14,7 @@
 
 import { PrismaClient, BoardType, RegionType, Role } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { productionPasswordProblem } from "../lib/auth/known-defaults";
 
 const prisma = new PrismaClient();
 
@@ -324,6 +325,12 @@ async function main() {
       throw new Error(
         `Refusing to seed demo accounts in production with default passwords. Set the following environment variables first, then re-run the seed: ${missing.join(", ")}. See docs/RELEASE_CHECKLIST.md.`
       );
+    }
+    // Present is not enough: a documented demo password, or a weak one, set explicitly is just as
+    // dangerous as the built-in default. Names the variable only - never the value.
+    for (const v of DEMO_PASSWORD_ENV_VARS) {
+      const problem = productionPasswordProblem(process.env[v] as string);
+      if (problem) throw new Error(`Refusing to seed in production: ${v} is not acceptable. ${problem}`);
     }
   }
 

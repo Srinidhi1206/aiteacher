@@ -5,6 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DatabaseUnavailable } from "@/components/database-unavailable";
 import { listResultsForStudent } from "@/lib/actions/exams";
+import { formatDate } from "@/lib/utils";
 
 export default async function ResultsPage() {
   let results: Awaited<ReturnType<typeof listResultsForStudent>>;
@@ -50,7 +51,7 @@ export default async function ResultsPage() {
                       <div>
                         <p className="text-sm font-semibold text-gray-900 dark:text-gray-50">{r.examTitle}</p>
                         <p className="text-xs text-gray-400">
-                          {r.subject} - {r.submittedAt ? new Date(r.submittedAt).toLocaleDateString() : ""}
+                          {r.subject} - {r.submittedAt ? formatDate(r.submittedAt) : ""}
                         </p>
                       </div>
                       {percentage != null ? (

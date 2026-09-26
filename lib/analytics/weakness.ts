@@ -4,7 +4,7 @@
 // section) now run for real instead of hand-authored.
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { recalculateTopicProgress, MASTERY_THRESHOLDS } from "./progress";
+import { recalculateTopicProgress, getRecentTopicResults, MASTERY_THRESHOLDS } from "./progress";
 
 const MIN_ATTEMPTS_TO_FLAG = 2; // don't flag a topic weak off a single question
 
@@ -38,36 +38,31 @@ export async function recalculateWeakAreas(studentId: string) {
     if (t.attemptCount < MIN_ATTEMPTS_TO_FLAG) continue;
     weakTopicIds.add(t.topicId);
 
-    const recentAnswers = await prisma.examAnswer.findMany({
-      where: { question: { topicId: t.topicId }, submission: { studentId }, marksAwarded: { not: null } },
-      include: { question: true, submission: true },
-      orderBy: { submission: { submittedAt: "desc" } },
-      take: 5,
-    });
-    const recentCorrect = recentAnswers.filter((a) => (a.marksAwarded ?? 0) >= a.question.marks).length;
-    const history = recentAnswers.map((a) => Math.round(((a.marksAwarded ?? 0) / a.question.marks) * 100));
+    const recent = await getRecentTopicResults(studentId, t.topicId, 5);
+    const recentCorrect = recent.filter((r) => r.correct).length;
+    const history = recent.map((r) => r.pct);
 
     await prisma.weaknessProfile.upsert({
       where: { studentId_topicId: { studentId, topicId: t.topicId } },
       update: {
-        reason: buildReason(t.masteryPct, recentCorrect, recentAnswers.length),
-        wrongAnswers: recentAnswers.length - recentCorrect,
+        reason: buildReason(t.masteryPct, recentCorrect, recent.length),
+        wrongAnswers: recent.length - recentCorrect,
         totalAttempts: t.attemptCount,
         mastery: t.masteryPct,
         trend: trendFor(history),
         trendHistory: history,
-        lastPracticed: recentAnswers[0]?.submission.submittedAt ?? new Date(),
+        lastPracticed: recent[0]?.at ?? new Date(),
       },
       create: {
         studentId,
         topicId: t.topicId,
-        reason: buildReason(t.masteryPct, recentCorrect, recentAnswers.length),
-        wrongAnswers: recentAnswers.length - recentCorrect,
+        reason: buildReason(t.masteryPct, recentCorrect, recent.length),
+        wrongAnswers: recent.length - recentCorrect,
         totalAttempts: t.attemptCount,
         mastery: t.masteryPct,
         trend: trendFor(history),
         trendHistory: history,
-        lastPracticed: recentAnswers[0]?.submission.submittedAt ?? new Date(),
+        lastPracticed: recent[0]?.at ?? new Date(),
       },
     });
   }

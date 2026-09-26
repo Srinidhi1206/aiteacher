@@ -20,9 +20,33 @@ export const SESSION_COOKIE = "maiteacher_session";
 // time - exactly when a missing secret in production actually matters.
 const DEV_FALLBACK_SECRET = "dev-only-insecure-secret-change-me";
 
+// Production refuses a secret that is short or obviously guessable, not just a missing one:
+// an HMAC key anyone can guess lets them forge a session for any account, including the
+// Super Admin. 32+ characters, not this repo's published dev fallback, not a placeholder
+// or a single repeated character. Messages name the rule, never the value.
+const MIN_PRODUCTION_SECRET_LENGTH = 32;
+const PLACEHOLDER_HINTS = ["change-me", "changeme", "your-secret", "yoursecret", "secret-here", "example", "placeholder", "password", "dev-only"];
+
+function productionSecretProblem(secret: string): string | null {
+  if (secret.length < MIN_PRODUCTION_SECRET_LENGTH) return `it is shorter than ${MIN_PRODUCTION_SECRET_LENGTH} characters`;
+  if (secret === DEV_FALLBACK_SECRET) return "it is the development fallback published in the source code";
+  const lower = secret.toLowerCase();
+  if (PLACEHOLDER_HINTS.some((hint) => lower.includes(hint))) return "it looks like a placeholder";
+  if (new Set(secret).size < 8) return "it has too little variety to be random";
+  return null;
+}
+
 function resolveSessionSecret(): string {
   const configured = process.env.SESSION_SECRET;
-  if (configured) return configured;
+  if (configured) {
+    if (process.env.NODE_ENV === "production") {
+      const problem = productionSecretProblem(configured);
+      if (problem) {
+        throw new Error(`SESSION_SECRET is not acceptable for production: ${problem}. Set it to a long random value (for example: openssl rand -base64 48).`);
+      }
+    }
+    return configured;
+  }
 
   if (process.env.NODE_ENV === "production") {
     // Fail closed: a production deployment with no SESSION_SECRET must
@@ -36,6 +60,11 @@ function resolveSessionSecret(): string {
   // workflow (see docs/DEMO_CREDENTIALS.md) and lets local dev and the
   // Stage B fallback-auth browser tests keep working without any setup.
   return DEV_FALLBACK_SECRET;
+}
+
+/** Start-up check (instrumentation.ts): throws in production when SESSION_SECRET is missing or weak. */
+export function assertSessionSecretConfigured(): void {
+  resolveSessionSecret();
 }
 
 export interface SessionPayload {

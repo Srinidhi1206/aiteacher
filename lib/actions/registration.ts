@@ -17,6 +17,7 @@ import { prisma } from "@/lib/prisma";
 import { hashPassword } from "@/lib/auth/password";
 import type { ActionResult } from "./materials";
 import { GradeStage, Curriculum, Role, BoardType, Prisma } from "@prisma/client";
+import { isKnownDefaultPassword } from "@/lib/auth/known-defaults";
 
 // Stage K: assertNoDuplicateAccount below is a check-then-create pattern,
 // not atomic - two concurrent registrations with the same username/email
@@ -32,12 +33,16 @@ function isDuplicateAccountConstraintError(e: unknown): boolean {
 }
 const DUPLICATE_ACCOUNT_RACE_MESSAGE = "That username or email was just taken by another registration. Please try again with different details.";
 
-// Shared across all three registration forms.
+// Shared across all three registration forms. Not exported: a "use server"
+// file may only export async functions, never a plain value like a Zod
+// schema (see lib/actions/user-management.ts's createStudent, which
+// declares an identical passwordField locally rather than importing one).
 const PASSWORD_REGEX = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/; // >=8 chars, at least one letter and one digit
 const passwordField = z
   .string()
   .min(8, "Password must be at least 8 characters.")
-  .regex(PASSWORD_REGEX, "Password must include at least one letter and one number.");
+  .regex(PASSWORD_REGEX, "Password must include at least one letter and one number.")
+  .refine((p) => process.env.NODE_ENV !== "production" || !isKnownDefaultPassword(p), "That password is too common. Choose a different one.");
 
 const baseAccountSchema = z.object({
   name: z.string().trim().min(1, "Full name is required.").max(150),
@@ -70,20 +75,23 @@ async function assertNoDuplicateAccount(username: string, email: string): Promis
   return null;
 }
 
-function deriveGradeStage(grade: number): GradeStage {
+// async only because every top-level export of a "use server" file must be
+// async (Next.js's server-actions compiler requirement) - neither function
+// actually awaits anything.
+export async function deriveGradeStage(grade: number): Promise<GradeStage> {
   if (grade <= 5) return GradeStage.PRIMARY;
   if (grade <= 8) return GradeStage.MIDDLE_SCHOOL;
   return GradeStage.HIGH_SCHOOL;
 }
 
-function deriveCurriculum(board: { shortName: string; type: BoardType }): Curriculum {
+export async function deriveCurriculum(board: { shortName: string; type: BoardType }): Promise<Curriculum> {
   if (board.shortName === "CBSE") return Curriculum.CBSE;
   if (board.shortName === "CISCE") return Curriculum.ICSE;
   return Curriculum.STATE_BOARD;
 }
 
 /** Confirms the client-selected board/class actually form a real, currently-enabled combination - never trusts the IDs blindly. */
-async function validateCurriculumSelection(stateId: string | undefined, boardId: string, schoolClassId: string) {
+export async function validateCurriculumSelection(stateId: string | undefined, boardId: string, schoolClassId: string) {
   const board = await prisma.board.findUnique({ where: { id: boardId } });
   if (!board || !board.isEnabled) return { ok: false as const, error: "Selected board is not available." };
   if (board.type === "STATE" && board.stateId !== stateId) {
@@ -153,8 +161,8 @@ export async function registerStudent(input: unknown): Promise<ActionResult<{ us
           schoolClassId: data.schoolClassId,
           schoolId: data.schoolId || null,
           grade: schoolClass.label,
-          gradeStage: deriveGradeStage(schoolClass.grade),
-          curriculum: deriveCurriculum(board),
+          gradeStage: await deriveGradeStage(schoolClass.grade),
+          curriculum: await deriveCurriculum(board),
         },
       });
       await tx.registrationRequest.create({
@@ -196,10 +204,9 @@ const teacherRegistrationSchema = baseAccountSchema
     stateId: z.string().min(1, "State is required."),
     boardId: z.string().min(1, "Board is required."),
     schoolId: z.string().optional(),
-    // Requested class/subject combos - reviewed by an admin, never
-    // auto-applied as real TeacherAssignment rows (see the schema comment
-    // on RegistrationRequest.requestedDetails). The admin grants actual
-    // assignments explicitly after approval.
+    // Requested class/subject combos - nothing is granted at registration. They sit in the
+    // request until a school admin approves it; approveRegistration (user-management.ts) then
+    // re-validates each pair and only applies the valid ones as TeacherAssignment rows.
     requestedAssignments: z
       .array(z.object({ schoolClassId: z.string().min(1), subjectId: z.string().min(1) }))
       .min(1, "Select at least one class/subject you teach."),
@@ -297,10 +304,35 @@ export async function registerTeacher(input: unknown): Promise<ActionResult<{ us
 const adminRequestSchema = baseAccountSchema
   .extend({
     reason: z.string().trim().min(20, "Please explain why you need administrator access (at least 20 characters)."),
+    schoolName: z.string().trim().min(2, "School name is required.").max(150),
+    stateId: z.string().min(1, "State is required."),
+    boardId: z.string().min(1, "Board is required."),
   })
   .superRefine(passwordsMatch);
 
-export async function registerAdminRequest(input: unknown): Promise<ActionResult<{ userId: string }>> {
+// Looks up an existing School with the same name (case-insensitive) under the
+// same state+board. This is only ever used to DETECT that the applicant is
+// asking about a school that already exists - never to attach them to it.
+// Typing an existing school's name must not make a stranger an administrator
+// of that school (that would hand them every user, material and result in it),
+// so an applicant for an existing school is left school-less and PENDING until
+// the super administrator approves the join (see approveRegistration).
+async function findExistingSchool(tx: Prisma.TransactionClient, name: string, stateId: string, boardId: string) {
+  return tx.school.findFirst({
+    where: { boardId, stateId, name: { equals: name, mode: "insensitive" } },
+  });
+}
+
+// MVP/dev decision: a Super Admin approval gate for every admin signup is
+// not part of the required school workflow while building/demoing this
+// project - only production keeps the real approval requirement. This is
+// the same NODE_ENV-gated pattern already used for the demo-account login
+// fallback (lib/auth/users.ts) and the mock AI provider (lib/ai/provider.ts) -
+// nothing here is a new authentication mechanism, it only changes which
+// status a freshly-created admin User row starts in.
+const AUTO_APPROVE_ADMIN_IN_DEV = process.env.NODE_ENV !== "production";
+
+export async function registerAdminRequest(input: unknown): Promise<ActionResult<{ userId: string; joinPending: boolean }>> {
   const parsed = adminRequestSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
   const data = parsed.data;
@@ -308,10 +340,30 @@ export async function registerAdminRequest(input: unknown): Promise<ActionResult
   const dup = await assertNoDuplicateAccount(data.username, data.email);
   if (dup) return { ok: false, error: dup };
 
+  // Same validation `registerStudent`/`registerTeacher` already do - never
+  // trust a client-supplied state/board pairing blindly.
+  const board = await prisma.board.findUnique({ where: { id: data.boardId } });
+  if (!board || !board.isEnabled) return { ok: false, error: "Selected board is not available." };
+  if (board.type === "STATE" && board.stateId !== data.stateId) {
+    return { ok: false, error: "Selected board does not belong to the selected state." };
+  }
+
   const passwordHash = await hashPassword(data.password);
 
   try {
+    let joinPending = false;
     const user = await prisma.$transaction(async (tx) => {
+      const existing = await findExistingSchool(tx, data.schoolName, data.stateId, data.boardId);
+      // Registering a NEW school makes this admin its first administrator.
+      // Naming an EXISTING school never does - see findExistingSchool. In
+      // production a brand-new school also starts disabled (hidden from the
+      // public school lists) until the super administrator approves it, so an
+      // unverified applicant can't squat a school name; development keeps it
+      // enabled, like the auto-activated admin below.
+      const school = existing ?? (await tx.school.create({ data: { name: data.schoolName, stateId: data.stateId, boardId: data.boardId, isEnabled: AUTO_APPROVE_ADMIN_IN_DEV } }));
+      joinPending = existing !== null;
+      // Development convenience only ever applies to creating a new school.
+      const autoActivate = AUTO_APPROVE_ADMIN_IN_DEV && !joinPending;
       const newUser = await tx.user.create({
         data: {
           username: data.username,
@@ -319,17 +371,34 @@ export async function registerAdminRequest(input: unknown): Promise<ActionResult
           passwordHash,
           name: data.name,
           role: Role.ADMIN, // hardcoded - never from client input
-          status: "PENDING",
+          status: autoActivate ? "ACTIVE" : "PENDING",
         },
       });
       await tx.admin.create({
-        data: { userId: newUser.id, isSuperAdmin: false }, // always false - no public path ever sets this true
+        // isSuperAdmin always false - no public path ever sets this true,
+        // dev or production. A new school's founder is associated with it
+        // right away; someone asking to join an existing one has no school
+        // until the super administrator approves (approveRegistration then
+        // sets it from requestedDetails.joinSchoolId).
+        data: { userId: newUser.id, isSuperAdmin: false, schoolId: joinPending ? null : school.id },
       });
       await tx.registrationRequest.create({
         data: {
           userId: newUser.id,
           requestedRole: Role.ADMIN,
-          requestedDetails: { phone: data.phone, reason: data.reason },
+          requestedDetails: {
+            phone: data.phone,
+            reason: data.reason,
+            schoolId: school.id,
+            schoolName: school.name,
+            ...(joinPending ? { joinSchoolId: school.id } : {}),
+          },
+          // In dev, record the founder's request as already resolved instead of
+          // leaving a permanently-stale PENDING row in the Users screen -
+          // reviewedByUserId stays null since no human reviewed it.
+          ...(autoActivate
+            ? { status: "APPROVED" as const, reviewedAt: new Date(), reviewNotes: "Auto-approved - development environment, new school founder, Super Admin approval not required for MVP." }
+            : {}),
         },
       });
       await tx.auditLog.create({
@@ -337,13 +406,17 @@ export async function registerAdminRequest(input: unknown): Promise<ActionResult
           userId: newUser.id,
           action: "REGISTRATION_SUBMITTED",
           resource: `User:${newUser.id}`,
-          message: `Admin access requested by "${data.username}"`,
+          message: joinPending
+            ? `Admin "${data.username}" requested to join existing school "${school.name}" (awaiting Super Admin approval)`
+            : autoActivate
+              ? `Admin account auto-activated for "${data.username}" (development mode - new school, no Super Admin approval required)`
+              : `Admin access requested by "${data.username}"`,
         },
       });
       return newUser;
     });
 
-    return { ok: true, data: { userId: user.id } };
+    return { ok: true, data: { userId: user.id, joinPending } };
   } catch (e) {
     if (isDuplicateAccountConstraintError(e)) return { ok: false, error: DUPLICATE_ACCOUNT_RACE_MESSAGE };
     throw e;

@@ -4,7 +4,7 @@
 // actually perform an upload/delete/getUrl call.
 import "server-only";
 import { put, del, head } from "@vercel/blob";
-import { StorageProvider, StorageNotConfiguredError, UploadResult } from "./types";
+import { StorageProvider, StorageNotConfiguredError, UploadResult, BlobMetadata } from "./types";
 
 export class VercelBlobProvider implements StorageProvider {
   readonly name = "Vercel Blob";
@@ -34,6 +34,12 @@ export class VercelBlobProvider implements StorageProvider {
     const meta = await head(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN });
     return meta.url;
   }
+
+  async getMetadata(storageKey: string): Promise<BlobMetadata> {
+    if (!this.isConfigured) throw new StorageNotConfiguredError(this.name);
+    const meta = await head(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN });
+    return { url: meta.url, size: meta.size, contentType: meta.contentType };
+  }
 }
 
 // Used automatically whenever BLOB_READ_WRITE_TOKEN isn't set (the current
@@ -52,6 +58,9 @@ export class UnavailableStorageProvider implements StorageProvider {
     throw new StorageNotConfiguredError(this.name);
   }
   async getUrl(): Promise<string> {
+    throw new StorageNotConfiguredError(this.name);
+  }
+  async getMetadata(): Promise<BlobMetadata> {
     throw new StorageNotConfiguredError(this.name);
   }
 }

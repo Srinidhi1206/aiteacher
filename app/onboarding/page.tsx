@@ -2,64 +2,48 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { GraduationCap, Check, ArrowLeft, ArrowRight, Loader2 } from "lucide-react";
+import { GraduationCap, Check, ArrowLeft, ArrowRight, Loader2, DatabaseZap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useCurriculumSelect } from "@/lib/hooks/use-curriculum-select";
+import { listSubjectsForClass } from "@/lib/actions/curriculum";
+import { inputClass, labelClass } from "@/components/register/field-styles";
 
-const gradeStages = [
-  { id: "Primary", label: "Primary", grades: ["Class 1", "Class 2", "Class 3", "Class 4", "Class 5"] },
-  { id: "Middle School", label: "Middle School", grades: ["Class 6", "Class 7", "Class 8"] },
-  { id: "High School", label: "High School", grades: ["Class 9", "Class 10", "Class 11", "Class 12"] },
-  { id: "College", label: "College", grades: ["1st Year", "2nd Year"] },
-  { id: "University", label: "University", grades: ["Undergraduate", "Postgraduate"] },
-];
+type Subject = Awaited<ReturnType<typeof listSubjectsForClass>>[number];
 
-const curricula = ["CBSE", "ICSE", "State Board", "IB", "IGCSE", "University"];
-
-const boardsByCurriculum: Record<string, string[]> = {
-  "State Board": ["Maharashtra State Board", "Karnataka State Board", "Tamil Nadu State Board", "UP State Board", "West Bengal Board"],
-  IB: ["PYP (Primary Years)", "MYP (Middle Years)", "DP (Diploma Programme)"],
-};
-
-const allSubjects = [
-  "Mathematics",
-  "Physics",
-  "Chemistry",
-  "Biology",
-  "English",
-  "Computer Science",
-  "Economics",
-  "History",
-  "Geography",
-  "Political Science",
-  "Accountancy",
-  "Business Studies",
-];
-
-const steps = ["Grade", "Curriculum", "Board", "Subjects"];
+// State -> Board -> Class, sourced from the same real curriculum tables as
+// /register/student (via useCurriculumSelect) - not a hardcoded board/grade
+// list. This page is calibration only (it doesn't create or update an
+// account); see RegisterStudentPage for the real, persisted enrollment flow.
+const steps = ["State", "Board", "Class", "Subjects"];
 
 export default function OnboardingPage() {
   const router = useRouter();
+  const curriculum = useCurriculumSelect();
   const [step, setStep] = React.useState(0);
-  const [gradeStage, setGradeStage] = React.useState<string | null>(null);
-  const [grade, setGrade] = React.useState<string | null>(null);
-  const [curriculum, setCurriculum] = React.useState<string | null>(null);
-  const [board, setBoard] = React.useState<string | null>(null);
-  const [subjects, setSubjects] = React.useState<string[]>([]);
+  const [availableSubjects, setAvailableSubjects] = React.useState<Subject[]>([]);
+  const [subjectIds, setSubjectIds] = React.useState<string[]>([]);
   const [building, setBuilding] = React.useState(false);
 
-  const needsBoardStep = curriculum ? Boolean(boardsByCurriculum[curriculum]) : false;
-  const effectiveSteps = needsBoardStep ? steps : steps.filter((s) => s !== "Board");
-  const currentStepName = effectiveSteps[step];
+  const currentStepName = steps[step];
+
+  React.useEffect(() => {
+    setSubjectIds([]);
+    setAvailableSubjects([]);
+    if (!curriculum.schoolClassId) return;
+    listSubjectsForClass(curriculum.schoolClassId)
+      .then(setAvailableSubjects)
+      .catch(() => setAvailableSubjects([]));
+  }, [curriculum.schoolClassId]);
 
   const canContinue =
-    (currentStepName === "Grade" && Boolean(gradeStage && grade)) ||
-    (currentStepName === "Curriculum" && Boolean(curriculum)) ||
-    (currentStepName === "Board" && Boolean(board)) ||
-    (currentStepName === "Subjects" && subjects.length > 0);
+    (currentStepName === "State" && Boolean(curriculum.stateId)) ||
+    (currentStepName === "Board" && Boolean(curriculum.boardId)) ||
+    (currentStepName === "Class" && Boolean(curriculum.schoolClassId)) ||
+    (currentStepName === "Subjects" && subjectIds.length > 0);
 
   const goNext = () => {
-    if (step < effectiveSteps.length - 1) {
+    if (step < steps.length - 1) {
       setStep(step + 1);
     } else {
       setBuilding(true);
@@ -73,9 +57,12 @@ export default function OnboardingPage() {
     if (step > 0) setStep(step - 1);
   };
 
-  const toggleSubject = (subject: string) => {
-    setSubjects((prev) => (prev.includes(subject) ? prev.filter((s) => s !== subject) : [...prev, subject]));
+  const toggleSubject = (subjectId: string) => {
+    setSubjectIds((prev) => (prev.includes(subjectId) ? prev.filter((s) => s !== subjectId) : [...prev, subjectId]));
   };
+
+  const selectedBoard = curriculum.boards.find((b) => b.id === curriculum.boardId);
+  const selectedClass = curriculum.schoolClasses.find((c) => c.id === curriculum.schoolClassId);
 
   if (building) {
     return (
@@ -95,7 +82,7 @@ export default function OnboardingPage() {
           Building your personalized learning path...
         </motion.h2>
         <p className="mt-2 max-w-sm text-sm text-gray-500 dark:text-gray-400">
-          Mapping {subjects.length} subject{subjects.length !== 1 ? "s" : ""} across Bloom&apos;s taxonomy for {grade}, {curriculum}.
+          Mapping {subjectIds.length} subject{subjectIds.length !== 1 ? "s" : ""} for {selectedClass?.label ?? "your class"}, {selectedBoard?.shortName ?? "your board"}.
         </p>
       </div>
     );
@@ -112,7 +99,7 @@ export default function OnboardingPage() {
 
       <div className="mx-auto w-full max-w-xl flex-1 px-4 pb-16">
         <div className="mb-8 flex items-center gap-2">
-          {effectiveSteps.map((s, i) => (
+          {steps.map((s, i) => (
             <div key={s} className="flex flex-1 items-center gap-2">
               <div
                 className={cn(
@@ -126,7 +113,7 @@ export default function OnboardingPage() {
               >
                 {i < step ? <Check className="h-4 w-4" /> : i + 1}
               </div>
-              {i < effectiveSteps.length - 1 && (
+              {i < steps.length - 1 && (
                 <div className={cn("h-0.5 flex-1 rounded-full", i < step ? "bg-success-400" : "bg-gray-200 dark:bg-gray-800")} />
               )}
             </div>
@@ -134,6 +121,12 @@ export default function OnboardingPage() {
         </div>
 
         <div className="rounded-3xl border border-gray-100 bg-white p-6 shadow-card dark:border-gray-800 dark:bg-gray-900 sm:p-8">
+          {curriculum.unavailable && (
+            <div className="mb-5 flex items-start gap-2 rounded-xl bg-gray-100 p-3 text-xs text-gray-600 dark:bg-gray-800 dark:text-gray-300">
+              <DatabaseZap className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              State, board, and class options need a connected database and can&apos;t be loaded right now.
+            </div>
+          )}
           <AnimatePresence mode="wait">
             <motion.div
               key={currentStepName}
@@ -142,108 +135,81 @@ export default function OnboardingPage() {
               exit={{ opacity: 0, x: -16 }}
               transition={{ duration: 0.25 }}
             >
-              {currentStepName === "Grade" && (
+              {currentStepName === "State" && (
                 <div>
-                  <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">What grade are you in?</h2>
-                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">This helps us calibrate lesson difficulty.</p>
+                  <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">Which state are you in?</h2>
+                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">This determines which boards are available to you.</p>
 
-                  <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    {gradeStages.map((stage) => (
-                      <button
-                        key={stage.id}
-                        onClick={() => {
-                          setGradeStage(stage.id);
-                          setGrade(null);
-                        }}
-                        className={cn(
-                          "rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors",
-                          gradeStage === stage.id
-                            ? "border-primary-500 bg-primary-50 text-primary-700 dark:bg-primary-950 dark:text-primary-300"
-                            : "border-gray-200 text-gray-600 hover:border-gray-300 dark:border-gray-700 dark:text-gray-300"
-                        )}
-                      >
-                        {stage.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {gradeStage && (
-                    <div className="mt-5">
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Select your grade</p>
-                      <div className="flex flex-wrap gap-2">
-                        {gradeStages
-                          .find((s) => s.id === gradeStage)!
-                          .grades.map((g) => (
-                            <button
-                              key={g}
-                              onClick={() => setGrade(g)}
-                              className={cn(
-                                "rounded-full border px-4 py-1.5 text-sm font-medium transition-colors",
-                                grade === g
-                                  ? "border-primary-500 bg-primary-600 text-white"
-                                  : "border-gray-200 text-gray-600 hover:border-gray-300 dark:border-gray-700 dark:text-gray-300"
-                              )}
-                            >
-                              {g}
-                            </button>
-                          ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {currentStepName === "Curriculum" && (
-                <div>
-                  <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">Which curriculum do you follow?</h2>
-                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">We&apos;ll tailor your syllabus mapping accordingly.</p>
-
-                  <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    {curricula.map((c) => (
-                      <button
-                        key={c}
-                        onClick={() => {
-                          setCurriculum(c);
-                          setBoard(null);
-                        }}
-                        className={cn(
-                          "rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors",
-                          curriculum === c
-                            ? "border-primary-500 bg-primary-50 text-primary-700 dark:bg-primary-950 dark:text-primary-300"
-                            : "border-gray-200 text-gray-600 hover:border-gray-300 dark:border-gray-700 dark:text-gray-300"
-                        )}
-                      >
-                        {c}
-                      </button>
-                    ))}
+                  <div className="mt-6">
+                    <label className={labelClass}>State</label>
+                    <select
+                      className={inputClass}
+                      value={curriculum.stateId}
+                      onChange={(e) => curriculum.setStateId(e.target.value)}
+                      disabled={curriculum.unavailable}
+                    >
+                      <option value="">Select state</option>
+                      {curriculum.states.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               )}
 
               {currentStepName === "Board" && (
                 <div>
-                  <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">
-                    Select your {curriculum === "IB" ? "programme" : "board"}
-                  </h2>
+                  <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">Select your board</h2>
                   <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    This lets us match your exact exam pattern.
+                    National boards (CBSE, CISCE, NIOS) are available regardless of state; your state&apos;s own board is shown too.
                   </p>
 
-                  <div className="mt-6 flex flex-col gap-2">
-                    {(boardsByCurriculum[curriculum ?? ""] ?? []).map((b) => (
-                      <button
-                        key={b}
-                        onClick={() => setBoard(b)}
-                        className={cn(
-                          "rounded-xl border px-4 py-3 text-left text-sm font-medium transition-colors",
-                          board === b
-                            ? "border-primary-500 bg-primary-50 text-primary-700 dark:bg-primary-950 dark:text-primary-300"
-                            : "border-gray-200 text-gray-600 hover:border-gray-300 dark:border-gray-700 dark:text-gray-300"
-                        )}
-                      >
-                        {b}
-                      </button>
-                    ))}
+                  <div className="mt-6">
+                    <label className={labelClass}>Board</label>
+                    <select
+                      className={inputClass}
+                      value={curriculum.boardId}
+                      onChange={(e) => curriculum.setBoardId(e.target.value)}
+                      disabled={!curriculum.stateId}
+                    >
+                      <option value="">Select board</option>
+                      {curriculum.boards.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.shortName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {currentStepName === "Class" && (
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">Which class are you in?</h2>
+                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">This helps us calibrate lesson difficulty.</p>
+
+                  <div className="mt-6">
+                    <label className={labelClass}>Class</label>
+                    <select
+                      className={inputClass}
+                      value={curriculum.schoolClassId}
+                      onChange={(e) => curriculum.setSchoolClassId(e.target.value)}
+                      disabled={!curriculum.boardId}
+                    >
+                      <option value="">Select class</option>
+                      {curriculum.schoolClasses.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
+                    {curriculum.boardId && curriculum.schoolClasses.length === 0 && (
+                      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                        No classes are enabled for this board yet - an admin needs to enable them first.
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
@@ -254,12 +220,12 @@ export default function OnboardingPage() {
                   <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Pick as many as you like - you can change these later.</p>
 
                   <div className="mt-6 flex flex-wrap gap-2">
-                    {allSubjects.map((subject) => {
-                      const selected = subjects.includes(subject);
+                    {availableSubjects.map((subject) => {
+                      const selected = subjectIds.includes(subject.id);
                       return (
                         <button
-                          key={subject}
-                          onClick={() => toggleSubject(subject)}
+                          key={subject.id}
+                          onClick={() => toggleSubject(subject.id)}
                           className={cn(
                             "flex items-center gap-1.5 rounded-full border px-4 py-1.5 text-sm font-medium transition-colors",
                             selected
@@ -268,10 +234,13 @@ export default function OnboardingPage() {
                           )}
                         >
                           {selected && <Check className="h-3.5 w-3.5" />}
-                          {subject}
+                          {subject.name}
                         </button>
                       );
                     })}
+                    {availableSubjects.length === 0 && (
+                      <p className="text-sm text-gray-500 dark:text-gray-400">No subjects are configured for this class yet.</p>
+                    )}
                   </div>
                 </div>
               )}
@@ -283,8 +252,8 @@ export default function OnboardingPage() {
               <ArrowLeft className="h-4 w-4" />
               Back
             </Button>
-            <Button onClick={goNext} disabled={!canContinue}>
-              {step === effectiveSteps.length - 1 ? "Build My Path" : "Continue"}
+            <Button onClick={goNext} disabled={!canContinue || curriculum.unavailable}>
+              {step === steps.length - 1 ? "Build My Path" : "Continue"}
               <ArrowRight className="h-4 w-4" />
             </Button>
           </div>

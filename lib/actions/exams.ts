@@ -40,13 +40,23 @@ const examInputSchema = z.object({
   instructions: z.string().trim().max(4000).optional(),
 });
 
+// Exams and worksheets have no school column of their own: their school is
+// their author's (Teacher.schoolId), the same way StudyMaterial.schoolId is
+// its uploader's. A SchoolClass row is shared by every school on that board
+// and grade, so a class match alone must never be enough for a student to
+// see an exam - the author's school has to match the student's too. A
+// teacher with no school therefore can't author anything (nobody could ever
+// see it), and a student with no school sees nothing.
 export async function requireOwnedAssignment(schoolClassId: string, subjectId: string) {
   const session = await requireRole("teacher");
   const teacher = await prisma.teacher.findUnique({ where: { userId: session.id } });
   if (!teacher) throw new ForbiddenError("Teacher profile not found.");
+  if (!teacher.schoolId) {
+    throw new ForbiddenError("Your account isn't associated with a school yet. Contact a school administrator.");
+  }
   const assigned = await prisma.teacherAssignment.findFirst({ where: { teacherId: teacher.id, schoolClassId, subjectId } });
   if (!assigned) throw new ForbiddenError("You are not assigned to this class/subject.");
-  return { session, teacher };
+  return { session, teacher, schoolId: teacher.schoolId };
 }
 
 async function requireOwnedExam(examId: string) {
@@ -125,6 +135,28 @@ const questionInputSchema = z.object({
   topicId: z.string().optional(),
 });
 
+// An auto-graded question has to be answerable: an MCQ needs at least two distinct options and a correct
+// answer that is one of them; a true/false question's answer is True or False. Otherwise every student
+// would silently score 0 on it. Returns the cleaned fields to store, or the message to show the teacher.
+function checkedQuestionFields(data: z.infer<typeof questionInputSchema>): { ok: true; options: string[] | undefined; correctAnswer: string | null } | { ok: false; error: string } {
+  const key = (v: string) => v.trim().toLowerCase();
+  if (data.type === "MCQ") {
+    const options = (data.options ?? []).map((o) => o.trim()).filter(Boolean);
+    if (options.length < 2) return { ok: false, error: "A multiple-choice question needs at least two options." };
+    if (new Set(options.map(key)).size !== options.length) return { ok: false, error: "The options must all be different." };
+    if (!data.correctAnswer) return { ok: false, error: "Choose the correct answer." };
+    const match = options.find((o) => key(o) === key(data.correctAnswer!));
+    if (!match) return { ok: false, error: "The correct answer must match one of the options exactly." };
+    return { ok: true, options, correctAnswer: match };
+  }
+  if (data.type === "TRUE_FALSE") {
+    const answer = key(data.correctAnswer ?? "");
+    if (answer !== "true" && answer !== "false") return { ok: false, error: "The correct answer must be True or False." };
+    return { ok: true, options: undefined, correctAnswer: answer === "true" ? "True" : "False" };
+  }
+  return { ok: true, options: undefined, correctAnswer: null };
+}
+
 async function requireDraftOwnedExam(examId: string) {
   const { session, exam } = await requireOwnedExam(examId);
   if (exam.status !== "DRAFT") throw new ForbiddenError("Questions can only be edited while the exam is still a draft.");
@@ -137,14 +169,16 @@ export async function addExamQuestion(examId: string, input: unknown): Promise<A
     const parsed = questionInputSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
+    const checked = checkedQuestionFields(data);
+    if (!checked.ok) return { ok: false, error: checked.error };
     const count = await prisma.examQuestion.count({ where: { examId } });
     const question = await prisma.examQuestion.create({
       data: {
         examId,
         type: data.type,
         prompt: data.prompt,
-        options: data.options,
-        correctAnswer: data.correctAnswer || null,
+        options: checked.options,
+        correctAnswer: checked.correctAnswer,
         marks: data.marks,
         topicId: data.topicId || null,
         order: count,
@@ -165,13 +199,15 @@ export async function updateExamQuestion(questionId: string, input: unknown): Pr
     const parsed = questionInputSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
+    const checked = checkedQuestionFields(data);
+    if (!checked.ok) return { ok: false, error: checked.error };
     await prisma.examQuestion.update({
       where: { id: questionId },
       data: {
         type: data.type,
         prompt: data.prompt,
-        options: data.options,
-        correctAnswer: data.correctAnswer || null,
+        options: checked.options,
+        correctAnswer: checked.correctAnswer,
         marks: data.marks,
         topicId: data.topicId || null,
       },
@@ -224,9 +260,12 @@ export async function reorderExamQuestions(examId: string, orderedQuestionIds: s
 export async function publishExam(examId: string): Promise<ActionResult> {
   try {
     const { exam } = await requireOwnedExam(examId);
-    const questionCount = await prisma.examQuestion.count({ where: { examId } });
-    if (questionCount === 0) return { ok: false, error: "Add at least one question before publishing." };
+    const questions = await prisma.examQuestion.findMany({ where: { examId }, orderBy: { order: "asc" }, select: { type: true, prompt: true, options: true, correctAnswer: true, marks: true } });
+    if (questions.length === 0) return { ok: false, error: "Add at least one question before publishing." };
     if (exam.status === "PUBLISHED") return { ok: false, error: "Exam is already published." };
+    // Questions saved before answers were checked on entry: don't publish one nobody could get right.
+    const unanswerable = questions.findIndex((q) => !checkedQuestionFields({ type: q.type, prompt: q.prompt, options: Array.isArray(q.options) ? q.options.map(String) : undefined, correctAnswer: q.correctAnswer ?? undefined, marks: q.marks }).ok);
+    if (unanswerable !== -1) return { ok: false, error: `Question ${unanswerable + 1} has no valid correct answer - fix or delete it before publishing.` };
     await prisma.exam.update({ where: { id: examId }, data: { status: "PUBLISHED" } });
     if (exam.scheduleId) {
       await prisma.examSchedule.update({ where: { id: exam.scheduleId }, data: { isPublished: true } }).catch(() => {});
@@ -352,7 +391,7 @@ export async function getExamForTeacher(examId: string) {
       schoolClass: true,
       subject: true,
       questions: { orderBy: { order: "asc" } },
-      submissions: { include: { student: { include: { user: true } }, grade: true } },
+      submissions: { include: { student: { include: { user: { omit: { passwordHash: true } } } }, grade: true } },
     },
   });
 }
@@ -370,9 +409,9 @@ async function requireStudentProfile() {
 
 export async function listExamsForStudent() {
   const { student } = await requireStudentProfile();
-  if (!student.schoolClassId) return [];
+  if (!student.schoolClassId || !student.schoolId) return [];
   return prisma.exam.findMany({
-    where: { schoolClassId: student.schoolClassId, status: "PUBLISHED" },
+    where: { schoolClassId: student.schoolClassId, status: "PUBLISHED", teacher: { schoolId: student.schoolId } },
     include: {
       subject: true,
       submissions: { where: { studentId: student.id } },
@@ -386,14 +425,25 @@ export async function getExamForAttempt(examId: string) {
   const { student } = await requireStudentProfile();
   const exam = await prisma.exam.findUnique({
     where: { id: examId },
-    include: { subject: true, questions: { orderBy: { order: "asc" } } },
+    include: { subject: true, teacher: { select: { schoolId: true } }, questions: { orderBy: { order: "asc" } } },
   });
   if (!exam || exam.status !== "PUBLISHED" || exam.schoolClassId !== student.schoolClassId) return null;
+  if (!student.schoolId || exam.teacher.schoolId !== student.schoolId) return null;
 
   const existing = await prisma.examSubmission.findUnique({ where: { examId_studentId: { examId, studentId: student.id } } });
   if (existing?.status === "SUBMITTED" || existing?.status === "GRADED") return null; // already submitted, can't re-enter
 
+  // The clock runs from the moment the attempt STARTED (stored on the server), so a
+  // reload or a second tab can neither restart the timer nor lose saved answers.
+  const totalSeconds = exam.durationMinutes * 60;
+  const elapsedSeconds = existing?.startedAt ? Math.max(0, Math.floor((Date.now() - existing.startedAt.getTime()) / 1000)) : 0;
+  const savedRows = existing ? await prisma.examAnswer.findMany({ where: { submissionId: existing.id }, select: { questionId: true, studentAnswer: true } }) : [];
+  const savedAnswers: Record<string, string> = {};
+  for (const row of savedRows) if (row.studentAnswer != null) savedAnswers[row.questionId] = row.studentAnswer;
+
   return {
+    remainingSeconds: Math.max(0, totalSeconds - elapsedSeconds),
+    savedAnswers,
     id: exam.id,
     title: exam.title,
     subject: exam.subject.name,
@@ -414,8 +464,14 @@ export async function getExamForAttempt(examId: string) {
 export async function startExamAttempt(examId: string): Promise<ActionResult<{ submissionId: string }>> {
   try {
     const { student } = await requireStudentProfile();
-    const exam = await prisma.exam.findUnique({ where: { id: examId } });
-    if (!exam || exam.status !== "PUBLISHED" || exam.schoolClassId !== student.schoolClassId) {
+    const exam = await prisma.exam.findUnique({ where: { id: examId }, include: { teacher: { select: { schoolId: true } } } });
+    if (
+      !exam ||
+      exam.status !== "PUBLISHED" ||
+      exam.schoolClassId !== student.schoolClassId ||
+      !student.schoolId ||
+      exam.teacher.schoolId !== student.schoolId
+    ) {
       return { ok: false, error: "Exam not available." };
     }
     const submission = await prisma.examSubmission.upsert({
@@ -436,11 +492,19 @@ export async function startExamAttempt(examId: string): Promise<ActionResult<{ s
 export async function saveExamAnswer(submissionId: string, questionId: string, answer: string): Promise<ActionResult> {
   try {
     const { student } = await requireStudentProfile();
-    const submission = await prisma.examSubmission.findUnique({ where: { id: submissionId } });
+    const submission = await prisma.examSubmission.findUnique({ where: { id: submissionId }, include: { exam: { select: { durationMinutes: true } } } });
     if (!submission || submission.studentId !== student.id) return { ok: false, error: "Submission not found." };
     if (submission.status !== "IN_PROGRESS" && submission.status !== "NOT_STARTED") {
       return { ok: false, error: "This exam has already been submitted." };
     }
+    // Answers stop counting once the time is up (a short grace covers the auto-submit round trip).
+    if (submission.startedAt && Date.now() > submission.startedAt.getTime() + (submission.exam.durationMinutes * 60 + 30) * 1000) {
+      return { ok: false, error: "Time is up - this answer was not saved." };
+    }
+    // The question has to belong to the exam this submission is for -
+    // otherwise an answer row could be attached to some other exam's question.
+    const question = await prisma.examQuestion.findUnique({ where: { id: questionId }, select: { examId: true } });
+    if (!question || question.examId !== submission.examId) return { ok: false, error: "Question not found." };
     await prisma.examAnswer.upsert({
       where: { submissionId_questionId: { submissionId, questionId } },
       update: { studentAnswer: answer },
@@ -534,7 +598,7 @@ export async function listSubmissionsForExam(examId: string) {
   await requireOwnedExam(examId);
   return prisma.examSubmission.findMany({
     where: { examId },
-    include: { student: { include: { user: true } }, answers: { include: { question: true } }, grade: true },
+    include: { student: { include: { user: { omit: { passwordHash: true } } } }, answers: { include: { question: true } }, grade: true },
     orderBy: { submittedAt: "asc" },
   });
 }

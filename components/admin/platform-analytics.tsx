@@ -44,8 +44,17 @@ export function PlatformAnalytics() {
     { label: "AI Tutor Conversations", value: String(data.aiConversations), icon: MessageCircleQuestion },
   ];
 
+  const scopeNote =
+    data.scope.kind === "platform"
+      ? "Showing the whole platform (super administrator)."
+      : data.scope.kind === "school"
+        ? `Showing ${data.scope.schoolName ?? "your school"} only. Classes, subjects and topics are the shared curriculum.`
+        : "Your account isn't associated with a school, so there is nothing to report. Contact the super administrator.";
+
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <div className="space-y-3">
+      <p className="text-xs text-gray-500 dark:text-gray-400">{scopeNote}</p>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
       {stats.map((stat) => (
         <Card key={stat.label} className="flex items-center gap-3 p-5">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary-100 text-primary-600 dark:bg-primary-950 dark:text-primary-300">
@@ -58,6 +67,7 @@ export function PlatformAnalytics() {
           </div>
         </Card>
       ))}
+      </div>
     </div>
   );
 }

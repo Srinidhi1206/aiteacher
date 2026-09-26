@@ -13,7 +13,8 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
-    "db:verify": "tsx scripts/verify-database.ts"
+    "db:verify": "tsx scripts/verify-database.ts",
+    "admin:set-password": "tsx scripts/set-super-admin.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -33,6 +34,7 @@
     "recharts": "^2.12.7",
     "server-only": "^0.0.1",
     "tailwind-merge": "^2.4.0",
+    "unpdf": "^1.8.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

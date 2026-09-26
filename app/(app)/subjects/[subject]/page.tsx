@@ -1,19 +1,36 @@
+// A real subject from the student's own class: its chapters, topics, the
+// student's recorded progress on each topic, and the published materials their
+// school filed under each chapter (lib/actions/student-curriculum.ts). A
+// subject id that is not in the student's own class is a 404, same as a
+// missing one.
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ChevronRight } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { Card, CardContent } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
-import { DynamicIcon } from "@/lib/icon-map";
-import { getSubjectBySlug } from "@/lib/mock-data/subjects";
-import { subjectColorClasses } from "@/lib/subject-colors";
-import { ChapterAccordion } from "@/components/subjects/chapter-accordion";
+import { Badge } from "@/components/ui/badge";
+import { DatabaseUnavailable } from "@/components/database-unavailable";
+import { MaterialLinks } from "@/components/subjects/material-links";
+import { getMySubject } from "@/lib/actions/student-curriculum";
 
-export default function SubjectDetailPage({ params }: { params: { subject: string } }) {
-  const subject = getSubjectBySlug(params.subject);
+const statusLabel = { WEAK: "Needs work", DEVELOPING: "In progress", STRONG: "Mastered" } as const;
+const statusVariant = { WEAK: "warning", DEVELOPING: "default", STRONG: "success" } as const;
+
+export default async function SubjectDetailPage({ params }: { params: { subject: string } }) {
+  let subject: Awaited<ReturnType<typeof getMySubject>>;
+  try {
+    subject = await getMySubject(params.subject);
+  } catch {
+    return (
+      <>
+        <Topbar title="Subject" />
+        <main className="flex-1 p-4 sm:p-6">
+          <DatabaseUnavailable what="This subject" />
+        </main>
+      </>
+    );
+  }
   if (!subject) notFound();
-
-  const colors = subjectColorClasses[subject.color] ?? subjectColorClasses.indigo;
 
   return (
     <>
@@ -24,39 +41,57 @@ export default function SubjectDetailPage({ params }: { params: { subject: strin
         </Link>
 
         <Card>
-          <CardContent className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-4">
-              <div className={`flex h-14 w-14 items-center justify-center rounded-2xl ${colors.soft} ${colors.text}`}>
-                <DynamicIcon name={subject.icon} className="h-7 w-7" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">{subject.name}</h2>
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  {subject.chapters.length} chapters - Current Bloom level: {subject.currentBloomLevel}
-                </p>
-              </div>
-            </div>
-            <div className="w-full sm:w-56">
-              <div className="mb-1 flex items-center justify-between text-xs text-gray-400">
-                <span>Overall progress</span>
-                <span className="font-semibold text-gray-600 dark:text-gray-300">{subject.progress}%</span>
-              </div>
-              <Progress value={subject.progress} barClassName={colors.bar} />
-            </div>
+          <CardContent className="p-5">
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">{subject.name}</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              {subject.classLabel ? `${subject.classLabel} - ` : ""}
+              {subject.chapters.length} chapter{subject.chapters.length === 1 ? "" : "s"}
+            </p>
           </CardContent>
         </Card>
 
-        <div className="space-y-3">
-          {subject.chapters.map((chapter, idx) => (
-            <ChapterAccordion
-              key={chapter.id}
-              subjectSlug={subject.slug}
-              chapter={chapter}
-              defaultOpen={idx === 0}
-              accentBar={colors.bar}
-            />
-          ))}
-        </div>
+        {subject.chapters.length === 0 ? (
+          <Card>
+            <CardContent className="py-12 text-center text-sm text-gray-500 dark:text-gray-400">
+              No chapters have been added for this subject yet.
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {subject.chapters.map((chapter, idx) => (
+              <Card key={chapter.id}>
+                <CardContent className="space-y-3 p-5">
+                  <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50">
+                    <span className="mr-2 text-gray-400">{idx + 1}.</span>
+                    {chapter.name}
+                  </h3>
+                  {chapter.topics.length > 0 && (
+                    <ul className="divide-y divide-gray-100 dark:divide-gray-800">
+                      {chapter.topics.map((t) => (
+                        <li key={t.id}>
+                          <Link
+                            href={`/subjects/${subject.id}/${t.id}`}
+                            className="flex items-center justify-between gap-3 py-2 text-sm text-gray-700 hover:text-primary-700 dark:text-gray-200 dark:hover:text-primary-300"
+                          >
+                            <span className="min-w-0 flex-1 truncate">{t.name}</span>
+                            {t.status && <Badge variant={statusVariant[t.status]}>{statusLabel[t.status]}</Badge>}
+                            <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {chapter.materials.length > 0 && (
+                    <div>
+                      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-400">Study materials</p>
+                      <MaterialLinks materials={chapter.materials} />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
       </main>
     </>
   );

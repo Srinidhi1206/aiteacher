@@ -12,8 +12,17 @@ import { AIError } from "./errors";
 import type { AIChatMessage, AIGenerateRequest, AIGenerateResult, AIProvider, AIStudentContext } from "./types";
 
 const DEFAULT_TEMPERATURE = 0.6;
-const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+// Thinking models count their reasoning tokens against this limit, so leave real headroom for the answer.
+const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
+// A model call that never answers must not hold a student's chat open forever. Newer Gemini
+// models can take 20-40s to answer under load, so one attempt gets 60s by default and the
+// whole reply (attempts + retries) is capped at 100s - just under the chat's own 110s
+// watchdog. Both are configurable: GEMINI_TIMEOUT_MS (per attempt), GEMINI_TOTAL_TIMEOUT_MS.
+function envMs(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n >= 5_000 ? n : fallback;
+}
+const DEFAULT_GEMINI_MODEL = "gemini-flash-latest"; // "gemini-2.5-flash" has been retired by Google (404)
 
 /**
  * Renders the assembled student context (lib/ai/context.ts) into plain
@@ -60,16 +69,46 @@ class GeminiProvider implements AIProvider {
     const { GoogleGenAI } = await import("@google/genai");
     const ai = new GoogleGenAI({ apiKey: this.apiKey });
 
+    const startedAt = Date.now();
+    const perAttemptMs = envMs("GEMINI_TIMEOUT_MS", 60_000);
+    const totalMs = envMs("GEMINI_TOTAL_TIMEOUT_MS", 100_000);
+    // Optional: limit the model's hidden "thinking" for faster, cheaper tutor answers. Only sent when
+    // set, because not every model accepts it (GEMINI_THINKING_BUDGET=0 turns thinking off where allowed).
+    const thinkingBudgetRaw = process.env.GEMINI_THINKING_BUDGET;
+    const thinkingBudget = thinkingBudgetRaw !== undefined && thinkingBudgetRaw.trim() !== "" && Number.isInteger(Number(thinkingBudgetRaw)) ? Number(thinkingBudgetRaw) : undefined;
+
     try {
-      const response = await ai.models.generateContent({
-        model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
-        contents: toGeminiContents(request.messages, request.userMessage),
-        config: {
-          systemInstruction: request.systemPrompt + formatContextBlock(request.studentContext),
-          temperature: request.temperature ?? DEFAULT_TEMPERATURE,
-          maxOutputTokens: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-        },
-      });
+      const generate = () =>
+        ai.models.generateContent({
+          model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+          contents: toGeminiContents(request.messages, request.userMessage),
+          config: {
+            systemInstruction: request.systemPrompt + formatContextBlock(request.studentContext),
+            temperature: request.temperature ?? DEFAULT_TEMPERATURE,
+            maxOutputTokens: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+            ...(thinkingBudget !== undefined ? { thinkingConfig: { thinkingBudget } } : {}),
+            abortSignal: AbortSignal.timeout(Math.max(5_000, Math.min(perAttemptMs, totalMs - (Date.now() - startedAt)))),
+          },
+        });
+      // Gemini regularly answers 500/503/504 for a second or two under load; a few
+      // short retries (backoff, at most two) turn most of those into a normal reply instead of an error.
+      // Quota (429) and client errors are never retried - retrying a quota error only
+      // burns more of the quota.
+      let response;
+      const RETRY_DELAYS_MS = [1500, 3500]; // up to two retries, only for transient server-side errors
+      for (let attempt = 0; ; attempt++) {
+        try {
+          response = await generate();
+          break;
+        } catch (transient) {
+          const transientStatus = (transient as { status?: number } | null)?.status;
+          const retryable = transientStatus === 500 || transientStatus === 503 || transientStatus === 504;
+          if (!retryable || attempt >= RETRY_DELAYS_MS.length) throw transient;
+          // No point starting another attempt that cannot finish inside the overall cap.
+          if (Date.now() - startedAt + RETRY_DELAYS_MS[attempt] > totalMs - 15_000) throw transient;
+          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+        }
+      }
 
       const text = response.text;
       if (!text) throw new AIError("AI_PROVIDER_ERROR", "The AI tutor returned an empty response.");
@@ -79,7 +118,10 @@ class GeminiProvider implements AIProvider {
       const status = (err as { status?: number } | null)?.status;
       // eslint-disable-next-line no-console
       console.error("[ai/provider] Gemini request failed", status ? { status } : { message: (err as Error)?.message });
-      if (status === 429) throw new AIError("AI_RATE_LIMITED");
+      // The provider's own quota, not something the student did - say so, so they don't think they broke a rule.
+      if (status === 429) throw new AIError("AI_RATE_LIMITED", "The AI tutor is very busy right now. Please try again in a minute.");
+      const timedOut = (err as { name?: string } | null)?.name === "TimeoutError" || (err as { name?: string } | null)?.name === "AbortError";
+      if (timedOut) throw new AIError("AI_PROVIDER_ERROR", "The AI tutor took too long to answer. Please try again.");
       throw new AIError("AI_PROVIDER_ERROR");
     }
   }

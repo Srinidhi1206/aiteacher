@@ -89,10 +89,15 @@ export async function getTodayOverview() {
     prisma.studyPlanItem.findFirst({
       where: { studyPlan: { studentId: student.id }, date: { gte: startOfToday, lt: endOfToday } },
     }),
-    student.schoolClassId
+    // Worksheets and exam schedules are school-owned (see the note on
+    // requireOwnedAssignment in exams.ts / exam-schedule.ts), so both need the
+    // student's school as well as their class - a student with no school
+    // gets neither.
+    student.schoolClassId && student.schoolId
       ? prisma.worksheet.findMany({
           where: {
             schoolClassId: student.schoolClassId,
+            teacher: { schoolId: student.schoolId },
             isPublished: true,
             dueDate: { gte: startOfToday, lt: new Date(startOfToday.getTime() + 7 * 86_400_000) },
             submissions: { none: { studentId: student.id } },
@@ -102,9 +107,14 @@ export async function getTodayOverview() {
           take: 5,
         })
       : Promise.resolve([]),
-    student.schoolClassId
+    student.schoolClassId && student.schoolId
       ? prisma.examSchedule.findMany({
-          where: { schoolClassId: student.schoolClassId, isPublished: true, examDate: { gte: startOfToday } },
+          where: {
+            schoolClassId: student.schoolClassId,
+            createdBy: { admin: { schoolId: student.schoolId } },
+            isPublished: true,
+            examDate: { gte: startOfToday },
+          },
           orderBy: { examDate: "asc" },
           take: 3,
         })

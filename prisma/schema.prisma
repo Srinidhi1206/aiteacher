@@ -295,23 +295,35 @@ model Board {
   students       Student[]
   examSchedules  ExamSchedule[]
   studyMaterials StudyMaterial[]
+  schools        School[]
 
   @@index([stateId])
 }
 
-// A school/institution. Kept simple (single-tenant friendly - one seeded
-// "default" school is enough for the current deployment) but modeled
-// properly so multi-school SaaS (Step 5) doesn't need a schema rewrite.
+// A school/institution. `boardId` is nullable rather than required: making it
+// NOT NULL would need a backfill value for any school row created before
+// this field existed (the seeded demo school), which this change doesn't
+// perform - registration/admin-creation code enforces "a board is required"
+// at the application layer instead. `admins` is the multi-school scoping
+// anchor added alongside this: an Admin with a schoolId manages only that
+// school; the bootstrap super admin and any admin created before this change
+// have schoolId = null (global, unchanged behavior).
 model School {
   id        String   @id @default(cuid())
   name      String
   stateId   String?
   state     State?   @relation(fields: [stateId], references: [id], onDelete: SetNull)
+  boardId   String?
+  board     Board?   @relation(fields: [boardId], references: [id], onDelete: SetNull)
   isEnabled Boolean  @default(true)
   createdAt DateTime @default(now())
 
-  students Student[]
-  teachers Teacher[]
+  students       Student[]
+  teachers       Teacher[]
+  admins         Admin[]
+  studyMaterials StudyMaterial[]
+
+  @@index([boardId])
 }
 
 // Grade level (Class 1..Class 10), scoped to a board so an admin can enable
@@ -513,6 +525,18 @@ model Admin {
   // this field - normal admins can never self-promote (enforced in
   // lib/actions/user-management.ts, never trusted from client input).
   isSuperAdmin Boolean @default(false)
+
+  // Multi-school scoping (added alongside School.boardId): null means this
+  // admin is global/platform-wide (the bootstrap super admin, and every
+  // admin created before this change) - unchanged behavior. A non-null
+  // schoolId means this admin administers only that one school; every
+  // school-scoped action added going forward re-derives this from the
+  // session's own Admin row, never from client input, the same pattern
+  // already used for isSuperAdmin.
+  schoolId String?
+  school   School? @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId])
 }
 
 // Stage F: one row per user who has ever registered - tracks the
@@ -708,11 +732,17 @@ model StudyMaterial {
   extractedTopics Json? // string[] populated once AI extraction completes
   isPublished     Boolean        @default(false)
 
-  // Board/class/subject/chapter are required (not nullable) - a material
-  // that isn't placed in the curriculum hierarchy can't be filtered to the
-  // right students, which defeats the point of storing it. Pick chapter
-  // last in the UI once subject narrows the options; topic stays optional
-  // (chapter-level material is common and valid on its own).
+  // School/board/class/subject/chapter are required (not nullable) - a
+  // material that isn't placed in the curriculum hierarchy can't be
+  // filtered to the right students, which defeats the point of storing it.
+  // Pick chapter last in the UI once subject narrows the options; topic
+  // stays optional (chapter-level material is common and valid on its own).
+  // schoolId (added alongside Admin.schoolId/School.boardId) is the actual
+  // isolation boundary between two schools that happen to share the same
+  // board+class - board/class alone were not enough (see the migration for
+  // how the one pre-existing row was backfilled).
+  schoolId      String
+  school        School      @relation(fields: [schoolId], references: [id], onDelete: Restrict)
   boardId       String
   board         Board       @relation(fields: [boardId], references: [id], onDelete: Restrict)
   schoolClassId String
@@ -731,12 +761,46 @@ model StudyMaterial {
   teacherId        String?
   teacher          Teacher? @relation(fields: [teacherId], references: [id], onDelete: SetNull)
 
+  // AI Tutor retrieval (RAG): set when this material's text has been
+  // extracted, chunked and embedded into MaterialChunk. indexError holds why it
+  // could not be indexed (e.g. a scanned PDF with no text). Both null = not
+  // indexed yet.
+  indexedAt  DateTime?
+  indexError String?
+  chunks     MaterialChunk[]
+
   uploadedAt DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  @@index([boardId, schoolClassId, subjectId])
+  @@index([schoolId, boardId, schoolClassId, subjectId])
   @@index([chapterId])
   @@index([uploadedByUserId])
+}
+
+// One searchable passage of a StudyMaterial, with its embedding. The school /
+// class / subject (and chapter/topic) are COPIED from the material when it is
+// indexed, so retrieval can filter on the student's own school + class
+// directly and can never return a passage from another school's material -
+// the filter is the isolation boundary, not the UI. Embeddings are stored as
+// a plain float array (no pgvector extension needed): similarity is computed
+// in the app over the small, already school+class-scoped candidate set.
+model MaterialChunk {
+  id            String        @id @default(cuid())
+  materialId    String
+  material      StudyMaterial @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  schoolId      String
+  schoolClassId String
+  subjectId     String
+  chapterId     String
+  topicId       String?
+  chunkIndex    Int
+  page          Int?
+  text          String
+  embedding     Float[]
+  createdAt     DateTime      @default(now())
+
+  @@index([schoolId, schoolClassId, subjectId])
+  @@index([materialId])
 }
 
 model Worksheet {

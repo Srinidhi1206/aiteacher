@@ -1,21 +1,18 @@
 "use client";
 import { motion } from "framer-motion";
-import { currentStudent } from "@/lib/mock-data/students";
+import { useSessionUser } from "@/components/layout/session-user-context";
 
-const motivationalLines = [
-  "You're building real momentum. Keep showing up.",
-  "Small daily wins compound into big results.",
-  "Today is a great day to master something new.",
-];
+const tagline = "Pick a subject, practice a topic or ask your AI tutor - a little each day adds up.";
 
 export function WelcomeBanner() {
-  const today = new Date("2026-07-19").toLocaleDateString("en-US", {
+  const user = useSessionUser();
+  const today = new Date().toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
     year: "numeric",
   });
-  const firstName = currentStudent.name.split(" ")[0];
+  const firstName = user?.name.split(" ")[0] ?? "";
 
   return (
     <motion.div
@@ -26,9 +23,9 @@ export function WelcomeBanner() {
     >
       <div className="absolute -right-10 -top-10 h-40 w-40 rounded-full bg-white/10" />
       <div className="absolute -bottom-14 right-24 h-28 w-28 rounded-full bg-white/10" />
-      <p className="text-sm font-medium text-primary-100">{today}</p>
-      <h2 className="mt-1 text-2xl font-bold sm:text-3xl">Welcome back, {firstName}!</h2>
-      <p className="mt-2 max-w-lg text-sm text-primary-100 sm:text-base">{motivationalLines[0]}</p>
+      <p className="text-sm font-medium text-primary-100" suppressHydrationWarning>{today}</p>
+      <h2 className="mt-1 text-2xl font-bold sm:text-3xl">{firstName ? `Welcome back, ${firstName}!` : "Welcome back!"}</h2>
+      <p className="mt-2 max-w-lg text-sm text-primary-100 sm:text-base">{tagline}</p>
     </motion.div>
   );
 }
