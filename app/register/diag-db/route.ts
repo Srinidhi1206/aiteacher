@@ -2,6 +2,9 @@
 // count. Returns only booleans and Prisma error name/code with URLs and hostnames scrubbed - never a
 // secret value and never any row data.
 import { NextResponse } from "next/server";
+import { createHash } from "node:crypto";
+import dns from "node:dns/promises";
+import net from "node:net";
 import { prisma } from "@/lib/prisma";
 import { assertSessionSecretConfigured } from "@/lib/auth/session";
 
@@ -51,6 +54,29 @@ export async function GET() {
     out.stateCount = await prisma.state.count();
   } catch (err) {
     out.stateCount = describe(err);
+  }
+
+  // Reachability of the configured host, without revealing it: only a short fingerprint is returned.
+  try {
+    const u = new URL(url);
+    out.hostFingerprint = createHash("sha256").update(u.hostname).digest("hex").slice(0, 10);
+    out.port = u.port || "5432";
+    out.dbNameFingerprint = createHash("sha256").update(u.pathname).digest("hex").slice(0, 6);
+    try {
+      const addrs = await dns.lookup(u.hostname, { all: true });
+      out.dns = { ok: true, addresses: addrs.length };
+    } catch (err) {
+      out.dns = { ok: false, code: (err as { code?: string }).code ?? "error" };
+    }
+    out.tcp = await new Promise((resolve) => {
+      const t0 = Date.now();
+      const sock = net.connect({ host: u.hostname, port: Number(u.port || 5432), timeout: 4000 });
+      sock.once("connect", () => { sock.destroy(); resolve({ ok: true, ms: Date.now() - t0 }); });
+      sock.once("timeout", () => { sock.destroy(); resolve({ ok: false, reason: "timeout" }); });
+      sock.once("error", (e: NodeJS.ErrnoException) => { resolve({ ok: false, reason: e.code ?? "error", ms: Date.now() - t0 }); });
+    });
+  } catch {
+    out.hostFingerprint = "unparseable DATABASE_URL";
   }
   return NextResponse.json(out, { headers: { "Cache-Control": "no-store" } });
 }
