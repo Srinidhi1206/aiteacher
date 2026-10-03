@@ -21,7 +21,9 @@ interface Assignment {
 
 type Chapter = Awaited<ReturnType<typeof listChaptersForSubject>>[number];
 
-export function CreateWorksheetForm({ assignments }: { assignments: Assignment[] }) {
+// Used by teachers (their own assignments) and by administrators creating an assignment on behalf of a teacher (`teacherId`
+// and that teacher's assignments).
+export function CreateWorksheetForm({ assignments, teacherId, emptyMessage, onCreated }: { assignments: Assignment[]; teacherId?: string; emptyMessage?: string; onCreated?: () => void }) {
   const [showForm, setShowForm] = React.useState(false);
   const [assignmentKey, setAssignmentKey] = React.useState(assignments[0] ? `${assignments[0].schoolClassId}::${assignments[0].subjectId}` : "");
   const [title, setTitle] = React.useState("");
@@ -52,8 +54,7 @@ export function CreateWorksheetForm({ assignments }: { assignments: Assignment[]
     return (
       <Card>
         <CardContent className="py-8 text-center text-sm text-gray-500 dark:text-gray-400">
-          You don&apos;t have any class/subject assignments yet. Ask an admin to assign you to a class and subject before creating
-          worksheets.
+          {emptyMessage ?? "You don't have any class/subject assignments yet. Ask an admin to assign you to a class and subject before creating worksheets."}
         </CardContent>
       </Card>
     );
@@ -77,6 +78,7 @@ export function CreateWorksheetForm({ assignments }: { assignments: Assignment[]
         chapterId: chapterId || undefined,
         topicId: topicId || undefined,
         dueDate: dueDate ? new Date(dueDate).toISOString() : undefined,
+        ...(teacherId ? { teacherId } : {}),
       },
       file
     );
@@ -91,6 +93,7 @@ export function CreateWorksheetForm({ assignments }: { assignments: Assignment[]
       setChapterId("");
       setTopicId("");
       setFile(null);
+      onCreated?.();
       router.refresh();
     } else {
       setError(result.error ?? "Could not create worksheet.");

@@ -15,7 +15,7 @@ import { useToast } from "@/components/ui/toast";
 import { inputClass, labelClass } from "@/components/register/field-styles";
 import { formatDate, cn } from "@/lib/utils";
 import { listStates, listBoards, listSchools, listSchoolClasses, listSubjectsForClass, listChaptersForSubject } from "@/lib/actions/curriculum";
-import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin, setMaterialScope } from "@/lib/actions/materials";
+import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin, setMaterialScope, updateMaterialDetails } from "@/lib/actions/materials";
 import { indexMaterial } from "@/lib/actions/material-index";
 import { parseIndexStatus } from "@/lib/rag/index-status";
 import { importMaterialFromUrl } from "@/lib/actions/material-import";
@@ -118,6 +118,13 @@ export function StudyMaterialsCard() {
   // Super administrator only: the material whose "who owns this" control is open, and the school picked for it.
   const [scopeEditId, setScopeEditId] = React.useState<string | null>(null);
   const [scopeSchoolId, setScopeSchoolId] = React.useState("");
+  // The material whose title / placement editor is open, its draft values, and the chapters it can move to.
+  const [editId, setEditId] = React.useState<string | null>(null);
+  const [editTitle, setEditTitle] = React.useState("");
+  const [editChapterId, setEditChapterId] = React.useState(""); // "" = whole subject
+  const [editChapters, setEditChapters] = React.useState<{ id: string; name: string }[]>([]);
+  const [editSaving, setEditSaving] = React.useState(false);
+  const [publishBusyId, setPublishBusyId] = React.useState<string | null>(null);
   const [indexingId, setIndexingId] = React.useState<string | null>(null);
   const [indexProgress, setIndexProgress] = React.useState<{ done: number; total: number | null } | null>(null);
   // Materials belong to a school. A school administrator always uploads to their own school. The
@@ -319,11 +326,41 @@ export function StudyMaterialsCard() {
   }
 
   async function handleTogglePublish(m: MaterialRow) {
+    if (publishBusyId) return; // one change at a time: a double click must not publish and immediately unpublish
+    setPublishBusyId(m.id);
     const result = await setMaterialPublished(m.id, !m.isPublished);
+    setPublishBusyId(null);
     if (!result.ok) {
       showToast("Could not update", result.error ?? "");
       return;
     }
+    refreshMaterials();
+  }
+
+  function openEditor(m: MaterialRow) {
+    setEditId(m.id);
+    setEditTitle(m.title);
+    setEditChapterId(m.chapterId ?? "");
+    setEditChapters([]);
+    listChaptersForSubject(m.subjectId)
+      .then((c) => setEditChapters(c.map((x) => ({ id: x.id, name: x.name }))))
+      .catch(() => setEditChapters([]));
+  }
+
+  async function saveEditor(m: MaterialRow) {
+    if (editSaving) return;
+    setEditSaving(true);
+    const result = await updateMaterialDetails(m.id, {
+      title: editTitle,
+      chapterId: editChapterId === "" ? null : editChapterId,
+    });
+    setEditSaving(false);
+    if (!result.ok) {
+      showToast("Could not save the changes", result.error ?? "");
+      return;
+    }
+    setEditId(null);
+    showToast(result.data?.message ?? "Saved");
     refreshMaterials();
   }
 
@@ -676,6 +713,53 @@ export function StudyMaterialsCard() {
                             </button>
                           )}
                         </p>
+                      )}
+                      {editId === m.id ? (
+                        <div className="mt-2 space-y-2 rounded-xl border border-gray-100 p-3 dark:border-gray-800">
+                          <label className="block text-xs text-gray-500">
+                            Title
+                            <input
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-transparent px-2 py-1.5 text-sm text-gray-800 dark:border-gray-700 dark:text-gray-100"
+                              value={editTitle}
+                              maxLength={200}
+                              onChange={(e) => setEditTitle(e.target.value)}
+                              disabled={editSaving}
+                            />
+                          </label>
+                          <label className="block text-xs text-gray-500">
+                            Where it sits in the book
+                            <select
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-transparent px-2 py-1.5 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+                              value={editChapterId}
+                              onChange={(e) => setEditChapterId(e.target.value)}
+                              disabled={editSaving}
+                            >
+                              <option value="">Whole subject (no chapter)</option>
+                              {editChapters.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <p className="text-[11px] text-gray-400">The file and its indexed passages are not touched; the passages follow the new placement.</p>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => saveEditor(m)}
+                              disabled={editSaving || !editTitle.trim()}
+                              className="rounded-lg bg-primary-600 px-3 py-1 text-xs font-semibold text-white hover:bg-primary-700 disabled:opacity-50"
+                            >
+                              {editSaving ? "Saving..." : "Save"}
+                            </button>
+                            <button onClick={() => setEditId(null)} disabled={editSaving} className="rounded-lg px-3 py-1 text-xs text-gray-500 hover:bg-gray-100 disabled:opacity-50 dark:hover:bg-gray-800">
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button onClick={() => openEditor(m)} className="mt-1 text-xs font-medium text-primary-600 hover:underline dark:text-primary-300">
+                          Edit title / placement
+                        </button>
                       )}
                     </div>
                   </div>

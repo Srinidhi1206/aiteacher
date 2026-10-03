@@ -13,6 +13,7 @@ import { logAudit } from "@/lib/audit";
 import { notifyQuietly, audienceForMaterial } from "@/lib/notifications/core";
 import { studentMaterialWhere } from "@/lib/materials/scope";
 import { changeMaterialScopeCore } from "@/lib/materials/share";
+import { updateMaterialDetailsCore } from "@/lib/materials/details";
 import { resolveActorSchool as resolveActorSchoolFor, actorMayManageMaterial as actorMayManageMaterialFor, resolveMaterialTarget } from "@/lib/materials/owner";
 
 const materialInputSchema = z.object({
@@ -192,6 +193,31 @@ export async function setMaterialScope(materialId: string, target: { common: tru
     const where = result.to === null ? "now shared with every school on its board and class" : "now private to one school";
     await logAudit(session.id, "USER_UPDATE", `StudyMaterial:${materialId}`, `Material ${where}: "${result.title}" (${result.passages} indexed passages moved with it)`);
     return { ok: true, data: { message: `"${result.title}" is ${where}.` } };
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    throw e;
+  }
+}
+
+/**
+ * Edits a material's title, description and where it sits in the book (a chapter / topic, or the whole subject) without
+ * re-uploading or re-indexing it - its indexed passages follow the new placement. Same permission as publishing: the
+ * school's own administrators (and the uploader, for a teacher), the super administrator for common material.
+ */
+export async function updateMaterialDetails(
+  materialId: string,
+  input: { title?: string; description?: string | null; chapterId?: string | null; topicId?: string | null }
+): Promise<ActionResult<{ message: string }>> {
+  try {
+    const session = await requireAdminOrTeacher();
+    const material = await prisma.studyMaterial.findUnique({ where: { id: materialId }, select: { id: true, schoolId: true, uploadedByUserId: true } });
+    if (!material || !(await actorMayManageMaterial(session, material.schoolId))) return { ok: false, error: "Material not found." };
+    if (session.role === "teacher" && material.uploadedByUserId !== session.id) return { ok: false, error: "You can only edit your own uploads." };
+
+    const result = await updateMaterialDetailsCore(prisma, materialId, input);
+    if (!result.ok) return { ok: false, error: result.error };
+    await logAudit(session.id, "USER_UPDATE", `StudyMaterial:${materialId}`, `Material edited: ${result.changes.join("; ")}${result.passages > 0 ? ` (${result.passages} indexed passages moved with it)` : ""}`);
+    return { ok: true, data: { message: `"${result.title}" was updated.` } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
     throw e;

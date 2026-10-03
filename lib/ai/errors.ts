@@ -12,7 +12,7 @@ export type AIErrorCode =
   | "CONVERSATION_NOT_FOUND";
 
 const DEFAULT_MESSAGES: Record<AIErrorCode, string> = {
-  AI_NOT_CONFIGURED: "AI Tutor is not configured yet. Please configure the AI provider to start chatting.",
+  AI_NOT_CONFIGURED: "The AI Tutor isn't available right now. Please try again later or ask your teacher.",
   AI_PROVIDER_ERROR: "The AI tutor couldn't generate a response right now. Please try again.",
   AI_RATE_LIMITED: "You're sending messages a little too fast. Please wait a moment and try again.",
   AI_INVALID_REQUEST: "That message couldn't be sent.",

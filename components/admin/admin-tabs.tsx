@@ -7,6 +7,7 @@
 // super administrator only - it is hidden for school admins and the server
 // refuses their calls regardless.
 import * as React from "react";
+import { useSearchParams } from "next/navigation";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { UsersTable } from "@/components/admin/users-table";
 import { SubjectsTable } from "@/components/admin/subjects-table";
@@ -19,7 +20,12 @@ import { AcademicsOverview } from "@/components/admin/academics-overview";
 import { AcademicCalendarPanel } from "@/components/admin/academic-calendar-panel";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 
+const TAB_VALUES = ["analytics", "schools", "users", "subjects", "materials", "academics", "exam-schedule", "calendar", "logs"];
+
 export function AdminTabs() {
+  // /admin?tab=academics opens that tab (used by "Back" links from the exam page).
+  const requested = useSearchParams().get("tab");
+  const initialTab = requested && TAB_VALUES.includes(requested) ? requested : "analytics";
   const [isSuperAdmin, setIsSuperAdmin] = React.useState(false);
   React.useEffect(() => {
     getMyAdminStatus()
@@ -28,7 +34,7 @@ export function AdminTabs() {
   }, []);
 
   return (
-    <Tabs defaultValue="analytics" className="space-y-6">
+    <Tabs defaultValue={initialTab} className="space-y-6">
       <TabsList className="flex-wrap">
         <TabsTrigger value="analytics">Dashboard</TabsTrigger>
         {isSuperAdmin && <TabsTrigger value="schools">Schools</TabsTrigger>}

@@ -10,6 +10,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { notifyQuietly, notifyUserQuietly, audienceForClassInSchool } from "@/lib/notifications/core";
 import { getCurrentSession, requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
+import { resolveAuthor, canManageAuthored, actingNote } from "@/lib/academics/acting";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
 import { QuestionType } from "@prisma/client";
 import type { ActionResult } from "./materials";
@@ -40,6 +41,8 @@ const examInputSchema = z.object({
   durationMinutes: z.number().int().min(1).max(600),
   maxMarks: z.number().int().min(1).max(1000),
   instructions: z.string().trim().max(4000).optional(),
+  // Administrators only: the teacher this exam is being created for. A teacher may omit it (or name themself).
+  teacherId: z.string().optional(),
 });
 
 // Exams and worksheets have no school column of their own: their school is
@@ -61,11 +64,23 @@ export async function requireOwnedAssignment(schoolClassId: string, subjectId: s
   return { session, teacher, schoolId: teacher.schoolId };
 }
 
+/** A signed-in teacher or administrator - the two roles that may author and manage exams. */
+async function requireAuthoringSession() {
+  const session = await getCurrentSession();
+  if (!session) throw new UnauthorizedError();
+  if (session.role !== "teacher" && session.role !== "admin") throw new ForbiddenError("Only teachers and administrators can manage exams.");
+  return session;
+}
+
+// The author themself, or an administrator of the author's school (the super administrator: any school) - see
+// lib/academics/acting.ts. An administrator of another school gets the same "not found" as for a missing exam.
 async function requireOwnedExam(examId: string) {
-  const session = await requireRole("teacher");
-  const exam = await prisma.exam.findUnique({ where: { id: examId }, include: { teacher: true } });
+  const session = await requireAuthoringSession();
+  const exam = await prisma.exam.findUnique({ where: { id: examId }, include: { teacher: { include: { user: { select: { name: true } } } } } });
   if (!exam) throw new ForbiddenError("Exam not found.");
-  if (exam.teacher.userId !== session.id) throw new ForbiddenError("You can only manage your own exams.");
+  if (!(await canManageAuthored(prisma, session, exam.teacher))) {
+    throw new ForbiddenError(session.role === "admin" ? "Exam not found." : "You can only manage your own exams.");
+  }
   return { session, exam };
 }
 
@@ -74,7 +89,11 @@ export async function createExam(input: unknown, file?: File | null): Promise<Ac
     const parsed = examInputSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
-    const { session, teacher } = await requireOwnedAssignment(data.schoolClassId, data.subjectId);
+    const session = await requireAuthoringSession();
+    // A teacher authors in their own name; an administrator names a teacher of their school assigned to this class + subject.
+    const author = await resolveAuthor(prisma, session, { schoolClassId: data.schoolClassId, subjectId: data.subjectId, teacherId: data.teacherId });
+    if (!author.ok) return { ok: false, error: author.error };
+    const teacher = author.teacher;
 
     let fileUrl: string | undefined;
     let storageKey: string | undefined;
@@ -113,7 +132,7 @@ export async function createExam(input: unknown, file?: File | null): Promise<Ac
         status: "DRAFT",
       },
     });
-    await logAudit(session.id, "EXAM_CREATE", `Exam:${exam.id}`, `Created exam "${exam.title}" (draft)`);
+    await logAudit(session.id, "EXAM_CREATE", `Exam:${exam.id}`, `Created exam "${exam.title}" (draft)${actingNote(session, teacher.name)}`);
     return { ok: true, data: { id: exam.id } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -166,9 +185,16 @@ async function requireDraftOwnedExam(examId: string) {
   return { session, exam };
 }
 
+// A teacher editing their own exam is their ordinary work and is not logged line by line; an ADMINISTRATOR changing a
+// teacher's exam is, so the log always shows who altered someone else's work. One entry per change, never repeated.
+async function logAdminExamEdit(session: { id: string; role: string }, exam: { id: string; title: string; teacher: { user: { name: string } } }, what: string) {
+  if (session.role !== "admin") return;
+  await logAudit(session.id, "USER_UPDATE", `Exam:${exam.id}`, `${what} in exam "${exam.title}"${actingNote(session, exam.teacher.user.name)}`);
+}
+
 export async function addExamQuestion(examId: string, input: unknown): Promise<ActionResult<{ id: string }>> {
   try {
-    await requireDraftOwnedExam(examId);
+    const { session, exam } = await requireDraftOwnedExam(examId);
     const parsed = questionInputSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
@@ -187,6 +213,7 @@ export async function addExamQuestion(examId: string, input: unknown): Promise<A
         order: count,
       },
     });
+    await logAdminExamEdit(session, exam, `Question ${count + 1} added`);
     return { ok: true, data: { id: question.id } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -198,7 +225,7 @@ export async function updateExamQuestion(questionId: string, input: unknown): Pr
   try {
     const question = await prisma.examQuestion.findUnique({ where: { id: questionId } });
     if (!question) return { ok: false, error: "Question not found." };
-    await requireDraftOwnedExam(question.examId);
+    const { session, exam } = await requireDraftOwnedExam(question.examId);
     const parsed = questionInputSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
@@ -215,6 +242,7 @@ export async function updateExamQuestion(questionId: string, input: unknown): Pr
         topicId: data.topicId || null,
       },
     });
+    await logAdminExamEdit(session, exam, `Question ${question.order + 1} edited`);
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -226,8 +254,9 @@ export async function deleteExamQuestion(questionId: string): Promise<ActionResu
   try {
     const question = await prisma.examQuestion.findUnique({ where: { id: questionId } });
     if (!question) return { ok: false, error: "Question not found." };
-    await requireDraftOwnedExam(question.examId);
+    const { session, exam } = await requireDraftOwnedExam(question.examId);
     await prisma.examQuestion.delete({ where: { id: questionId } });
+    await logAdminExamEdit(session, exam, `Question ${question.order + 1} deleted`);
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -237,7 +266,7 @@ export async function deleteExamQuestion(questionId: string): Promise<ActionResu
 
 export async function reorderExamQuestions(examId: string, orderedQuestionIds: string[]): Promise<ActionResult> {
   try {
-    await requireDraftOwnedExam(examId);
+    const { session, exam } = await requireDraftOwnedExam(examId);
     // Every id must actually belong to this exam - without this check a
     // teacher who owns *some* draft exam could pass another exam's (or
     // another teacher's) question ids here and silently overwrite their
@@ -253,6 +282,7 @@ export async function reorderExamQuestions(examId: string, orderedQuestionIds: s
         prisma.examQuestion.update({ where: { id, examId }, data: { order: index } })
       )
     );
+    await logAdminExamEdit(session, exam, "Questions reordered");
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -273,7 +303,7 @@ export async function publishExam(examId: string): Promise<ActionResult> {
     if (exam.scheduleId) {
       await prisma.examSchedule.update({ where: { id: exam.scheduleId }, data: { isPublished: true } }).catch(() => {});
     }
-    await logAudit(session.id, "EXAM_PUBLISH", `Exam:${examId}`, `Published exam "${exam.title}"`);
+    await logAudit(session.id, "EXAM_PUBLISH", `Exam:${examId}`, `Published exam "${exam.title}"${actingNote(session, exam.teacher.user.name)}`);
     if (exam.teacher.schoolId) {
       await notifyQuietly(audienceForClassInSchool({ schoolId: exam.teacher.schoolId, schoolClassId: exam.schoolClassId }), { type: "EXAM", title: "New exam available", message: `"${exam.title}" is now open for your class.` });
     }
@@ -288,7 +318,7 @@ export async function unpublishExam(examId: string): Promise<ActionResult> {
   try {
     const { session, exam } = await requireOwnedExam(examId);
     await prisma.exam.update({ where: { id: examId }, data: { status: "UNPUBLISHED" } });
-    await logAudit(session.id, "EXAM_UNPUBLISH", `Exam:${examId}`, `Unpublished exam "${exam.title}"`);
+    await logAudit(session.id, "EXAM_UNPUBLISH", `Exam:${examId}`, `Unpublished exam "${exam.title}"${actingNote(session, exam.teacher.user.name)}`);
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -624,17 +654,21 @@ export async function listSubmissionsForExam(examId: string) {
 
 export async function gradeExamAnswer(answerId: string, marksAwarded: number): Promise<ActionResult> {
   try {
-    const session = await requireRole("teacher");
+    const session = await requireAuthoringSession();
     const answer = await prisma.examAnswer.findUnique({
       where: { id: answerId },
       include: { submission: { include: { exam: { include: { teacher: true } } } }, question: true },
     });
     if (!answer) return { ok: false, error: "Answer not found." };
-    if (answer.submission.exam.teacher.userId !== session.id) return { ok: false, error: "You can only grade your own exams." };
+    if (!(await canManageAuthored(prisma, session, answer.submission.exam.teacher))) return { ok: false, error: session.role === "admin" ? "Answer not found." : "You can only grade your own exams." };
     if (marksAwarded < 0 || marksAwarded > answer.question.marks) {
       return { ok: false, error: `Marks must be between 0 and ${answer.question.marks}.` };
     }
     await prisma.examAnswer.update({ where: { id: answerId }, data: { marksAwarded, isAutoGraded: false } });
+    if (session.role === "admin") {
+      const author = await prisma.teacher.findUnique({ where: { id: answer.submission.exam.teacherId }, select: { user: { select: { name: true } } } });
+      await logAudit(session.id, "GRADE_CHANGE", `ExamAnswer:${answerId}`, `Marked a written answer ${marksAwarded}/${answer.question.marks} in "${answer.submission.exam.title}"${actingNote(session, author?.user.name ?? "the author")}`);
+    }
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -644,16 +678,15 @@ export async function gradeExamAnswer(answerId: string, marksAwarded: number): P
 
 export async function finalizeExamGrade(submissionId: string, feedback?: string): Promise<ActionResult> {
   try {
-    const session = await requireRole("teacher");
-    const teacher = await prisma.teacher.findUnique({ where: { userId: session.id } });
-    if (!teacher) return { ok: false, error: "Teacher profile not found." };
+    const session = await requireAuthoringSession();
 
     const submission = await prisma.examSubmission.findUnique({
       where: { id: submissionId },
-      include: { exam: { include: { teacher: true } }, answers: true },
+      include: { exam: { include: { teacher: { include: { user: { select: { name: true } } } } } }, answers: true },
     });
     if (!submission) return { ok: false, error: "Submission not found." };
-    if (submission.exam.teacher.userId !== session.id) return { ok: false, error: "You can only grade your own exams." };
+    if (!(await canManageAuthored(prisma, session, submission.exam.teacher))) return { ok: false, error: session.role === "admin" ? "Submission not found." : "You can only grade your own exams." };
+    const teacher = submission.exam.teacher; // the exam's own teacher is recorded as the grader, whoever finalizes it
 
     const unmarked = submission.answers.some((a) => a.marksAwarded == null);
     if (unmarked) return { ok: false, error: "All questions must be marked before finalizing." };
@@ -672,7 +705,7 @@ export async function finalizeExamGrade(submissionId: string, feedback?: string)
       }),
     ]);
     await refreshStudentAnalytics(submission.studentId);
-    await logAudit(session.id, "GRADE_CHANGE", `ExamSubmission:${submissionId}`, `Graded "${submission.exam.title}" (${totalScore}/${submission.exam.maxMarks})`);
+    await logAudit(session.id, "GRADE_CHANGE", `ExamSubmission:${submissionId}`, `Graded "${submission.exam.title}" (${totalScore}/${submission.exam.maxMarks})${actingNote(session, teacher.user.name)}`);
     const gradedStudent = await prisma.student.findUnique({ where: { id: submission.studentId }, select: { userId: true } });
     if (gradedStudent) {
       await notifyUserQuietly(gradedStudent.userId, { type: "GRADE", title: "Your exam has been graded", message: `"${submission.exam.title}": ${totalScore}/${submission.exam.maxMarks}.` });

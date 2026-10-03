@@ -7,6 +7,7 @@
 // school can see what is being set for its students.
 import { prisma } from "@/lib/prisma";
 import { requireAdminActor } from "./user-management";
+import { listAuthorableTeachers } from "@/lib/academics/acting";
 
 const MAX_ROWS = 200;
 
@@ -76,4 +77,10 @@ export async function listAssignmentsForAdmin() {
     schoolName: w.teacher.school?.name ?? null,
     submissions: w._count.submissions,
   }));
+}
+
+/** The teachers this administrator may create an exam or assignment for, each with the class + subject pairs they are assigned to. */
+export async function listTeachersForAuthoring() {
+  const actor = await requireAdminActor();
+  return listAuthorableTeachers(prisma, { id: actor.userId, role: "admin" });
 }

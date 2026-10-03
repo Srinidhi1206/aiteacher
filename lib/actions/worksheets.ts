@@ -9,6 +9,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { notifyQuietly, notifyUserQuietly, audienceForClassInSchool } from "@/lib/notifications/core";
 import { getCurrentSession, requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
+import { resolveAuthor, canManageAuthored, actingNote } from "@/lib/academics/acting";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
 import type { ActionResult } from "./materials";
 
@@ -20,6 +21,8 @@ const worksheetInputSchema = z.object({
   chapterId: z.string().optional(),
   topicId: z.string().optional(),
   dueDate: z.string().datetime().optional(),
+  // Administrators only: the teacher this assignment is being created for. A teacher may omit it (or name themself).
+  teacherId: z.string().optional(),
 });
 
 const PAST_DUE_MESSAGE = "The due date can't be in the past.";
@@ -29,20 +32,21 @@ function isPastDue(dueDate: string): boolean {
   return new Date(dueDate).getTime() < Date.now() - 36 * 60 * 60 * 1000;
 }
 
-async function requireOwnedTeacherAssignment(schoolClassId: string, subjectId: string) {
-  const session = await requireRole("teacher");
-  const teacher = await prisma.teacher.findUnique({ where: { userId: session.id } });
-  if (!teacher) throw new ForbiddenError("Teacher profile not found.");
-  // A worksheet's school is its author's school (there is no column of its
-  // own) - see the note on requireOwnedAssignment in exams.ts.
-  if (!teacher.schoolId) {
-    throw new ForbiddenError("Your account isn't associated with a school yet. Contact a school administrator.");
-  }
-  const assigned = await prisma.teacherAssignment.findFirst({
-    where: { teacherId: teacher.id, schoolClassId, subjectId },
-  });
-  if (!assigned) throw new ForbiddenError("You are not assigned to this class/subject.");
-  return { session, teacher };
+/** A signed-in teacher or administrator - the two roles that may author and manage assignments. */
+async function requireAuthoringSession() {
+  const session = await getCurrentSession();
+  if (!session) throw new UnauthorizedError();
+  if (session.role !== "teacher" && session.role !== "admin") throw new ForbiddenError("Only teachers and administrators can manage assignments.");
+  return session;
+}
+
+/** The author themself, or an administrator of the author's school (the super administrator: any school) - lib/academics/acting.ts. */
+async function loadManageable(worksheetId: string) {
+  const session = await requireAuthoringSession();
+  const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: { include: { user: { select: { name: true } } } } } });
+  if (!worksheet) return { session, worksheet: null, allowed: false as const };
+  const allowed = await canManageAuthored(prisma, session, worksheet.teacher);
+  return { session, worksheet, allowed };
 }
 
 export async function createWorksheet(input: unknown, file?: File | null): Promise<ActionResult<{ id: string }>> {
@@ -51,7 +55,11 @@ export async function createWorksheet(input: unknown, file?: File | null): Promi
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
 
-    const { session, teacher } = await requireOwnedTeacherAssignment(data.schoolClassId, data.subjectId);
+    const session = await requireAuthoringSession();
+    // A teacher authors in their own name; an administrator names a teacher of their school assigned to this class + subject.
+    const author = await resolveAuthor(prisma, session, { schoolClassId: data.schoolClassId, subjectId: data.subjectId, teacherId: data.teacherId });
+    if (!author.ok) return { ok: false, error: author.error };
+    const teacher = author.teacher;
 
     let fileUrl: string | undefined;
     let storageKey: string | undefined;
@@ -92,7 +100,7 @@ export async function createWorksheet(input: unknown, file?: File | null): Promi
         dueDate: data.dueDate ? new Date(data.dueDate) : null,
       },
     });
-    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheet.id}`, `Assignment created (draft): "${worksheet.title}"`);
+    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheet.id}`, `Assignment created (draft): "${worksheet.title}"${actingNote(session, teacher.name)}`);
     return { ok: true, data: { id: worksheet.id } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -111,10 +119,9 @@ const worksheetUpdateSchema = z.object({
 /** Edits a worksheet's descriptive fields. Class/subject are fixed at creation - changing them would need a fresh TeacherAssignment scope check, so a class/subject change is a new worksheet, not an edit. */
 export async function updateWorksheet(worksheetId: string, input: unknown): Promise<ActionResult> {
   try {
-    const session = await requireRole("teacher");
-    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: true } });
+    const { worksheet, allowed, session } = await loadManageable(worksheetId);
     if (!worksheet) return { ok: false, error: "Worksheet not found." };
-    if (worksheet.teacher.userId !== session.id) return { ok: false, error: "You can only edit your own worksheets." };
+    if (!allowed) return { ok: false, error: session.role === "admin" ? "Worksheet not found." : "You can only edit your own worksheets." };
 
     const parsed = worksheetUpdateSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
@@ -135,6 +142,7 @@ export async function updateWorksheet(worksheetId: string, input: unknown): Prom
         ...(data.dueDate !== undefined ? { dueDate: new Date(data.dueDate) } : {}),
       },
     });
+    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheetId}`, `Assignment edited: "${data.title}"${actingNote(session, worksheet.teacher.user.name)}`);
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -144,12 +152,11 @@ export async function updateWorksheet(worksheetId: string, input: unknown): Prom
 
 export async function setWorksheetPublished(worksheetId: string, isPublished: boolean): Promise<ActionResult> {
   try {
-    const session = await requireRole("teacher");
-    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: true } });
+    const { worksheet, allowed, session } = await loadManageable(worksheetId);
     if (!worksheet) return { ok: false, error: "Worksheet not found." };
-    if (worksheet.teacher.userId !== session.id) return { ok: false, error: "You can only publish/unpublish your own worksheets." };
+    if (!allowed) return { ok: false, error: session.role === "admin" ? "Worksheet not found." : "You can only publish/unpublish your own worksheets." };
     await prisma.worksheet.update({ where: { id: worksheetId }, data: { isPublished } });
-    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheetId}`, `Assignment ${isPublished ? "published" : "unpublished"}: "${worksheet.title}"`);
+    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheetId}`, `Assignment ${isPublished ? "published" : "unpublished"}: "${worksheet.title}"${actingNote(session, worksheet.teacher.user.name)}`);
     if (isPublished && !worksheet.isPublished && worksheet.teacher.schoolId) {
       await notifyQuietly(audienceForClassInSchool({ schoolId: worksheet.teacher.schoolId, schoolClassId: worksheet.schoolClassId }), {
         type: "ASSIGNMENT",
@@ -166,10 +173,9 @@ export async function setWorksheetPublished(worksheetId: string, isPublished: bo
 
 export async function deleteWorksheet(worksheetId: string): Promise<ActionResult> {
   try {
-    const session = await requireRole("teacher");
-    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: true } });
+    const { worksheet, allowed, session } = await loadManageable(worksheetId);
     if (!worksheet) return { ok: false, error: "Worksheet not found." };
-    if (worksheet.teacher.userId !== session.id) return { ok: false, error: "You can only delete your own worksheets." };
+    if (!allowed) return { ok: false, error: session.role === "admin" ? "Worksheet not found." : "You can only delete your own worksheets." };
     if (worksheet.storageKey && storage.isConfigured) {
       try {
         await storage.delete(worksheet.storageKey);
@@ -178,7 +184,7 @@ export async function deleteWorksheet(worksheetId: string): Promise<ActionResult
       }
     }
     await prisma.worksheet.delete({ where: { id: worksheetId } });
-    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheetId}`, `Assignment deleted: "${worksheet.title}"`);
+    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheetId}`, `Assignment deleted: "${worksheet.title}"${actingNote(session, worksheet.teacher.user.name)}`);
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -273,9 +279,8 @@ export interface WorksheetSubmissionRow {
  */
 export async function listWorksheetSubmissions(worksheetId: string): Promise<ActionResult<{ rows: WorksheetSubmissionRow[] }>> {
   try {
-    const session = await requireRole("teacher");
-    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: { select: { userId: true, schoolId: true } } } });
-    if (!worksheet || worksheet.teacher.userId !== session.id || !worksheet.teacher.schoolId) {
+    const { worksheet, allowed } = await loadManageable(worksheetId);
+    if (!worksheet || !allowed || !worksheet.teacher.schoolId) {
       return { ok: false, error: "Worksheet not found." };
     }
     const students = await prisma.student.findMany({
@@ -317,14 +322,14 @@ export async function gradeWorksheetSubmission(
   feedback?: string
 ): Promise<ActionResult> {
   try {
-    const session = await requireRole("teacher");
+    const session = await requireAuthoringSession();
     const submission = await prisma.worksheetSubmission.findUnique({
       where: { id: submissionId },
-      include: { worksheet: { include: { teacher: true } } },
+      include: { worksheet: { include: { teacher: { include: { user: { select: { name: true } } } } } } },
     });
     if (!submission) return { ok: false, error: "Submission not found." };
-    if (submission.worksheet.teacher.userId !== session.id) {
-      return { ok: false, error: "You can only grade submissions for your own worksheets." };
+    if (!(await canManageAuthored(prisma, session, submission.worksheet.teacher))) {
+      return { ok: false, error: session.role === "admin" ? "Submission not found." : "You can only grade submissions for your own worksheets." };
     }
     if (!submission.submittedAt) return { ok: false, error: "This student has not submitted yet." };
     // Stage K: worksheets have no fixed per-question mark scheme the way

@@ -17,7 +17,9 @@ interface Assignment {
   subject: { name: string };
 }
 
-export function CreateExamForm({ assignments }: { assignments: Assignment[] }) {
+// Used by teachers (their own assignments) and by administrators creating an exam on behalf of a teacher (`teacherId`,
+// that teacher's assignments, and the admin route to open the new exam in).
+export function CreateExamForm({ assignments, teacherId, detailBase = "/teacher/exams", emptyMessage, onCreated }: { assignments: Assignment[]; teacherId?: string; detailBase?: string; emptyMessage?: string; onCreated?: () => void }) {
   const [showForm, setShowForm] = React.useState(false);
   const [assignmentKey, setAssignmentKey] = React.useState(assignments[0] ? `${assignments[0].schoolClassId}::${assignments[0].subjectId}` : "");
   const [title, setTitle] = React.useState("");
@@ -33,8 +35,7 @@ export function CreateExamForm({ assignments }: { assignments: Assignment[] }) {
     return (
       <Card>
         <CardContent className="py-8 text-center text-sm text-gray-500 dark:text-gray-400">
-          You don&apos;t have any class/subject assignments yet. Ask an admin to assign you to a class and subject before creating
-          exams.
+          {emptyMessage ?? "You don't have any class/subject assignments yet. Ask an admin to assign you to a class and subject before creating exams."}
         </CardContent>
       </Card>
     );
@@ -45,11 +46,12 @@ export function CreateExamForm({ assignments }: { assignments: Assignment[] }) {
     if (!title.trim() || !chapterScope.trim()) return;
     const [schoolClassId, subjectId] = assignmentKey.split("::");
     setSubmitting(true);
-    const result = await createExam({ title, schoolClassId, subjectId, chapterScope, durationMinutes, maxMarks, instructions });
+    const result = await createExam({ title, schoolClassId, subjectId, chapterScope, durationMinutes, maxMarks, instructions, ...(teacherId ? { teacherId } : {}) });
     setSubmitting(false);
     if (result.ok && result.data) {
       showToast("Exam created", "Now add questions before publishing.");
-      router.push(`/teacher/exams/${result.data.id}`);
+      onCreated?.();
+      router.push(`${detailBase}/${result.data.id}`);
     } else {
       showToast("Could not create exam", result.error ?? "Please check the form and try again.");
     }
