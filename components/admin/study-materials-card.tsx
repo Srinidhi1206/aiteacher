@@ -17,6 +17,7 @@ import { formatDate, cn } from "@/lib/utils";
 import { listStates, listBoards, listSchools, listSchoolClasses, listSubjectsForClass, listChaptersForSubject } from "@/lib/actions/curriculum";
 import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin } from "@/lib/actions/materials";
 import { indexMaterial } from "@/lib/actions/material-index";
+import { parseIndexStatus } from "@/lib/rag/index-status";
 import { importMaterialFromUrl } from "@/lib/actions/material-import";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 import { ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES, validateUploadFile, safeFilename } from "@/lib/storage/types";
@@ -30,6 +31,44 @@ type MaterialRow = Awaited<ReturnType<typeof listMaterialsForAdmin>>[number];
 type SchoolOption = Awaited<ReturnType<typeof listSchools>>[number];
 
 const MATERIAL_TYPES = ["TEXTBOOK", "NOTES", "REFERENCE", "VIDEO", "PDF", "PRESENTATION", "OTHER"] as const;
+
+// Materials indexed before the per-material ceiling replaced the old 400-passage cap carry no status
+// note; exactly 400 passages is the signature of one that may have been cut short.
+const LEGACY_PASSAGE_CAP = 400;
+
+interface IndexView {
+  label: string;
+  tone: "ok" | "partial" | "idle";
+  action: { label: string; rebuild: boolean } | null;
+}
+
+/** What the indexing state of a material means, in words an admin can act on. */
+function describeIndex(m: MaterialRow): IndexView {
+  const saved = m._count.chunks;
+  const note = parseIndexStatus(m.indexError);
+  if (m.indexedAt) {
+    if (note?.kind === "truncated") {
+      return { label: `Partially indexed: first ${note.done} of ${note.available} passages (per-material limit)`, tone: "partial", action: null };
+    }
+    if (note?.kind === "complete") {
+      return { label: `Complete: AI Tutor ready (${saved} / ${note.total} passages)`, tone: "ok", action: { label: "Re-index", rebuild: true } };
+    }
+    if (!note && saved === LEGACY_PASSAGE_CAP) {
+      return {
+        label: `Indexed ${saved} passages - a long book may be incomplete`,
+        tone: "partial",
+        action: { label: "Continue indexing", rebuild: false },
+      };
+    }
+    return { label: `Complete: AI Tutor ready (${saved} / ${saved} passages)`, tone: "ok", action: { label: "Re-index", rebuild: true } };
+  }
+  if (note?.kind === "in_progress" || saved > 0) {
+    const total = note?.kind === "in_progress" ? ` / ${note.total}` : "";
+    return { label: `Partially indexed: ${saved}${total} passages`, tone: "partial", action: { label: "Continue indexing", rebuild: false } };
+  }
+  if (m.indexError) return { label: m.indexError, tone: "idle", action: { label: "Try again", rebuild: false } };
+  return { label: "Not yet searchable by the AI Tutor", tone: "idle", action: { label: "Index for AI Tutor", rebuild: false } };
+}
 
 export function StudyMaterialsCard() {
   const { showToast } = useToast();
@@ -63,7 +102,7 @@ export function StudyMaterialsCard() {
   const [dbUnavailable, setDbUnavailable] = React.useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = React.useState<string | null>(null);
   const [indexingId, setIndexingId] = React.useState<string | null>(null);
-  const [indexProgress, setIndexProgress] = React.useState<{ done: number; total: number } | null>(null);
+  const [indexProgress, setIndexProgress] = React.useState<{ done: number; total: number | null } | null>(null);
   // Materials belong to a school. A school administrator always uploads to their own school. The
   // platform super administrator is not attached to one, so they choose an existing school instead.
   // Any other admin with no school has nothing to upload to - say so instead of showing a form that
@@ -234,13 +273,15 @@ export function StudyMaterialsCard() {
     }
   }
 
-  async function runIndex(id: string, materialTitle: string) {
+  async function runIndex(id: string, materialTitle: string, opts?: { rebuild?: boolean; savedSoFar?: number }) {
     setIndexingId(id);
-    setIndexProgress(null);
-    let res = await indexMaterial(id);
+    setIndexProgress({ done: opts?.savedSoFar ?? 0, total: null });
+    // Only the first call may rebuild from scratch; every later call resumes from what is saved.
+    let res = await indexMaterial(id, opts?.rebuild ? { rebuild: true } : undefined);
     // A long book takes several calls because the AI provider limits how many passages it processes
-    // per minute; each call saves what it finished, so keep going until it reports complete.
-    for (let round = 0; round < 30 && res.ok && res.data && !res.data.complete; round++) {
+    // per minute; each call saves what it finished, so keep going until it reports complete. An
+    // interrupted run is picked up again by "Continue indexing" - nothing saved is re-embedded.
+    for (let round = 0; round < 40 && res.ok && res.data && !res.data.complete; round++) {
       const { chunks, total, waitMs } = res.data;
       setIndexProgress({ done: chunks, total });
       await new Promise((r) => setTimeout(r, waitMs));
@@ -248,9 +289,13 @@ export function StudyMaterialsCard() {
     }
     setIndexingId(null);
     setIndexProgress(null);
-    if (res.ok && res.data?.complete) showToast("AI Tutor can now use this material", `"${materialTitle}" was indexed (${res.data.chunks} passages).`);
-    else if (res.ok) showToast("Indexing is not finished yet", "Click \"Index for AI Tutor\" again to continue.");
-    else showToast("Could not index for the AI Tutor", res.error ?? "");
+    if (res.ok && res.data?.complete && res.data.available > res.data.total) {
+      showToast("Indexed part of this material", `Only the first ${res.data.total} of ${res.data.available} passages fit the per-material limit.`);
+    } else if (res.ok && res.data?.complete) {
+      showToast("AI Tutor can now use this material", `"${materialTitle}" is fully indexed (${res.data.chunks} / ${res.data.total} passages).`);
+    } else if (res.ok) {
+      showToast("Indexing is not finished yet", "Click \"Continue indexing\" to carry on from where it stopped.");
+    } else showToast("Could not index for the AI Tutor", res.error ?? "");
     refreshMaterials();
   }
 
@@ -503,25 +548,43 @@ export function StudyMaterialsCard() {
                       <p className="text-xs text-gray-400">
                         {isSuperAdmin ? `${m.school.name} - ` : ""}{m.subject.name} - {m.schoolClass.label} - {m.chapter.name} -{(m.sizeKb / 1024).toFixed(1)} MB - {formatDate(m.uploadedAt)}
                       </p>
-                      <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
-                        {indexingId === m.id ? (
-                          <span className="flex items-center gap-1 text-gray-500">
-                            <Loader2 className="h-3 w-3 animate-spin" /> Indexing for the AI Tutor...
-                            {indexProgress ? ` ${indexProgress.done} of ${indexProgress.total} passages` : ""}
-                          </span>
-                        ) : m.indexedAt ? (
-                          <span className="flex items-center gap-1 text-success-600 dark:text-success-400">
-                            <Sparkles className="h-3 w-3" /> AI Tutor ready ({m._count.chunks} passages)
-                          </span>
-                        ) : (
-                          <span className="text-gray-400">{m.indexError ?? "Not yet searchable by the AI Tutor"}</span>
-                        )}
-                        {indexingId !== m.id && m.fileName.toLowerCase().endsWith(".pdf") && (
-                          <button onClick={() => runIndex(m.id, m.title)} className="font-medium text-primary-600 hover:underline dark:text-primary-300">
-                            {m.indexedAt ? "Re-index" : "Index for AI Tutor"}
-                          </button>
-                        )}
-                      </p>
+                      {(() => {
+                        const idx = describeIndex(m);
+                        const isPdf = m.fileName.toLowerCase().endsWith(".pdf");
+                        return (
+                          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                            {indexingId === m.id ? (
+                              <span className="flex items-center gap-1 text-gray-500">
+                                <Loader2 className="h-3 w-3 animate-spin" /> Indexing for the AI Tutor...
+                                {indexProgress && indexProgress.done > 0
+                                  ? ` ${indexProgress.done}${indexProgress.total ? ` / ${indexProgress.total}` : ""} passages`
+                                  : ""}
+                              </span>
+                            ) : (
+                              <span
+                                className={cn(
+                                  "flex items-center gap-1",
+                                  idx.tone === "ok" && "text-success-600 dark:text-success-400",
+                                  idx.tone === "partial" && "text-warning-600 dark:text-warning-400",
+                                  idx.tone === "idle" && "text-gray-400"
+                                )}
+                              >
+                                {idx.tone === "ok" && <Sparkles className="h-3 w-3" />}
+                                {idx.tone === "partial" && <AlertTriangle className="h-3 w-3" />}
+                                {idx.label}
+                              </span>
+                            )}
+                            {indexingId !== m.id && isPdf && idx.action && (
+                              <button
+                                onClick={() => runIndex(m.id, m.title, { rebuild: idx.action!.rebuild, savedSoFar: m._count.chunks })}
+                                className="font-medium text-primary-600 hover:underline dark:text-primary-300"
+                              >
+                                {idx.action.label}
+                              </button>
+                            )}
+                          </p>
+                        );
+                      })()}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">

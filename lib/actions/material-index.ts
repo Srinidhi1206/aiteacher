@@ -8,29 +8,38 @@
 // retrieval can never return a passage outside the student's own school+class.
 //
 // Limits (keeps one request bounded): PDFs only, at most MAX_PDF_MB, at most
-// MAX_CHUNKS passages (the first ~hundred pages of a long book). A scanned
-// PDF with no text layer can't be indexed and says so instead of pretending.
+// MAX_PASSAGES passages per material - a safety ceiling well above a full textbook, never a
+// silent cut: if a book is ever longer, the status says "first N of M". A scanned PDF with no
+// text layer can't be indexed and says so instead of pretending.
 //
-// Pacing: the embedding provider caps how many passages it will process per minute
-// (see EMBED_PER_MINUTE in lib/rag), so a book takes several minutes. Each call embeds
-// as many passages as fit in one request, saves them as it goes, and returns how many
-// are done; the next call resumes from the saved passages (chunking is deterministic)
-// after `waitMs`. The admin screen repeats the call until `complete`, so it is one
-// click. A re-index of a finished material starts over.
+// Pacing and resuming: the embedding provider caps how many passages it will process per
+// minute (see EMBED_PER_MINUTE in lib/rag), so a book takes several minutes. Each call embeds
+// as many passages as fit in one request, saves them as it goes, and returns how many are
+// done. The next call resumes from the passages already saved - a contiguous prefix, because
+// chunking is deterministic - and never re-embeds them. The admin screen repeats the call
+// until `complete`, so it is one click; if it is interrupted, clicking again continues.
+// Saved passages are checked against the freshly chunked file before resuming; if they no
+// longer fit it (a different file, or text extraction changed) they are replaced rather than
+// left orphaned. `rebuild` is the only way to throw away a good prefix.
 import { prisma } from "@/lib/prisma";
 import { getCurrentSession, UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
 import { chunkText, embedTexts, describeEmbeddingError, EMBED_PER_MINUTE, INDEX_BATCH_SIZE } from "@/lib/rag";
+import { formatIndexStatus } from "@/lib/rag/index-status";
 import type { ActionResult } from "./materials";
 
 const MAX_PDF_MB = 40;
-const MAX_CHUNKS = 400;
+const MAX_PASSAGES = 2500;
 // One call stays well inside a 60 s function limit.
 const CALL_BUDGET_MS = 48_000;
 const BATCH_MARGIN_MS = 6_000;
 
 export interface IndexProgress {
+  /** Passages saved so far. */
   chunks: number;
+  /** Passages this material will have once indexed (never more than MAX_PASSAGES). */
   total: number;
+  /** Passages the PDF actually produces; larger than `total` only when the ceiling cut it. */
+  available: number;
   complete: boolean;
   /** How long to wait before calling again when not complete. */
   waitMs: number;
@@ -59,7 +68,24 @@ async function fail(materialId: string, message: string): Promise<ActionResult<I
   return { ok: false, error: message };
 }
 
-export async function indexMaterial(materialId: string): Promise<ActionResult<IndexProgress>> {
+/**
+ * True when the saved passages (`count` of them) are a clean prefix of this file's passages:
+ * indexes 0..count-1 with no gaps or repeats, and the texts at the start and at the end of the part
+ * that overlaps the file match. Checking the ends is enough in practice - chunking is deterministic,
+ * so a different file or different extraction differs at the start or by the end - and it keeps this
+ * to two small reads. If more passages are saved than the file now yields, only the overlap is compared.
+ */
+async function savedPrefixMatches(materialId: string, count: number, passages: { text: string }[]): Promise<boolean> {
+  if (count === 0) return true;
+  const rows = await prisma.materialChunk.findMany({ where: { materialId }, select: { chunkIndex: true }, orderBy: { chunkIndex: "asc" } });
+  if (!rows.every((r, i) => r.chunkIndex === i)) return false;
+  const last = Math.min(count, passages.length) - 1;
+  const wanted = [...new Set([0, last])];
+  const ends = await prisma.materialChunk.findMany({ where: { materialId, chunkIndex: { in: wanted } }, select: { chunkIndex: true, text: true } });
+  return ends.length === wanted.length && ends.every((e) => passages[e.chunkIndex]?.text === e.text);
+}
+
+export async function indexMaterial(materialId: string, options?: { rebuild?: boolean }): Promise<ActionResult<IndexProgress>> {
   const callStartedAt = Date.now();
   try {
     const actor = await requireManager();
@@ -97,11 +123,13 @@ export async function indexMaterial(materialId: string): Promise<ActionResult<In
       return fail(material.id, "This PDF could not be read.");
     }
 
+    // Count every passage the PDF produces, but only keep up to the ceiling to embed.
     const passages: { page: number; text: string }[] = [];
-    for (let i = 0; i < pages.length && passages.length < MAX_CHUNKS; i++) {
+    let available = 0;
+    for (let i = 0; i < pages.length; i++) {
       for (const piece of chunkText(pages[i] ?? "")) {
-        if (passages.length >= MAX_CHUNKS) break;
-        passages.push({ page: i + 1, text: piece });
+        available++;
+        if (passages.length < MAX_PASSAGES) passages.push({ page: i + 1, text: piece });
       }
     }
     if (passages.length === 0) {
@@ -109,14 +137,28 @@ export async function indexMaterial(materialId: string): Promise<ActionResult<In
     }
 
     const total = passages.length;
+    const truncated = available > total;
 
-    // Resume from the passages already saved (a contiguous prefix), unless this is a re-index of a
-    // finished material or the saved passages no longer fit this file - then start from scratch.
-    let done = material.indexedAt ? 0 : await prisma.materialChunk.count({ where: { materialId: material.id } });
-    if (material.indexedAt || done > total) {
-      await prisma.materialChunk.deleteMany({ where: { materialId: material.id } });
-      await prisma.studyMaterial.update({ where: { id: material.id }, data: { indexedAt: null, indexError: null } });
-      done = 0;
+    // Where to resume. A good saved prefix is kept and never re-embedded - even for a material that
+    // was marked indexed under the old 400-passage cap, which is exactly how the rest of a long book
+    // gets added. Saved passages that don't fit this file are replaced; extras beyond the file's
+    // passage count (the file now yields fewer) are trimmed.
+    const saved = await prisma.materialChunk.count({ where: { materialId: material.id } });
+    let done = 0;
+    if (saved > 0) {
+      const fits = !options?.rebuild && (await savedPrefixMatches(material.id, saved, passages));
+      if (!fits) {
+        await prisma.materialChunk.deleteMany({ where: { materialId: material.id } });
+      } else if (saved > total) {
+        await prisma.materialChunk.deleteMany({ where: { materialId: material.id, chunkIndex: { gte: total } } });
+        done = total;
+      } else {
+        done = saved;
+      }
+    }
+    // A saved prefix that doesn't reach the end is an unfinished material, not a finished one.
+    if (done < total && material.indexedAt) {
+      await prisma.studyMaterial.update({ where: { id: material.id }, data: { indexedAt: null } });
     }
 
     let embeddedThisCall = 0;
@@ -172,17 +214,23 @@ export async function indexMaterial(materialId: string): Promise<ActionResult<In
     }
 
     if (done >= total) {
-      await prisma.studyMaterial.update({ where: { id: material.id }, data: { indexedAt: new Date(), indexError: null } });
-      return { ok: true, data: { chunks: total, total, complete: true, waitMs: 0 } };
+      await prisma.studyMaterial.update({
+        where: { id: material.id },
+        data: {
+          indexedAt: new Date(),
+          indexError: formatIndexStatus(truncated ? { kind: "truncated", done: total, available } : { kind: "complete", total }),
+        },
+      });
+      return { ok: true, data: { chunks: total, total, available, complete: true, waitMs: 0 } };
     }
 
     // Not finished: tell the caller when the provider's per-minute window will have reopened.
     if (waitMs === 0 && firstEmbedAt !== null) waitMs = Math.max(0, 61_000 - (Date.now() - firstEmbedAt));
     await prisma.studyMaterial.update({
       where: { id: material.id },
-      data: { indexError: `Indexing in progress: ${done} of ${total} passages done. It continues automatically; or click "Index for AI Tutor" to continue.` },
+      data: { indexError: formatIndexStatus({ kind: "in_progress", done, total }) },
     });
-    return { ok: true, data: { chunks: done, total, complete: false, waitMs } };
+    return { ok: true, data: { chunks: done, total, available, complete: false, waitMs } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
     throw e;
