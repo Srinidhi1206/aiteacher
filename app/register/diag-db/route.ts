@@ -268,7 +268,21 @@ export async function GET(req: Request) {
   try {
     u = new URL(raw);
   } catch {
-    out.databaseUrl = "missing or unparseable";
+    // Describe the problem with booleans and lengths only - never any part of the value itself.
+    out.databaseUrl = {
+      status: "missing or unparseable",
+      present: raw.length > 0,
+      rawLength: raw.length,
+      trimmedLength: raw.trim().length,
+      startsWithPostgresScheme: /^\s*postgres(ql)?:\/\//i.test(raw),
+      containsSchemeSeparator: raw.includes("://"),
+      containsAtSign: raw.includes("@"),
+      hasLeadingOrTrailingWhitespace: raw !== raw.trim(),
+      hasNewline: /[\r\n]/.test(raw),
+      hasQuoteOrBacktick: /["'`]/.test(raw),
+      hasInternalSpace: /\S\s+\S/.test(raw.trim()),
+      startsWithNonPostgresWord: /^\s*[a-z]+\s/i.test(raw) && !/^\s*postgres/i.test(raw),
+    };
   }
   if (u) {
     const user = decodeURIComponent(u.username);
