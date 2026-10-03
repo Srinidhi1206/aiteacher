@@ -137,6 +137,10 @@ export async function registerStudent(input: unknown): Promise<ActionResult<{ us
   if (data.schoolId) {
     const school = await prisma.school.findUnique({ where: { id: data.schoolId } });
     if (!school || !school.isEnabled) return { ok: false, error: "Selected school is not available." };
+    // The chosen school is a request the administrator confirms at approval, but it must at least be coherent:
+    // a school that teaches another board or sits in another state can never serve this student's content.
+    if (school.boardId && school.boardId !== board.id) return { ok: false, error: "That school teaches a different board. Choose a school for your board, or leave the school blank." };
+    if (school.stateId && data.stateId && school.stateId !== data.stateId) return { ok: false, error: "That school is in a different state." };
   }
 
   const passwordHash = await hashPassword(data.password);

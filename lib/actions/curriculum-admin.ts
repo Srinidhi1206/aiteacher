@@ -16,6 +16,7 @@ import { z } from "zod";
 import { Prisma, BloomLevel } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
+import { createClassSubjectCore, setClassSubjectEnabledCore } from "@/lib/curriculum/class-subjects";
 import { requireAdminActor } from "./user-management";
 import type { ActionResult } from "./materials";
 
@@ -126,6 +127,34 @@ export async function createBoardSpecificSubject(input: unknown): Promise<Action
     });
 
     return { ok: true, data: { subjectId: result.id } };
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Class subject set: add a subject that has no generic counterpart, and show/hide a subject for ONE class.
+// The rules live in lib/curriculum/class-subjects.ts (testable against the real database); this file decides who
+// may call - super administrator only, like every curriculum write.
+// ---------------------------------------------------------------------------
+
+export async function createClassSubject(input: unknown): Promise<ActionResult<{ subjectId: string }>> {
+  try {
+    const actor = await requireAdminActor();
+    const who = { userId: actor.userId, mayWrite: (boardId: string) => mayWriteBoard(actor, boardId), deniedMessage: NOT_YOUR_BOARD };
+    return await prisma.$transaction((tx) => createClassSubjectCore(tx, who, input));
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    throw e;
+  }
+}
+
+export async function setClassSubjectEnabled(schoolClassId: string, subjectId: string, enabled: boolean): Promise<ActionResult> {
+  try {
+    const actor = await requireAdminActor();
+    const who = { userId: actor.userId, mayWrite: (boardId: string) => mayWriteBoard(actor, boardId), deniedMessage: NOT_YOUR_BOARD };
+    return await setClassSubjectEnabledCore(prisma, who, schoolClassId, subjectId, enabled);
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
     throw e;

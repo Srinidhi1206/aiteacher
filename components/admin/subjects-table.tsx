@@ -4,15 +4,17 @@
 // server actions directly (same pattern as study-materials-card.tsx /
 // exam-schedule-card.tsx), living inside AdminTabs' client boundary.
 import * as React from "react";
-import { BookOpen, ChevronRight, Pencil, Trash2, Plus, ArrowUp, ArrowDown, GitFork } from "lucide-react";
+import { BookOpen, ChevronRight, Pencil, Trash2, Plus, ArrowUp, ArrowDown, GitFork, Eye, EyeOff } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { inputClass, labelClass } from "@/components/register/field-styles";
-import { listStates, listBoards, listSchoolClasses, listSubjectsForClass, listChaptersForSubject } from "@/lib/actions/curriculum";
+import { listStates, listBoards, listSchoolClasses, listClassSubjectLinks, listChaptersForSubject } from "@/lib/actions/curriculum";
 import {
   createBoardSpecificSubject,
+  createClassSubject,
+  setClassSubjectEnabled,
   updateSubjectVariant,
   createChapter,
   updateChapter,
@@ -24,13 +26,13 @@ import {
   reorderTopics,
   bulkImportCurriculum,
 } from "@/lib/actions/curriculum-admin";
-import { TELANGANA_BSE_CLASS8_MATHEMATICS } from "@/lib/curriculum-import-data/telangana-bse-class8-mathematics";
+import { findCurriculumImport, countTopics } from "@/lib/curriculum-import-data";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 
 type State = Awaited<ReturnType<typeof listStates>>[number];
 type Board = Awaited<ReturnType<typeof listBoards>>[number];
 type SchoolClass = Awaited<ReturnType<typeof listSchoolClasses>>[number];
-type SubjectRow = Awaited<ReturnType<typeof listSubjectsForClass>>[number];
+type SubjectRow = Awaited<ReturnType<typeof listClassSubjectLinks>>[number];
 type ChapterRow = Awaited<ReturnType<typeof listChaptersForSubject>>[number];
 type TopicRow = ChapterRow["topics"][number];
 
@@ -97,7 +99,7 @@ export function SubjectsTable() {
       setSubjects(null);
       return;
     }
-    listSubjectsForClass(schoolClassId)
+    listClassSubjectLinks(schoolClassId)
       .then(setSubjects)
       .catch(() => setDbUnavailable(true));
   }, [schoolClassId]);
@@ -128,20 +130,16 @@ export function SubjectsTable() {
   const selectedChapter = chapters?.find((c) => c.id === chapterId);
   const selectedBoard = boards.find((b) => b.id === boardId);
 
-  // Scoped narrowly on purpose: this control only ever targets the one
-  // subject the approved textbook extraction was built for - it should
-  // never be reachable from an unrelated board-specific subject.
+  // Offered only for the exact board + grade + subject an approved, source-grounded extraction was built for
+  // (see lib/curriculum-import-data/index.ts) - never reachable from an unrelated subject.
   const [importing, setImporting] = React.useState(false);
-  const canImportApprovedCurriculum =
-    !!selectedSubject?.boardId &&
-    selectedSubject.slug === "mathematics" &&
-    selectedBoard?.shortName === "BSE Telangana" &&
-    selectedClass?.grade === 8;
+  const importDefinition = selectedSubject?.boardId ? findCurriculumImport(selectedBoard?.shortName, selectedClass?.grade, selectedSubject.slug) : null;
+  const canImportApprovedCurriculum = importDefinition !== null;
 
   async function handleBulkImport() {
-    if (!subjectId) return;
+    if (!subjectId || !importDefinition) return;
     setImporting(true);
-    const result = await bulkImportCurriculum({ subjectId, chapters: TELANGANA_BSE_CLASS8_MATHEMATICS });
+    const result = await bulkImportCurriculum({ subjectId, chapters: importDefinition.chapters });
     setImporting(false);
     if (!result.ok) {
       showToast("Import failed", result.error ?? "");
@@ -150,7 +148,7 @@ export function SubjectsTable() {
     const d = result.data!;
     showToast(
       "Curriculum imported",
-      `${d.chaptersCreated} chapters created, ${d.chaptersReused} already existed, ${d.topicsCreated} topics created, ${d.topicsReused} already existed.`
+      `${d.chaptersCreated} ${importDefinition.chapterNoun} created, ${d.chaptersReused} already existed, ${d.topicsCreated} ${importDefinition.topicNoun} created, ${d.topicsReused} already existed.`
     );
     refreshChapters();
   }
@@ -165,6 +163,35 @@ export function SubjectsTable() {
       return;
     }
     showToast("Board-specific subject created", "You can now add chapters just for this class.");
+    refreshSubjects();
+    if (result.data) setSubjectId(result.data.subjectId);
+  }
+
+  const [subjectToggling, setSubjectToggling] = React.useState<string | null>(null);
+  const [addSubjectForm, setAddSubjectForm] = React.useState<{ name: string; slug: string } | null>(null);
+
+  async function handleToggleSubject(subject: SubjectRow) {
+    if (!schoolClassId) return;
+    setSubjectToggling(subject.id);
+    const result = await setClassSubjectEnabled(schoolClassId, subject.id, !subject.isEnabled);
+    setSubjectToggling(null);
+    if (!result.ok) {
+      showToast("Could not update subject", result.error ?? "");
+      return;
+    }
+    showToast(subject.isEnabled ? `"${subject.name}" hidden for this class` : `"${subject.name}" shown for this class`);
+    refreshSubjects();
+  }
+
+  async function handleAddSubject() {
+    if (!addSubjectForm || !schoolClassId) return;
+    const result = await createClassSubject({ schoolClassId, name: addSubjectForm.name, slug: addSubjectForm.slug });
+    if (!result.ok) {
+      showToast("Could not add subject", result.error ?? "");
+      return;
+    }
+    showToast("Subject added to this class", "You can now add its chapters.");
+    setAddSubjectForm(null);
     refreshSubjects();
     if (result.data) setSubjectId(result.data.subjectId);
   }
@@ -319,12 +346,25 @@ export function SubjectsTable() {
                     {subjects.map((s) => (
                       <div
                         key={s.id}
-                        className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 text-sm ${subjectId === s.id ? "border-primary-300 bg-primary-50 dark:border-primary-800 dark:bg-primary-950/30" : "border-gray-100 dark:border-gray-800"}`}
+                        className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 text-sm ${s.isEnabled ? "" : "opacity-60"} ${subjectId === s.id ? "border-primary-300 bg-primary-50 dark:border-primary-800 dark:bg-primary-950/30" : "border-gray-100 dark:border-gray-800"}`}
                       >
                         <button type="button" className="flex flex-1 items-center gap-2 text-left" onClick={() => setSubjectId(s.id)}>
                           <span className="font-medium text-gray-800 dark:text-gray-100">{s.name}</span>
                           <Badge variant={s.boardId ? "success" : "outline"}>{s.boardId ? "Board-specific" : "Generic"}</Badge>
+                          {!s.isEnabled && <Badge variant="warning">Hidden from students</Badge>}
                         </button>
+                        {canWrite && (
+                          <button
+                            type="button"
+                            aria-label={s.isEnabled ? `Hide ${s.name} for this class` : `Show ${s.name} for this class`}
+                            title={s.isEnabled ? "Hide from students of this class" : "Show to students of this class"}
+                            onClick={() => handleToggleSubject(s)}
+                            disabled={subjectToggling === s.id}
+                            className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-50 dark:hover:bg-gray-800"
+                          >
+                            {s.isEnabled ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                          </button>
+                        )}
                         {!canWrite ? null : !s.boardId ? (
                           <button
                             type="button"
@@ -352,6 +392,42 @@ export function SubjectsTable() {
                     ))}
                   </div>
                 )}
+                {canWrite && schoolClassId && (
+                  <div className="mt-3">
+                    {addSubjectForm ? (
+                      <div className="space-y-2 rounded-xl border border-gray-100 p-3 dark:border-gray-800">
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          Adds a subject for {selectedClass?.label} only. Use this for a textbook subject that has no shared equivalent (for example a
+                          separate Physical Science or Environmental Education book).
+                        </p>
+                        <div>
+                          <label className={labelClass}>Subject name</label>
+                          <input
+                            className={inputClass}
+                            value={addSubjectForm.name}
+                            onChange={(e) => setAddSubjectForm({ name: e.target.value, slug: slugify(e.target.value) })}
+                          />
+                        </div>
+                        <div>
+                          <label className={labelClass}>Slug</label>
+                          <input className={inputClass} value={addSubjectForm.slug} onChange={(e) => setAddSubjectForm({ ...addSubjectForm, slug: e.target.value })} />
+                        </div>
+                        <div className="flex gap-2">
+                          <Button type="button" onClick={handleAddSubject}>Add subject</Button>
+                          <Button type="button" variant="outline" onClick={() => setAddSubjectForm(null)}>Cancel</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setAddSubjectForm({ name: "", slug: "" })}
+                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-primary-600 hover:bg-primary-50 dark:text-primary-400 dark:hover:bg-primary-950"
+                      >
+                        <Plus className="h-3 w-3" /> Add subject to {selectedClass?.label ?? "this class"}
+                      </button>
+                    )}
+                  </div>
+                )}
                 {selectedSubject?.boardId && (
                   <div className="mt-2">
                     <p className="text-xs text-gray-400">
@@ -367,8 +443,10 @@ export function SubjectsTable() {
                     {canWrite && canImportApprovedCurriculum && (
                       <div className="mt-3 rounded-xl border border-primary-200 bg-primary-50 p-3 dark:border-primary-800 dark:bg-primary-950/30">
                         <p className="text-xs text-gray-600 dark:text-gray-300">
-                          Imports the approved BSE Telangana Class 8 Mathematics textbook curriculum (15 chapters, 163 topics) into this
-                          board-specific subject. Safe to run more than once - existing chapters/topics are matched and reused, never duplicated.
+                          Imports the approved {importDefinition?.label} textbook curriculum ({importDefinition?.chapters.length} {importDefinition?.chapterNoun},{" "}
+                          {importDefinition ? countTopics(importDefinition.chapters) : 0} {importDefinition?.topicNoun}) into this
+                          board-specific subject. Safe to run more than once - existing {importDefinition?.chapterNoun}/{importDefinition?.topicNoun} are matched
+                          and reused, never duplicated.
                         </p>
                         <Button type="button" className="mt-2" disabled={importing} onClick={handleBulkImport}>
                           {importing ? "Importing..." : "Import approved textbook curriculum"}

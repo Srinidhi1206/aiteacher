@@ -8,6 +8,7 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentSession, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
 import { MaterialType } from "@prisma/client";
+import { checkMaterialPlacement } from "@/lib/materials/placement";
 
 const materialInputSchema = z.object({
   title: z.string().trim().min(1, "Title is required").max(200),
@@ -100,6 +101,11 @@ export async function createMaterial(
       return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     }
     const data = parsed.data;
+
+    // The dropdowns keep these consistent, but a crafted request must not be able to file a material under
+    // a class, subject or chapter that doesn't belong together.
+    const placementProblem = await checkMaterialPlacement(data);
+    if (placementProblem) return { ok: false, error: placementProblem };
 
     // The material's school is always derived from the uploader's own
     // school - never accepted from the form/browser. An actor with no

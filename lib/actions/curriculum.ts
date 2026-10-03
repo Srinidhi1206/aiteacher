@@ -48,6 +48,17 @@ export async function listSubjectsForClass(schoolClassId: string) {
   return links.map((l) => l.subject);
 }
 
+// Every subject assigned to a class INCLUDING hidden ones, for the admin curriculum screen (students and the
+// material forms use listSubjectsForClass above, which only returns subjects that are shown).
+export async function listClassSubjectLinks(schoolClassId: string) {
+  const links = await prisma.schoolClassSubject.findMany({
+    where: { schoolClassId },
+    include: { subject: true },
+    orderBy: { subject: { name: "asc" } },
+  });
+  return links.map((l) => ({ ...l.subject, isEnabled: l.isEnabled }));
+}
+
 export async function listChaptersForSubject(subjectId: string) {
   return prisma.chapter.findMany({
     where: { subjectId },

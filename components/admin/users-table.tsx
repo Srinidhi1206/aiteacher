@@ -267,7 +267,9 @@ export function UsersTable() {
                       {u.status === "PENDING" && u.role === "TEACHER" && <TeacherRequestDetails details={u.registrationRequest?.requestedDetails} />}
                       {u.role === "STUDENT" && u.student && (
                         <span className="mt-0.5 block text-xs font-normal text-gray-400">
-                          {u.student.school?.name ?? "No school assigned"}
+                          {[u.student.state?.name, u.student.board?.shortName, u.student.schoolClass?.label].filter(Boolean).join(" · ") || "No curriculum selected"}
+                          {" · "}
+                          <span className={u.student.school ? undefined : "text-warning-600 dark:text-warning-400"}>{u.student.school?.name ?? "No school assigned"}</span>
                         </span>
                       )}
                     </td>
