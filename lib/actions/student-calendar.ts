@@ -13,7 +13,8 @@
 // student's plan can't appear here.
 import { prisma } from "@/lib/prisma";
 import { requireRole, ForbiddenError } from "@/lib/auth/current-session";
-import type { CalendarEvent } from "@/lib/types";
+import type { CalendarEvent, CalendarEventType } from "@/lib/types";
+import { studentAcademicEventWhere } from "@/lib/calendar/scope";
 
 // The planner and study plan store LOCAL midnight (setHours(0,0,0,0)), so they
 // are turned back into a date string with local getters; worksheet due dates
@@ -24,6 +25,19 @@ function localDate(d: Date): string {
 function utcDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
+
+const ACADEMIC_TYPE: Record<string, CalendarEventType> = {
+  EXAM: "exam",
+  HOLIDAY: "holiday",
+  RESULT: "result",
+  MEETING: "meeting",
+  EVENT: "event",
+  DEADLINE: "deadline",
+  TERM: "term",
+  OTHER: "event",
+};
+// A multi-day event (a holiday week, a term) is shown on each of its days, capped so a mistyped end date can't flood the grid.
+const MAX_EVENT_DAYS = 62;
 
 const KIND_TO_TYPE = {
   TOPIC: "study-session",
@@ -85,6 +99,31 @@ export async function getMyCalendarEvents(): Promise<CalendarEvent[]> {
         type: "assignment",
         description: state,
       });
+    }
+  }
+
+  // Administrator-authored academic calendar: common to the student's board + class, private to their school, or
+  // school-wide / platform-wide. The one visibility rule lives in lib/calendar/scope.ts.
+  const academicWhere = studentAcademicEventWhere(student);
+  if (academicWhere) {
+    // Fails soft: if the calendar table is ever unavailable (for example mid-rollout), the student still gets everything else.
+    const academic = await prisma.academicEvent.findMany({ where: academicWhere, orderBy: { startDate: "asc" } }).catch((err) => {
+      console.error("[calendar] academic events unavailable", (err as Error)?.name);
+      return [];
+    });
+    for (const a of academic) {
+      const days = a.endDate ? Math.min(MAX_EVENT_DAYS, Math.round((a.endDate.getTime() - a.startDate.getTime()) / 86_400_000) + 1) : 1;
+      for (let i = 0; i < Math.max(days, 1); i++) {
+        const day = new Date(a.startDate.getTime() + i * 86_400_000);
+        events.push({
+          id: `academic-${a.id}-${i}`,
+          date: utcDate(day),
+          title: a.title,
+          subject: a.academicYear ? `Academic calendar ${a.academicYear}` : "Academic calendar",
+          type: ACADEMIC_TYPE[a.type] ?? "event",
+          description: a.description ?? undefined,
+        });
+      }
     }
   }
 

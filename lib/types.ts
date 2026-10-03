@@ -412,7 +412,19 @@ export interface WeakConcept {
 // Calendar (/calendar)
 // ---------------------------------------------------------------------------
 
-export type CalendarEventType = "exam" | "assignment" | "revision" | "mock-test" | "study-session";
+export type CalendarEventType =
+  | "exam"
+  | "assignment"
+  | "revision"
+  | "mock-test"
+  | "study-session"
+  // Administrator-authored academic calendar events (AcademicEvent).
+  | "holiday"
+  | "result"
+  | "meeting"
+  | "event"
+  | "deadline"
+  | "term";
 
 export interface CalendarEvent {
   id: string;

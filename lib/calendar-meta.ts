@@ -12,4 +12,10 @@ export const eventTypeMeta: Record<
   revision: { label: "Revision Day", dot: "bg-sky-500", badgeVariant: "primary" },
   "mock-test": { label: "Mock Test", dot: "bg-primary-600", badgeVariant: "primary" },
   "study-session": { label: "Study Plan Session", dot: "bg-success-500", badgeVariant: "success" },
+  holiday: { label: "Holiday", dot: "bg-emerald-500", badgeVariant: "success" },
+  result: { label: "Results", dot: "bg-violet-500", badgeVariant: "primary" },
+  meeting: { label: "Meeting", dot: "bg-orange-500", badgeVariant: "warning" },
+  event: { label: "School Event", dot: "bg-cyan-500", badgeVariant: "primary" },
+  deadline: { label: "Deadline", dot: "bg-rose-500", badgeVariant: "danger" },
+  term: { label: "Term / Academic Year", dot: "bg-gray-500", badgeVariant: "outline" },
 };

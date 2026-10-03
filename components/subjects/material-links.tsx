@@ -3,6 +3,8 @@ import type { MyMaterial } from "@/lib/actions/student-curriculum";
 
 const typeLabel: Record<string, string> = {
   TEXTBOOK: "Textbook",
+  STUDY_MATERIAL: "Study material",
+  QUESTION_PAPER: "Question paper",
   NOTES: "Notes",
   REFERENCE: "Reference",
   VIDEO: "Video",

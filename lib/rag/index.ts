@@ -8,6 +8,9 @@
 // loaded, so it cannot reach the model or the student.
 import "server-only";
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
+import { extractContentTerms, isDefinitionQuery, rankLexical, fuseResults } from "@/lib/rag/lexical";
+import { studentMaterialWhere, studentChunkWhere } from "@/lib/materials/scope";
 
 // Configurable like GEMINI_MODEL; the stored vectors are 768-dimensional, so only change it to a
 // model that supports outputDimensionality 768, and re-index materials afterwards.
@@ -127,34 +130,170 @@ export interface RetrievedPassage {
   page: number | null;
   text: string;
   score: number;
+  /** Which channel found it: the word itself (keyword), similar meaning (semantic), or both. */
+  via?: "keyword" | "semantic" | "both";
 }
 
-// Passages weaker than this are not "relevant" and are not shown to the model,
-// so an unrelated question isn't dressed up with irrelevant excerpts.
-const MIN_SCORE = 0.55;
+// --- Scope loading ---------------------------------------------------------------------------------
+// What retrieval may see is the student's own school + class (+ board when they have one, the same
+// rule the Materials page uses) and PUBLISHED materials only. The text of those passages is small
+// (under 1 KB each) and is loaded first; the 768 numbers per passage (about 10 KB each) are only
+// loaded when a meaning-based search is actually needed. Both are kept per server instance, and the
+// cache is checked on every question against the published materials' versions (id, last update,
+// passage count) - so an unpublish, delete, re-upload or re-index shows up immediately, and a
+// cached scope can only ever be reused for exactly the same school/class/board.
+
+interface ScopePassage {
+  id: string;
+  page: number | null;
+  text: string;
+  title: string;
+}
+
+interface ScopeEntry {
+  version: string;
+  at: number;
+  passages: ScopePassage[];
+  vectors: Map<string, Float32Array> | null;
+}
+
+const SCOPE_CACHE = new Map<string, ScopeEntry>();
+const SCOPE_CACHE_MAX_ENTRIES = 6;
+const SCOPE_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+
+export interface RetrievalScope {
+  schoolId: string | null;
+  schoolClassId: string | null;
+  boardId?: string | null;
+}
+
+export interface RetrievalStats {
+  passagesInScope: number;
+  cacheHit: boolean;
+  keywordTerms: number;
+  keywordHits: number;
+  usedSemantic: boolean;
+  vectorsLoaded: number;
+  ms: { scope: number; keyword: number; semantic: number; total: number };
+}
+
+async function loadScope(scope: { schoolId: string; schoolClassId: string; boardId: string }): Promise<{ entry: ScopeEntry; cacheHit: boolean; where: Prisma.MaterialChunkWhereInput } | null> {
+  // The shared rule (lib/materials/scope.ts): common material for this board + class, or this school's own.
+  const materialWhere = studentMaterialWhere(scope);
+  const chunkWhere = studentChunkWhere(scope);
+  if (!materialWhere || !chunkWhere) return null;
+
+  const materials = await prisma.studyMaterial.findMany({
+    where: materialWhere,
+    select: { id: true, updatedAt: true, _count: { select: { chunks: true } } },
+    orderBy: { id: "asc" },
+  });
+  if (materials.length === 0 || materials.every((m) => m._count.chunks === 0)) return null;
+
+  const key = `${scope.schoolId}|${scope.schoolClassId}|${scope.boardId}`;
+  const version = materials.map((m) => `${m.id}:${m.updatedAt.getTime()}:${m._count.chunks}`).join(",");
+  const cached = SCOPE_CACHE.get(key);
+  if (cached && cached.version === version && Date.now() - cached.at < SCOPE_CACHE_MAX_AGE_MS) {
+    return { entry: cached, cacheHit: true, where: chunkWhere };
+  }
+
+  const rows = await prisma.materialChunk.findMany({
+    where: chunkWhere,
+    select: { id: true, page: true, text: true, material: { select: { title: true } } },
+    orderBy: [{ materialId: "asc" }, { chunkIndex: "asc" }],
+  });
+  const entry: ScopeEntry = {
+    version,
+    at: Date.now(),
+    passages: rows.map((r) => ({ id: r.id, page: r.page, text: r.text, title: r.material.title })),
+    vectors: null,
+  };
+  SCOPE_CACHE.delete(key);
+  SCOPE_CACHE.set(key, entry);
+  while (SCOPE_CACHE.size > SCOPE_CACHE_MAX_ENTRIES) SCOPE_CACHE.delete(SCOPE_CACHE.keys().next().value as string);
+  return { entry, cacheHit: false, where: chunkWhere };
+}
+
+async function loadVectors(entry: ScopeEntry, where: Prisma.MaterialChunkWhereInput): Promise<Map<string, Float32Array>> {
+  if (entry.vectors) return entry.vectors;
+  const rows = await prisma.materialChunk.findMany({ where, select: { id: true, embedding: true } });
+  const vectors = new Map<string, Float32Array>();
+  for (const r of rows) vectors.set(r.id, Float32Array.from(r.embedding));
+  entry.vectors = vectors;
+  return vectors;
+}
+
+function cosineF32(a: ArrayLike<number>, b: ArrayLike<number>): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return na === 0 || nb === 0 ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
 
 /**
- * The most relevant passages from the student's own school's PUBLISHED
- * materials for their own class. `subjectName` (when the conversation is about
- * a subject) only re-ranks - it never widens what is searched.
+ * The most relevant passages from the student's own school's PUBLISHED materials for their own class.
+ * Hybrid: a keyword channel for exact words (vocabulary, names, terms) that abstains unless the question
+ * contains a rare word, and the embedding channel for everything else - see lib/rag/lexical.ts for how
+ * they combine. Pass `stats` to receive counts and timings (never the question or any passage text).
  */
-export async function retrieveForStudent(
-  scope: { schoolId: string | null; schoolClassId: string | null },
-  question: string,
-  k = 4
-): Promise<RetrievedPassage[]> {
-  if (!scope.schoolId || !scope.schoolClassId) return [];
+export async function retrieveForStudent(scope: RetrievalScope, question: string, k = 4, stats?: { out?: RetrievalStats }): Promise<RetrievedPassage[]> {
+  if (!scope.schoolId || !scope.schoolClassId || !scope.boardId) return [];
+  const t0 = Date.now();
 
-  const chunks = await prisma.materialChunk.findMany({
-    where: { schoolId: scope.schoolId, schoolClassId: scope.schoolClassId, material: { isPublished: true } },
-    select: { text: true, page: true, embedding: true, material: { select: { title: true } } },
+  const loaded = await loadScope({ schoolId: scope.schoolId, schoolClassId: scope.schoolClassId, boardId: scope.boardId });
+  const tScope = Date.now();
+  if (!loaded) return [];
+  const { entry, cacheHit, where } = loaded;
+
+  const terms = extractContentTerms(question);
+  const definition = isDefinitionQuery(question);
+  const lexical = rankLexical(entry.passages, terms, definition);
+  const tKeyword = Date.now();
+
+  // A definition lookup that the keyword channel answered needs no meaning-based search at all - which
+  // also saves the embedding call and loading the vectors.
+  const needSemantic = !(definition && lexical.length > 0);
+  let semantic: { id: string; score: number }[] = [];
+  let vectorsLoaded = 0;
+  if (needSemantic) {
+    try {
+      const [queryVectors, vectors] = await Promise.all([embedTexts([question], "RETRIEVAL_QUERY"), loadVectors(entry, where)]);
+      vectorsLoaded = vectors.size;
+      const q = queryVectors[0];
+      semantic = entry.passages.flatMap((p) => {
+        const v = vectors.get(p.id);
+        return v ? [{ id: p.id, score: cosineF32(q, v) }] : [];
+      });
+    } catch (err) {
+      // The embedding service can refuse (rate limit, daily quota) or be down. Keyword hits are still
+      // good evidence, so keep them instead of failing the whole lookup; with no keyword hits there is
+      // nothing to return and the tutor answers without excerpts, as it always has. Metadata only.
+      const info = describeEmbeddingError(err);
+      console.error(`[rag] embedding unavailable status=${info.status ?? "none"} category=${info.category}; using keyword results only`);
+    }
+  }
+  const tSemantic = Date.now();
+
+  const byId = new Map(entry.passages.map((p) => [p.id, p]));
+  const fused = fuseResults(lexical, semantic, { k, definition });
+  if (stats) {
+    stats.out = {
+      passagesInScope: entry.passages.length,
+      cacheHit,
+      keywordTerms: terms.length,
+      keywordHits: lexical.length,
+      usedSemantic: needSemantic,
+      vectorsLoaded,
+      ms: { scope: tScope - t0, keyword: tKeyword - tScope, semantic: tSemantic - tKeyword, total: tSemantic - t0 },
+    };
+  }
+  return fused.flatMap((h) => {
+    const p = byId.get(h.id);
+    return p ? [{ materialTitle: p.title, page: p.page, text: p.text, score: h.score, via: h.via }] : [];
   });
-  if (chunks.length === 0) return [];
-
-  const [queryVector] = await embedTexts([question], "RETRIEVAL_QUERY");
-  return chunks
-    .map((c) => ({ materialTitle: c.material.title, page: c.page, text: c.text, score: cosine(queryVector, c.embedding) }))
-    .filter((c) => c.score >= MIN_SCORE)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k);
 }

@@ -33,10 +33,11 @@ const importInputSchema = z.object({
   boardId: z.string().min(1, "Board is required"),
   schoolClassId: z.string().min(1, "Class is required"),
   subjectId: z.string().min(1, "Subject is required"),
-  chapterId: z.string().min(1, "Chapter is required"),
+  chapterId: z.string().optional(),
   topicId: z.string().optional(),
   // Only honoured for the super administrator - see createMaterial.
   schoolId: z.string().optional(),
+  common: z.boolean().optional(),
 });
 
 // A small per-user brake so the importer can't be used to hammer other sites.

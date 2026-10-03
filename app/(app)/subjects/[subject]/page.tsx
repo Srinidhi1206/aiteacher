@@ -50,6 +50,15 @@ export default async function SubjectDetailPage({ params }: { params: { subject:
           </CardContent>
         </Card>
 
+        {subject.subjectMaterials.length > 0 && (
+          <Card>
+            <CardContent className="space-y-2 p-5">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Textbooks and study materials for {subject.name}</p>
+              <MaterialLinks materials={subject.subjectMaterials} />
+            </CardContent>
+          </Card>
+        )}
+
         {subject.chapters.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center text-sm text-gray-500 dark:text-gray-400">

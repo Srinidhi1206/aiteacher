@@ -130,6 +130,8 @@ enum MaterialStatus {
 // instead of duplicated here.
 enum MaterialType {
   TEXTBOOK
+  STUDY_MATERIAL
+  QUESTION_PAPER
   NOTES
   REFERENCE
   VIDEO
@@ -296,6 +298,7 @@ model Board {
   examSchedules  ExamSchedule[]
   studyMaterials StudyMaterial[]
   schools        School[]
+  academicEvents AcademicEvent[]
 
   @@index([stateId])
 }
@@ -322,6 +325,7 @@ model School {
   teachers       Teacher[]
   admins         Admin[]
   studyMaterials StudyMaterial[]
+  academicEvents AcademicEvent[]
 
   @@index([boardId])
 }
@@ -348,6 +352,7 @@ model SchoolClass {
   exams              Exam[]
   schedules          ExamSchedule[]
   teacherAssignments TeacherAssignment[]
+  academicEvents     AcademicEvent[]
 
   @@unique([boardId, grade])
 }
@@ -403,6 +408,7 @@ model User {
   registrationRequest    RegistrationRequest?  @relation("Applicant")
   // Requests this user has reviewed (approved/rejected) as an admin.
   reviewedRequests       RegistrationRequest[] @relation("Reviewer")
+  academicEvents         AcademicEvent[]
 
   @@index([role])
   @@index([status])
@@ -741,16 +747,19 @@ model StudyMaterial {
   // isolation boundary between two schools that happen to share the same
   // board+class - board/class alone were not enough (see the migration for
   // how the one pre-existing row was backfilled).
-  schoolId      String
-  school        School      @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  // NULL = common material: visible to every school on this board + class (only the super administrator creates it).
+  // A value = private to that school.
+  schoolId      String?
+  school        School?     @relation(fields: [schoolId], references: [id], onDelete: Restrict)
   boardId       String
   board         Board       @relation(fields: [boardId], references: [id], onDelete: Restrict)
   schoolClassId String
   schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Restrict)
   subjectId     String
   subject       Subject     @relation(fields: [subjectId], references: [id], onDelete: Restrict)
-  chapterId     String
-  chapter       Chapter     @relation(fields: [chapterId], references: [id], onDelete: Restrict)
+  // NULL = material for the whole subject (e.g. a complete textbook), not tied to one chapter.
+  chapterId     String?
+  chapter       Chapter?    @relation(fields: [chapterId], references: [id], onDelete: Restrict)
   topicId       String?
   topic         Topic?      @relation(fields: [topicId], references: [id], onDelete: SetNull)
 
@@ -788,10 +797,10 @@ model MaterialChunk {
   id            String        @id @default(cuid())
   materialId    String
   material      StudyMaterial @relation(fields: [materialId], references: [id], onDelete: Cascade)
-  schoolId      String
+  schoolId      String? // copied from the material; NULL = common
   schoolClassId String
   subjectId     String
-  chapterId     String
+  chapterId     String? // copied from the material; NULL = whole-subject material
   topicId       String?
   chunkIndex    Int
   page          Int?
@@ -1375,4 +1384,46 @@ model AuditLog {
 
   @@index([userId])
   @@index([createdAt])
+}
+
+enum AcademicEventType {
+  EXAM
+  HOLIDAY
+  RESULT
+  MEETING
+  EVENT
+  DEADLINE
+  TERM
+  OTHER
+}
+
+// Admin-authored academic calendar. In each scope column NULL means "applies to all":
+//   schoolId NULL  -> every school on the board;  boardId NULL -> every board;  schoolClassId NULL -> every class.
+// So "BSE Telangana + Class 10" with no school is a common event, "School A + Class 10" is that school's class
+// event, "School A" alone is school-wide, and all three NULL is a platform-wide event (super administrator only).
+// academicYear is a plain label such as "2026-27" used to group and filter - not a separate table.
+model AcademicEvent {
+  id           String            @id @default(cuid())
+  title        String
+  type         AcademicEventType
+  startDate    DateTime
+  endDate      DateTime?
+  description  String?
+  academicYear String?
+  isPublished  Boolean           @default(false)
+
+  schoolId      String?
+  school        School?      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  boardId       String?
+  board         Board?       @relation(fields: [boardId], references: [id], onDelete: Restrict)
+  schoolClassId String?
+  schoolClass   SchoolClass? @relation(fields: [schoolClassId], references: [id], onDelete: Restrict)
+
+  createdByUserId String?
+  createdBy       User?    @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([boardId, schoolClassId, startDate])
+  @@index([schoolId, startDate])
 }

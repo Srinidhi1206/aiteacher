@@ -16,6 +16,8 @@
 // be probed by guessing ids.
 import { prisma } from "@/lib/prisma";
 import { requireRole, ForbiddenError } from "@/lib/auth/current-session";
+import { studentMaterialWhere } from "@/lib/materials/scope";
+import type { Prisma } from "@prisma/client";
 
 async function requireStudentScope() {
   const session = await requireRole("student");
@@ -25,6 +27,7 @@ async function requireStudentScope() {
       id: true,
       schoolId: true,
       schoolClassId: true,
+      boardId: true,
       schoolClass: { select: { label: true, board: { select: { shortName: true } } } },
     },
   });
@@ -32,16 +35,16 @@ async function requireStudentScope() {
   return student;
 }
 
-/** Published materials of the student's own school + class, optionally narrowed. */
-function materialsWhere(student: { schoolId: string | null; schoolClassId: string | null }, extra: Record<string, unknown> = {}) {
-  return {
-    schoolId: student.schoolId ?? "__none__",
-    schoolClassId: student.schoolClassId ?? "__none__",
-    isPublished: true,
-    // Materials of a subject hidden for this class are not part of the student's curriculum.
-    subject: { schoolClassLinks: { some: { schoolClassId: student.schoolClassId ?? "__none__", isEnabled: true } } },
-    ...extra,
-  };
+/**
+ * Published materials this student may see - common to their board + class, or private to their school - optionally
+ * narrowed. The rule itself lives in lib/materials/scope.ts and is shared with the Materials page and the AI Tutor.
+ * A student with no school, board or class gets a filter that matches nothing.
+ */
+function materialsWhere(
+  student: { schoolId: string | null; schoolClassId: string | null; boardId: string | null },
+  extra?: Prisma.StudyMaterialWhereInput
+): Prisma.StudyMaterialWhereInput {
+  return studentMaterialWhere(student, extra) ?? { id: "__none__" };
 }
 
 async function isSubjectInMyClass(schoolClassId: string, subjectId: string) {
@@ -96,7 +99,8 @@ export interface MyMaterial {
   title: string;
   fileUrl: string;
   materialType: string;
-  chapterId: string;
+  /** null = a material for the whole subject (for example a complete textbook), not one chapter. */
+  chapterId: string | null;
   topicId: string | null;
 }
 
@@ -104,6 +108,8 @@ export interface MySubjectDetail {
   id: string;
   name: string;
   classLabel: string | null;
+  /** Materials for the whole subject (no chapter), e.g. the complete textbook. */
+  subjectMaterials: MyMaterial[];
   chapters: {
     id: string;
     name: string;
@@ -137,6 +143,7 @@ export async function getMySubject(subjectId: string): Promise<MySubjectDetail |
     id: subject.id,
     name: subject.name,
     classLabel: student.schoolClass?.label ?? null,
+    subjectMaterials: materials.filter((m) => m.chapterId === null),
     chapters: subject.chapters.map((c) => ({
       id: c.id,
       name: c.name,

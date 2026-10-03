@@ -12,7 +12,7 @@ import { prisma } from "@/lib/prisma";
 import { requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { AIError, getAIProvider, getPromptTemplate, interpolate, buildStudentContext, getStudentPerformanceContext } from "@/lib/ai";
 import { checkTutorRateLimit } from "@/lib/ai/rate-limit";
-import { retrieveForStudent, type RetrievedPassage } from "@/lib/rag";
+import { retrieveForStudent, type RetrievedPassage, type RetrievalStats } from "@/lib/rag";
 import type { AIChatMessage, AIStudentContext } from "@/lib/ai/types";
 import type { ActionResult } from "./materials";
 
@@ -276,11 +276,16 @@ async function generateAndPersistReply(
   // without material excerpts.
   const owner = await prisma.aIConversation.findUnique({
     where: { id: conversationId },
-    select: { studentId: true, student: { select: { schoolId: true, schoolClassId: true } } },
+    select: { studentId: true, student: { select: { schoolId: true, schoolClassId: true, boardId: true } } },
   });
   let passages: RetrievedPassage[] = [];
   try {
-    if (owner) passages = await retrieveForStudent(owner.student, lastUserMessage.content);
+    if (owner) {
+      const stats: { out?: RetrievalStats } = {};
+      passages = await retrieveForStudent(owner.student, lastUserMessage.content, 4, stats);
+      // Counts and timings only - never the question or any passage text.
+      if (stats.out) console.info("[tutor] retrieval", JSON.stringify({ ...stats.out, returned: passages.length }));
+    }
   } catch (err) {
     console.error("[tutor] material retrieval failed", (err as Error)?.message);
   }

@@ -30,7 +30,21 @@ type Chapter = Awaited<ReturnType<typeof listChaptersForSubject>>[number];
 type MaterialRow = Awaited<ReturnType<typeof listMaterialsForAdmin>>[number];
 type SchoolOption = Awaited<ReturnType<typeof listSchools>>[number];
 
-const MATERIAL_TYPES = ["TEXTBOOK", "NOTES", "REFERENCE", "VIDEO", "PDF", "PRESENTATION", "OTHER"] as const;
+const MATERIAL_TYPES = ["TEXTBOOK", "STUDY_MATERIAL", "NOTES", "QUESTION_PAPER", "REFERENCE", "VIDEO", "PDF", "PRESENTATION", "OTHER"] as const;
+const MATERIAL_TYPE_LABELS: Record<(typeof MATERIAL_TYPES)[number], string> = {
+  TEXTBOOK: "Textbook",
+  STUDY_MATERIAL: "Study material",
+  NOTES: "Notes",
+  QUESTION_PAPER: "Question paper",
+  REFERENCE: "Reference material",
+  VIDEO: "Video",
+  PDF: "PDF",
+  PRESENTATION: "Presentation",
+  OTHER: "Other",
+};
+// Value of the School selector that means "no school": a COMMON material, shared by every school on the chosen
+// board + class. Only the super administrator sees this option; the server enforces it regardless.
+const COMMON = "__common__";
 
 // Materials indexed before the per-material ceiling replaced the old 400-passage cap carry no status
 // note; exactly 400 passages is the signature of one that may have been cut short.
@@ -180,7 +194,7 @@ export function StudyMaterialsCard() {
   async function handleImport() {
     if (!title.trim()) return setFormError("Title is required.");
     if (isSuperAdmin && !schoolId) return setFormError("Choose the school this material belongs to.");
-    if (!boardId || !schoolClassId || !subjectId || !chapterId) return setFormError("Select board, class, subject, and chapter.");
+    if (!boardId || !schoolClassId || !subjectId) return setFormError("Select board, class and subject.");
     if (!importUrl.trim()) return setFormError("Enter the web address of a PDF file.");
     if (!rightsConfirmed) return setFormError("Please confirm that you have the right to use this file.");
     setUploading(true);
@@ -194,9 +208,10 @@ export function StudyMaterialsCard() {
         boardId,
         schoolClassId,
         subjectId,
-        chapterId,
+        chapterId: chapterId || undefined,
         topicId: topicId || undefined,
-        schoolId: isSuperAdmin ? schoolId : undefined,
+        schoolId: isSuperAdmin && schoolId !== COMMON ? schoolId : undefined,
+        common: isSuperAdmin && schoolId === COMMON ? true : undefined,
       });
       if (!result.ok) {
         setFormError(result.error ?? "Import failed.");
@@ -221,7 +236,7 @@ export function StudyMaterialsCard() {
 
     if (!title.trim()) return setFormError("Title is required.");
     if (isSuperAdmin && !schoolId) return setFormError("Choose the school this material belongs to.");
-    if (!boardId || !schoolClassId || !subjectId || !chapterId) return setFormError("Select board, class, subject, and chapter.");
+    if (!boardId || !schoolClassId || !subjectId) return setFormError("Select board, class and subject.");
     if (!file) return setFormError("Choose a file to upload.");
     const fileCheck = validateUploadFile({ type: file.type, size: file.size });
     if (!fileCheck.ok) return setFormError(fileCheck.error);
@@ -249,9 +264,10 @@ export function StudyMaterialsCard() {
           boardId,
           schoolClassId,
           subjectId,
-          chapterId,
+          chapterId: chapterId || undefined,
           topicId: topicId || undefined,
-          schoolId: isSuperAdmin ? schoolId : undefined,
+          schoolId: isSuperAdmin && schoolId !== COMMON ? schoolId : undefined,
+          common: isSuperAdmin && schoolId === COMMON ? true : undefined,
         },
         { storageKey: blob.pathname, fileName: file.name }
       );
@@ -353,7 +369,8 @@ export function StudyMaterialsCard() {
             <div>
               <label className={labelClass}>School</label>
               <select className={inputClass} value={schoolId} onChange={(e) => setSchoolId(e.target.value)} disabled={uploading}>
-                <option value="">Select the school this material belongs to</option>
+                <option value="">Select who can see this material</option>
+                <option value={COMMON}>All schools (common material)</option>
                 {schools.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}
@@ -361,7 +378,9 @@ export function StudyMaterialsCard() {
                 ))}
               </select>
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Only students of this school (in the matching board and class) will see the material.
+                {schoolId === COMMON
+                  ? "Common material: every school's students on the chosen board and class will see it. Upload each official textbook once, here."
+                  : "Only students of this school (in the matching board and class) will see the material."}
               </p>
             </div>
           )}
@@ -375,7 +394,7 @@ export function StudyMaterialsCard() {
               <select className={inputClass} value={materialType} onChange={(e) => setMaterialType(e.target.value as typeof materialType)} disabled={uploading}>
                 {MATERIAL_TYPES.map((t) => (
                   <option key={t} value={t}>
-                    {t.charAt(0) + t.slice(1).toLowerCase()}
+                    {MATERIAL_TYPE_LABELS[t]}
                   </option>
                 ))}
               </select>
@@ -424,9 +443,9 @@ export function StudyMaterialsCard() {
               </select>
             </div>
             <div>
-              <label className={labelClass}>Chapter</label>
+              <label className={labelClass}>Chapter (optional)</label>
               <select className={`${inputClass} !py-2 !text-xs`} value={chapterId} onChange={(e) => setChapterId(e.target.value)} disabled={uploading || !subjectId}>
-                <option value="">Select</option>
+                <option value="">Whole subject (no specific chapter)</option>
                 {chapters.map((c) => (
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
@@ -546,7 +565,7 @@ export function StudyMaterialsCard() {
                     <div>
                       <p className="text-sm font-medium text-gray-800 dark:text-gray-100">{m.title}</p>
                       <p className="text-xs text-gray-400">
-                        {isSuperAdmin ? `${m.school.name} - ` : ""}{m.subject.name} - {m.schoolClass.label} - {m.chapter.name} -{(m.sizeKb / 1024).toFixed(1)} MB - {formatDate(m.uploadedAt)}
+                        {isSuperAdmin ? `${m.school?.name ?? "All schools (common)"} - ` : m.school ? "" : "Common - "}{m.subject.name} - {m.schoolClass.label} - {m.chapter?.name ?? "Whole subject"} -{(m.sizeKb / 1024).toFixed(1)} MB - {formatDate(m.uploadedAt)}
                       </p>
                       {(() => {
                         const idx = describeIndex(m);

@@ -132,7 +132,7 @@ export function CalendarView({ events: allEvents }: { events: CalendarEvent[] })
       </div>
 
       <div className="mt-5 border-t border-gray-100 pt-4 dark:border-gray-800">
-        <CalendarLegend />
+        <CalendarLegend present={Array.from(new Set(allEvents.map((e) => e.type)))} />
       </div>
 
       <DayDetailModal date={selectedDate} events={selectedDate ? eventsByDate.get(selectedDate) ?? [] : []} onClose={() => setSelectedDate(null)} />
