@@ -33,6 +33,18 @@ export function audienceForClassInSchool(a: { schoolId: string; schoolClassId: s
   return { schoolId: a.schoolId, schoolClassId: a.schoolClassId };
 }
 
+/**
+ * Who a published calendar event reaches: the same rule as lib/calendar/scope.ts, seen from the student's side. In each
+ * scope column NULL means "all"; and only students already placed in a school can see school-scoped content at all.
+ */
+export function audienceForCalendarEvent(e: { schoolId: string | null; boardId: string | null; schoolClassId: string | null }): Prisma.StudentWhereInput {
+  return {
+    schoolId: e.schoolId ?? { not: null },
+    ...(e.boardId ? { boardId: e.boardId } : {}),
+    ...(e.schoolClassId ? { schoolClassId: e.schoolClassId } : {}),
+  };
+}
+
 export function audienceForSchedule(a: { schoolId: string; boardId: string; schoolClassId: string }): Prisma.StudentWhereInput {
   return { schoolId: a.schoolId, boardId: a.boardId, schoolClassId: a.schoolClassId };
 }

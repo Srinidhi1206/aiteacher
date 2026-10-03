@@ -11,7 +11,7 @@ import { useSessionUser } from "@/components/layout/session-user-context";
 
 const ICONS: Record<string, React.ComponentType<{ className?: string }>> = { MATERIAL: FileText, ASSIGNMENT: ClipboardList, EXAM: FileEdit, GRADE: Award };
 const LINKS_BY_ROLE: Record<string, Record<string, string>> = {
-  student: { MATERIAL: "/materials", ASSIGNMENT: "/assignments", EXAM: "/exams", GRADE: "/results" },
+  student: { MATERIAL: "/materials", ASSIGNMENT: "/assignments", EXAM: "/exams", GRADE: "/results", SYSTEM: "/calendar" },
   teacher: { ASSIGNMENT: "/teacher/worksheets", EXAM: "/teacher/exams" },
   admin: { SYSTEM: "/admin" },
 };

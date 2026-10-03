@@ -10,6 +10,7 @@ import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import { extractContentTerms, isDefinitionQuery, rankLexical, fuseResults, limitPerPage } from "@/lib/rag/lexical";
+import { detectSubject, withoutSubjectWords, type SubjectRef } from "@/lib/rag/subject-hint";
 import { studentMaterialWhere, studentChunkWhere } from "@/lib/materials/scope";
 
 // Configurable like GEMINI_MODEL; the stored vectors are 768-dimensional, so only change it to a
@@ -148,13 +149,19 @@ interface ScopePassage {
   page: number | null;
   text: string;
   title: string;
+  subjectId: string;
 }
 
 interface ScopeEntry {
   version: string;
   at: number;
   passages: ScopePassage[];
-  vectors: Map<string, Float32Array> | null;
+  /** The class's subjects that actually have indexed passages here (only filled when there is more than one). */
+  subjects: SubjectRef[];
+  /** Vectors loaded so far (a superset is fine - scoring only looks at the candidates). */
+  vectors: Map<string, Float32Array>;
+  /** Which parts of the scope have had their vectors loaded: "*" = all, otherwise a subject id. */
+  vectorParts: Set<string>;
 }
 
 const SCOPE_CACHE = new Map<string, ScopeEntry>();
@@ -173,6 +180,8 @@ export interface RetrievalStats {
   keywordTerms: number;
   keywordHits: number;
   usedSemantic: boolean;
+  /** The subject the question named, when retrieval was narrowed to it. */
+  focusedSubject: string | null;
   vectorsLoaded: number;
   ms: { scope: number; keyword: number; semantic: number; total: number };
 }
@@ -199,14 +208,22 @@ async function loadScope(scope: { schoolId: string; schoolClassId: string; board
 
   const rows = await prisma.materialChunk.findMany({
     where: chunkWhere,
-    select: { id: true, page: true, text: true, material: { select: { title: true } } },
+    select: { id: true, page: true, text: true, subjectId: true, material: { select: { title: true } } },
     orderBy: [{ materialId: "asc" }, { chunkIndex: "asc" }],
   });
+  // With several subjects indexed, remember their names so a question that names one can be narrowed to it.
+  const subjectIds = new Set(rows.map((r) => r.subjectId));
+  const subjects: SubjectRef[] =
+    subjectIds.size > 1
+      ? (await prisma.subject.findMany({ where: { id: { in: [...subjectIds] } }, select: { id: true, name: true } }))
+      : [];
   const entry: ScopeEntry = {
     version,
     at: Date.now(),
-    passages: rows.map((r) => ({ id: r.id, page: r.page, text: r.text, title: r.material.title })),
-    vectors: null,
+    passages: rows.map((r) => ({ id: r.id, page: r.page, text: r.text, title: r.material.title, subjectId: r.subjectId })),
+    subjects,
+    vectors: new Map(),
+    vectorParts: new Set(),
   };
   SCOPE_CACHE.delete(key);
   SCOPE_CACHE.set(key, entry);
@@ -214,13 +231,14 @@ async function loadScope(scope: { schoolId: string; schoolClassId: string; board
   return { entry, cacheHit: false, where: chunkWhere };
 }
 
-async function loadVectors(entry: ScopeEntry, where: Prisma.MaterialChunkWhereInput): Promise<Map<string, Float32Array>> {
-  if (entry.vectors) return entry.vectors;
-  const rows = await prisma.materialChunk.findMany({ where, select: { id: true, embedding: true } });
-  const vectors = new Map<string, Float32Array>();
-  for (const r of rows) vectors.set(r.id, Float32Array.from(r.embedding));
-  entry.vectors = vectors;
-  return vectors;
+// The 768 numbers per passage are the heavy part (about 10 KB each). When a question names a subject only THAT subject's
+// vectors are loaded (and kept for the next question about it); otherwise the whole scope's, as before.
+async function loadVectors(entry: ScopeEntry, where: Prisma.MaterialChunkWhereInput, subjectId: string | null): Promise<Map<string, Float32Array>> {
+  if (entry.vectorParts.has("*") || (subjectId !== null && entry.vectorParts.has(subjectId))) return entry.vectors;
+  const rows = await prisma.materialChunk.findMany({ where: subjectId ? { AND: [where, { subjectId }] } : where, select: { id: true, embedding: true } });
+  for (const r of rows) entry.vectors.set(r.id, Float32Array.from(r.embedding));
+  entry.vectorParts.add(subjectId ?? "*");
+  return entry.vectors;
 }
 
 function cosineF32(a: ArrayLike<number>, b: ArrayLike<number>): number {
@@ -250,42 +268,60 @@ export async function retrieveForStudent(scope: RetrievalScope, question: string
   if (!loaded) return [];
   const { entry, cacheHit, where } = loaded;
 
-  const terms = extractContentTerms(question);
   const definition = isDefinitionQuery(question);
-  const lexical = rankLexical(entry.passages, terms, definition);
-  const tKeyword = Date.now();
-
-  // A definition lookup that the keyword channel answered needs no meaning-based search at all - which
-  // also saves the embedding call and loading the vectors.
-  const needSemantic = !(definition && lexical.length > 0);
-  let semantic: { id: string; score: number }[] = [];
-  let vectorsLoaded = 0;
-  if (needSemantic) {
-    try {
-      const [queryVectors, vectors] = await Promise.all([embedTexts([question], "RETRIEVAL_QUERY"), loadVectors(entry, where)]);
-      vectorsLoaded = vectors.size;
-      const q = queryVectors[0];
-      semantic = entry.passages.flatMap((p) => {
-        const v = vectors.get(p.id);
-        return v ? [{ id: p.id, score: cosineF32(q, v) }] : [];
-      });
-    } catch (err) {
-      // The embedding service can refuse (rate limit, daily quota) or be down. Keyword hits are still
-      // good evidence, so keep them instead of failing the whole lookup; with no keyword hits there is
-      // nothing to return and the tutor answers without excerpts, as it always has. Metadata only.
-      const info = describeEmbeddingError(err);
-      console.error(`[rag] embedding unavailable status=${info.status ?? "none"} category=${info.category}; using keyword results only`);
-    }
-  }
-  const tSemantic = Date.now();
-
-  // With the meaning-based search unavailable there is nothing else to lean on, so let any word of the question
-  // that occurs in the material - not only the rare ones - identify passages (ranked by rarity).
-  const keywordHits = needSemantic && semantic.length === 0 ? rankLexical(entry.passages, terms, definition, { relaxed: true }) : lexical;
-
   const byId = new Map(entry.passages.map((p) => [p.id, p]));
-  // Fuse more than needed, then keep at most two passages per page so one page cannot crowd out the rest of the book.
-  const fused = limitPerPage(fuseResults(keywordHits, semantic, { k: k * 3, definition }), (id) => byId.get(id)?.page ?? null, 2, k);
+
+  // A question that names ONE subject ("in maths ...") is searched in that subject's passages only: fewer passages to rank
+  // and, with several textbooks, far fewer vectors to load. If that finds nothing the whole class is searched, so a wrong
+  // guess can never hide an answer. The words that merely named the subject are not searched for as keywords.
+  const focus = entry.subjects.length > 1 ? detectSubject(question, entry.subjects) : null;
+  const terms = extractContentTerms(focus ? withoutSubjectWords(question, focus, entry.subjects) : question);
+  let queryVector: number[] | null = null;
+  let embeddingFailed = false;
+  let timings = { keyword: 0, semantic: 0 };
+
+  const search = async (subjectId: string | null) => {
+    const candidates = subjectId ? entry.passages.filter((p) => p.subjectId === subjectId) : entry.passages;
+    const tK = Date.now();
+    const lexical = rankLexical(candidates, terms, definition);
+    timings.keyword += Date.now() - tK;
+
+    // A definition lookup that the keyword channel answered needs no meaning-based search at all - which
+    // also saves the embedding call and loading the vectors.
+    const needSemantic = !(definition && lexical.length > 0);
+    let semantic: { id: string; score: number }[] = [];
+    let vectorsLoaded = 0;
+    if (needSemantic && !embeddingFailed) {
+      const tS = Date.now();
+      try {
+        const [qv, vectors] = await Promise.all([queryVector ? Promise.resolve([queryVector]) : embedTexts([question], "RETRIEVAL_QUERY"), loadVectors(entry, where, subjectId)]);
+        queryVector = qv[0];
+        vectorsLoaded = vectors.size;
+        semantic = candidates.flatMap((p) => {
+          const v = vectors.get(p.id);
+          return v ? [{ id: p.id, score: cosineF32(queryVector!, v) }] : [];
+        });
+      } catch (err) {
+        // The embedding service can refuse (rate limit, daily quota) or be down. Keyword hits are still
+        // good evidence, so keep them instead of failing the whole lookup; with no keyword hits there is
+        // nothing to return and the tutor answers without excerpts, as it always has. Metadata only.
+        embeddingFailed = true;
+        const info = describeEmbeddingError(err);
+        console.error(`[rag] embedding unavailable status=${info.status ?? "none"} category=${info.category}; using keyword results only`);
+      }
+      timings.semantic += Date.now() - tS;
+    }
+    // With the meaning-based search unavailable there is nothing else to lean on, so let any word of the question
+    // that occurs in the material - not only the rare ones - identify passages (ranked by rarity).
+    const keywordHits = needSemantic && semantic.length === 0 ? rankLexical(candidates, terms, definition, { relaxed: true }) : lexical;
+    // Fuse more than needed, then keep at most two passages per page so one page cannot crowd out the rest of the book.
+    const fused = limitPerPage(fuseResults(keywordHits, semantic, { k: k * 3, definition }), (id) => byId.get(id)?.page ?? null, 2, k);
+    return { fused, keywordHits, needSemantic, vectorsLoaded, candidates: candidates.length };
+  };
+
+  let result = await search(focus);
+  if (focus && result.fused.length === 0) result = await search(null);
+  const { fused, keywordHits, needSemantic, vectorsLoaded } = result;
   if (stats) {
     stats.out = {
       passagesInScope: entry.passages.length,
@@ -293,8 +329,9 @@ export async function retrieveForStudent(scope: RetrievalScope, question: string
       keywordTerms: terms.length,
       keywordHits: keywordHits.length,
       usedSemantic: needSemantic,
+      focusedSubject: focus && result.candidates < entry.passages.length ? focus : null,
       vectorsLoaded,
-      ms: { scope: tScope - t0, keyword: tKeyword - tScope, semantic: tSemantic - tKeyword, total: tSemantic - t0 },
+      ms: { scope: tScope - t0, keyword: timings.keyword, semantic: timings.semantic, total: Date.now() - t0 },
     };
   }
   return fused.flatMap((h) => {
