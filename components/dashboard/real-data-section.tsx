@@ -49,10 +49,8 @@ export async function RealDataSection() {
         <CardContent className="flex items-center gap-3 py-6">
           <DatabaseZap className="h-8 w-8 shrink-0 text-gray-300 dark:text-gray-600" />
           <div>
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-200">
-              Live progress, exams, and planner data need a connected database.
-            </p>
-            <p className="text-xs text-gray-400">Once DATABASE_URL is set (see docs/DATABASE.md), this section activates automatically.</p>
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-200">Your progress, exams and planner couldn&apos;t be loaded right now.</p>
+            <p className="text-xs text-gray-400">This is usually temporary - refresh the page in a moment.</p>
           </div>
         </CardContent>
       </Card>

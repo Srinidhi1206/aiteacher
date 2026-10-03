@@ -47,8 +47,10 @@ export default async function SettingsPage() {
             <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label="Name" value={account.name} />
               <Field label={account.role === "student" ? "Student ID" : "Username"} value={account.username} />
+              <Field label="Email" value={account.email} />
               <Field label="Role" value={account.role.charAt(0).toUpperCase() + account.role.slice(1)} />
-              <Field label="School" value={account.schoolName} />
+              <Field label="School" value={account.schoolName ?? (account.role === "student" ? "Not assigned yet - your administrator will place you in a school" : null)} />
+              {account.role === "student" && <Field label="State" value={account.stateName} />}
               <Field label="Board" value={account.boardName} />
               {account.role === "student" && <Field label="Class" value={account.className} />}
             </dl>

@@ -91,6 +91,10 @@ export function UsersTable() {
   const [myAdmin, setMyAdmin] = React.useState<Awaited<ReturnType<typeof getMyAdminStatus>>>(null);
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>("PENDING");
   const [roleFilter, setRoleFilter] = React.useState<RoleFilterValue>("ALL");
+  const [search, setSearch] = React.useState("");
+  const [schoolFilter, setSchoolFilter] = React.useState("ALL");
+  const [boardFilter, setBoardFilter] = React.useState("ALL");
+  const [classFilter, setClassFilter] = React.useState("ALL");
   const [actingUserId, setActingUserId] = React.useState<string | null>(null);
   const [rejectTarget, setRejectTarget] = React.useState<AdminUserRow | null>(null);
   const [rejectReason, setRejectReason] = React.useState("");
@@ -186,11 +190,23 @@ export function UsersTable() {
     );
   }
 
+  // The school, board and class of a user live on whichever profile they have (student / teacher / admin).
+  const schoolOf = (u: AdminUserRow) => u.student?.school ?? u.teacher?.school ?? null;
+  const schoolOptions = Array.from(new Map((users ?? []).flatMap((u) => { const s = schoolOf(u); return s ? [[s.id, s.name] as const] : []; })).entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  const boardOptions = Array.from(new Map((users ?? []).flatMap((u) => (u.student?.board ? [[u.student.board.id, u.student.board.shortName] as const] : []))).entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  const classOptions = Array.from(new Set((users ?? []).flatMap((u) => (u.student?.schoolClass ? [u.student.schoolClass.label] : [])))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const needle = search.trim().toLowerCase();
+
   const visible = (users ?? []).filter((u) => {
     if (statusFilter !== "ALL" && u.status !== statusFilter) return false;
     if (roleFilter !== "ALL" && u.role !== roleFilter) return false;
+    if (schoolFilter !== "ALL" && (schoolFilter === "NONE" ? schoolOf(u) !== null || u.role === "ADMIN" : schoolOf(u)?.id !== schoolFilter)) return false;
+    if (boardFilter !== "ALL" && u.student?.board?.id !== boardFilter) return false;
+    if (classFilter !== "ALL" && u.student?.schoolClass?.label !== classFilter) return false;
+    if (needle && ![u.name, u.email, u.username].some((v) => v?.toLowerCase().includes(needle))) return false;
     return true;
   });
+  const filtersActive = needle !== "" || schoolFilter !== "ALL" || boardFilter !== "ALL" || classFilter !== "ALL" || roleFilter !== "ALL" || statusFilter !== "ALL";
 
   return (
     <Card>
@@ -231,6 +247,62 @@ export function UsersTable() {
             ))}
           </div>
         </div>
+        <div className="grid w-full grid-cols-2 gap-2 sm:grid-cols-4">
+          <input
+            type="search"
+            aria-label="Search users"
+            placeholder="Search name, email or username"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className={`${inputClass} col-span-2 !py-1.5 !text-xs sm:col-span-1`}
+          />
+          <select aria-label="Filter by school" className={`${inputClass} !py-1.5 !text-xs`} value={schoolFilter} onChange={(e) => setSchoolFilter(e.target.value)}>
+            <option value="ALL">All schools</option>
+            <option value="NONE">No school assigned</option>
+            {schoolOptions.map(([id, name]) => (
+              <option key={id} value={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <select aria-label="Filter by board" className={`${inputClass} !py-1.5 !text-xs`} value={boardFilter} onChange={(e) => setBoardFilter(e.target.value)}>
+            <option value="ALL">All boards</option>
+            {boardOptions.map(([id, name]) => (
+              <option key={id} value={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <select aria-label="Filter by class" className={`${inputClass} !py-1.5 !text-xs`} value={classFilter} onChange={(e) => setClassFilter(e.target.value)}>
+            <option value="ALL">All classes</option>
+            {classOptions.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+        {users !== null && (
+          <p className="text-xs text-gray-400">
+            Showing {visible.length} of {users.length} user{users.length === 1 ? "" : "s"}
+            {filtersActive && (
+              <button
+                type="button"
+                className="ml-2 font-medium text-primary-600 hover:underline dark:text-primary-300"
+                onClick={() => {
+                  setSearch("");
+                  setSchoolFilter("ALL");
+                  setBoardFilter("ALL");
+                  setClassFilter("ALL");
+                  setRoleFilter("ALL");
+                  setStatusFilter("ALL");
+                }}
+              >
+                Clear filters
+              </button>
+            )}
+          </p>
+        )}
       </CardHeader>
       <CardContent className="overflow-x-auto">
         {users === null ? (

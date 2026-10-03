@@ -1,6 +1,7 @@
 "use client";
 import { MobileNav } from "@/components/layout/mobile-nav";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { NotificationBell } from "@/components/layout/notification-bell";
 
 export function Topbar({ title }: { title: string }) {
   return (
@@ -11,6 +12,7 @@ export function Topbar({ title }: { title: string }) {
       </div>
 
       <div className="flex items-center gap-2 sm:gap-3">
+        <NotificationBell />
         <ThemeToggle />
       </div>
     </header>

@@ -531,7 +531,7 @@ export function StudyMaterialsCard() {
           {dbUnavailable ? (
             <div className="flex items-center gap-2.5 rounded-xl border border-gray-100 p-3 text-sm text-gray-500 dark:border-gray-800 dark:text-gray-400">
               <DatabaseZap className="h-4 w-4 shrink-0 text-gray-300 dark:text-gray-600" />
-              Materials need a connected database to load. Set DATABASE_URL (see docs/DATABASE.md).
+              Materials couldn&apos;t be loaded right now. Refresh the page in a moment.
             </div>
           ) : materials === null ? (
             <p className="py-4 text-center text-sm text-gray-400">Loading...</p>

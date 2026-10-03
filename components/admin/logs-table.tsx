@@ -6,17 +6,32 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { DatabaseUnavailable } from "@/components/database-unavailable";
 import { formatDate } from "@/lib/utils";
-import { listActivityLogs, type ActivityLogRow } from "@/lib/actions/admin-logs";
+import { inputClass } from "@/components/register/field-styles";
+import { listActivityLogs, listActivityLogActions, type ActivityLogRow } from "@/lib/actions/admin-logs";
 
 export function LogsTable() {
   const [rows, setRows] = React.useState<ActivityLogRow[] | null>(null);
   const [unavailable, setUnavailable] = React.useState(false);
+  const [actions, setActions] = React.useState<string[]>([]);
+  const [action, setAction] = React.useState("");
+  const [query, setQuery] = React.useState("");
 
   React.useEffect(() => {
-    listActivityLogs()
-      .then(setRows)
-      .catch(() => setUnavailable(true));
+    listActivityLogActions().then(setActions).catch(() => {});
   }, []);
+
+  // Filters are applied on the server (so a search covers the whole history); the text box waits for a pause in typing.
+  React.useEffect(() => {
+    const t = setTimeout(() => {
+      listActivityLogs({ action: action || undefined, query: query || undefined })
+        .then((r) => {
+          setRows(r);
+          setUnavailable(false);
+        })
+        .catch(() => setUnavailable(true));
+    }, query ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [action, query]);
 
   if (unavailable) return <DatabaseUnavailable what="Activity log" />;
 
@@ -24,13 +39,24 @@ export function LogsTable() {
     <Card>
       <CardHeader>
         <CardTitle>Activity Log</CardTitle>
-        <CardDescription className="hidden sm:block">The 100 most recent actions by people in your school</CardDescription>
+        <CardDescription className="hidden sm:block">The 100 most recent matching actions. A school administrator sees their own school; the super administrator sees the whole platform.</CardDescription>
+        <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
+          <input type="search" aria-label="Search the activity log" placeholder="Search details or username" value={query} onChange={(e) => setQuery(e.target.value)} className={`${inputClass} !py-1.5 !text-xs`} />
+          <select aria-label="Filter by action" className={`${inputClass} !py-1.5 !text-xs`} value={action} onChange={(e) => setAction(e.target.value)}>
+            <option value="">All actions</option>
+            {actions.map((a) => (
+              <option key={a} value={a}>
+                {a.replace(/_/g, " ").toLowerCase()}
+              </option>
+            ))}
+          </select>
+        </div>
       </CardHeader>
       <CardContent className="overflow-x-auto">
         {rows === null ? (
           <p className="py-6 text-center text-sm text-gray-400">Loading...</p>
         ) : rows.length === 0 ? (
-          <p className="py-6 text-center text-sm text-gray-400">No activity recorded yet.</p>
+          <p className="py-6 text-center text-sm text-gray-400">{query || action ? "No activity matches these filters." : "No activity recorded yet."}</p>
         ) : (
           <table className="w-full min-w-[600px] border-collapse text-sm">
             <thead>

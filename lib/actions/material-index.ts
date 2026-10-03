@@ -25,6 +25,7 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentSession, UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
 import { chunkText, embedTexts, describeEmbeddingError, EMBED_PER_MINUTE, INDEX_BATCH_SIZE } from "@/lib/rag";
 import { formatIndexStatus } from "@/lib/rag/index-status";
+import { logAudit } from "@/lib/audit";
 import type { ActionResult } from "./materials";
 
 const MAX_PDF_MB = 40;
@@ -221,6 +222,7 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
           indexError: formatIndexStatus(truncated ? { kind: "truncated", done: total, available } : { kind: "complete", total }),
         },
       });
+      await logAudit(actor.session.id, "USER_UPDATE", `StudyMaterial:${material.id}`, `Material indexed for the AI Tutor: "${material.title}" (${total} passages${truncated ? `, first ${total} of ${available}` : ""})`);
       return { ok: true, data: { chunks: total, total, available, complete: true, waitMs: 0 } };
     }
 

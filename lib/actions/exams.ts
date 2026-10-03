@@ -7,6 +7,8 @@
 // rather than duplicating an exam concept.
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
+import { notifyQuietly, notifyUserQuietly, audienceForClassInSchool } from "@/lib/notifications/core";
 import { getCurrentSession, requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
 import { QuestionType } from "@prisma/client";
@@ -72,7 +74,7 @@ export async function createExam(input: unknown, file?: File | null): Promise<Ac
     const parsed = examInputSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
-    const { teacher } = await requireOwnedAssignment(data.schoolClassId, data.subjectId);
+    const { session, teacher } = await requireOwnedAssignment(data.schoolClassId, data.subjectId);
 
     let fileUrl: string | undefined;
     let storageKey: string | undefined;
@@ -111,6 +113,7 @@ export async function createExam(input: unknown, file?: File | null): Promise<Ac
         status: "DRAFT",
       },
     });
+    await logAudit(session.id, "EXAM_CREATE", `Exam:${exam.id}`, `Created exam "${exam.title}" (draft)`);
     return { ok: true, data: { id: exam.id } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -259,7 +262,7 @@ export async function reorderExamQuestions(examId: string, orderedQuestionIds: s
 
 export async function publishExam(examId: string): Promise<ActionResult> {
   try {
-    const { exam } = await requireOwnedExam(examId);
+    const { session, exam } = await requireOwnedExam(examId);
     const questions = await prisma.examQuestion.findMany({ where: { examId }, orderBy: { order: "asc" }, select: { type: true, prompt: true, options: true, correctAnswer: true, marks: true } });
     if (questions.length === 0) return { ok: false, error: "Add at least one question before publishing." };
     if (exam.status === "PUBLISHED") return { ok: false, error: "Exam is already published." };
@@ -270,6 +273,10 @@ export async function publishExam(examId: string): Promise<ActionResult> {
     if (exam.scheduleId) {
       await prisma.examSchedule.update({ where: { id: exam.scheduleId }, data: { isPublished: true } }).catch(() => {});
     }
+    await logAudit(session.id, "EXAM_PUBLISH", `Exam:${examId}`, `Published exam "${exam.title}"`);
+    if (exam.teacher.schoolId) {
+      await notifyQuietly(audienceForClassInSchool({ schoolId: exam.teacher.schoolId, schoolClassId: exam.schoolClassId }), { type: "EXAM", title: "New exam available", message: `"${exam.title}" is now open for your class.` });
+    }
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -279,8 +286,9 @@ export async function publishExam(examId: string): Promise<ActionResult> {
 
 export async function unpublishExam(examId: string): Promise<ActionResult> {
   try {
-    await requireOwnedExam(examId);
+    const { session, exam } = await requireOwnedExam(examId);
     await prisma.exam.update({ where: { id: examId }, data: { status: "UNPUBLISHED" } });
+    await logAudit(session.id, "EXAM_UNPUBLISH", `Exam:${examId}`, `Unpublished exam "${exam.title}"`);
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -653,6 +661,11 @@ export async function finalizeExamGrade(submissionId: string, feedback?: string)
       }),
     ]);
     await refreshStudentAnalytics(submission.studentId);
+    await logAudit(session.id, "GRADE_CHANGE", `ExamSubmission:${submissionId}`, `Graded "${submission.exam.title}" (${totalScore}/${submission.exam.maxMarks})`);
+    const gradedStudent = await prisma.student.findUnique({ where: { id: submission.studentId }, select: { userId: true } });
+    if (gradedStudent) {
+      await notifyUserQuietly(gradedStudent.userId, { type: "GRADE", title: "Your exam has been graded", message: `"${submission.exam.title}": ${totalScore}/${submission.exam.maxMarks}.` });
+    }
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };

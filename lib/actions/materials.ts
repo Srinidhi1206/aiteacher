@@ -9,6 +9,8 @@ import { getCurrentSession, ForbiddenError, UnauthorizedError } from "@/lib/auth
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
 import { MaterialType } from "@prisma/client";
 import { checkMaterialPlacement } from "@/lib/materials/placement";
+import { logAudit } from "@/lib/audit";
+import { notifyQuietly, audienceForMaterial } from "@/lib/notifications/core";
 
 const materialInputSchema = z.object({
   title: z.string().trim().min(1, "Title is required").max(200),
@@ -181,6 +183,11 @@ export async function createMaterial(
       data: { userId: session.id, action: "MATERIAL_UPLOAD", resource: `StudyMaterial:${material.id}`, message: `Uploaded "${material.title}" to ${actorSchool.schoolName}` },
     });
 
+    // A material that goes live on upload tells the students it is for. (A draft notifies when it is published.)
+    if (material.isPublished) {
+      await notifyQuietly(audienceForMaterial(material), { type: "MATERIAL", title: "New study material", message: `"${material.title}" is now available in Study Materials.` });
+    }
+
     return { ok: true, data: { id: material.id } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -202,6 +209,11 @@ export async function setMaterialPublished(materialId: string, isPublished: bool
       return { ok: false, error: "You can only publish/unpublish your own uploads." };
     }
     await prisma.studyMaterial.update({ where: { id: materialId }, data: { isPublished } });
+    await logAudit(session.id, "USER_UPDATE", `StudyMaterial:${materialId}`, `Material ${isPublished ? "published" : "unpublished"}: "${material.title}"`);
+    // Only the switch from draft to published tells students; toggling an already-published item does not repeat it.
+    if (isPublished && !material.isPublished) {
+      await notifyQuietly(audienceForMaterial(material), { type: "MATERIAL", title: "New study material", message: `"${material.title}" is now available in Study Materials.` });
+    }
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -282,7 +294,14 @@ export async function listMaterialsForStudent() {
   if (!student?.schoolClassId || !student.schoolId) return [];
 
   return prisma.studyMaterial.findMany({
-    where: { schoolId: student.schoolId, schoolClassId: student.schoolClassId, boardId: student.boardId ?? undefined, isPublished: true },
+    where: {
+      schoolId: student.schoolId,
+      schoolClassId: student.schoolClassId,
+      boardId: student.boardId ?? undefined,
+      isPublished: true,
+      // A subject an administrator has hidden for this class is not part of the student's curriculum, so neither are its materials.
+      subject: { schoolClassLinks: { some: { schoolClassId: student.schoolClassId, isEnabled: true } } },
+    },
     include: { subject: true, chapter: true, topic: true },
     orderBy: [{ subject: { name: "asc" } }, { chapter: { order: "asc" } }],
   });

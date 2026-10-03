@@ -34,7 +34,14 @@ async function requireStudentScope() {
 
 /** Published materials of the student's own school + class, optionally narrowed. */
 function materialsWhere(student: { schoolId: string | null; schoolClassId: string | null }, extra: Record<string, unknown> = {}) {
-  return { schoolId: student.schoolId ?? "__none__", schoolClassId: student.schoolClassId ?? "__none__", isPublished: true, ...extra };
+  return {
+    schoolId: student.schoolId ?? "__none__",
+    schoolClassId: student.schoolClassId ?? "__none__",
+    isPublished: true,
+    // Materials of a subject hidden for this class are not part of the student's curriculum.
+    subject: { schoolClassLinks: { some: { schoolClassId: student.schoolClassId ?? "__none__", isEnabled: true } } },
+    ...extra,
+  };
 }
 
 async function isSubjectInMyClass(schoolClassId: string, subjectId: string) {

@@ -5,6 +5,7 @@
 import { Topbar } from "@/components/layout/topbar";
 import { WelcomeBanner } from "@/components/dashboard/welcome-banner";
 import { RealDataSection } from "@/components/dashboard/real-data-section";
+import { PlacementNotice } from "@/components/dashboard/placement-notice";
 
 export default async function DashboardPage() {
   return (
@@ -12,6 +13,7 @@ export default async function DashboardPage() {
       <Topbar title="Dashboard" />
       <main className="flex-1 space-y-6 p-4 sm:p-6">
         <WelcomeBanner />
+        <PlacementNotice />
         <RealDataSection />
       </main>
     </>

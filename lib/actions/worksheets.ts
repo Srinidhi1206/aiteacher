@@ -6,6 +6,8 @@
 // hidden in the UI.
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
+import { notifyQuietly, audienceForClassInSchool } from "@/lib/notifications/core";
 import { getCurrentSession, requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
 import type { ActionResult } from "./materials";
@@ -49,7 +51,7 @@ export async function createWorksheet(input: unknown, file?: File | null): Promi
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
     const data = parsed.data;
 
-    const { teacher } = await requireOwnedTeacherAssignment(data.schoolClassId, data.subjectId);
+    const { session, teacher } = await requireOwnedTeacherAssignment(data.schoolClassId, data.subjectId);
 
     let fileUrl: string | undefined;
     let storageKey: string | undefined;
@@ -90,6 +92,7 @@ export async function createWorksheet(input: unknown, file?: File | null): Promi
         dueDate: data.dueDate ? new Date(data.dueDate) : null,
       },
     });
+    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheet.id}`, `Assignment created (draft): "${worksheet.title}"`);
     return { ok: true, data: { id: worksheet.id } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -146,6 +149,14 @@ export async function setWorksheetPublished(worksheetId: string, isPublished: bo
     if (!worksheet) return { ok: false, error: "Worksheet not found." };
     if (worksheet.teacher.userId !== session.id) return { ok: false, error: "You can only publish/unpublish your own worksheets." };
     await prisma.worksheet.update({ where: { id: worksheetId }, data: { isPublished } });
+    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheetId}`, `Assignment ${isPublished ? "published" : "unpublished"}: "${worksheet.title}"`);
+    if (isPublished && !worksheet.isPublished && worksheet.teacher.schoolId) {
+      await notifyQuietly(audienceForClassInSchool({ schoolId: worksheet.teacher.schoolId, schoolClassId: worksheet.schoolClassId }), {
+        type: "ASSIGNMENT",
+        title: "New assignment",
+        message: `"${worksheet.title}"${worksheet.dueDate ? ` - due ${worksheet.dueDate.toISOString().slice(0, 10)}` : ""}.`,
+      });
+    }
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -167,6 +178,7 @@ export async function deleteWorksheet(worksheetId: string): Promise<ActionResult
       }
     }
     await prisma.worksheet.delete({ where: { id: worksheetId } });
+    await logAudit(session.id, "USER_UPDATE", `Worksheet:${worksheetId}`, `Assignment deleted: "${worksheet.title}"`);
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };

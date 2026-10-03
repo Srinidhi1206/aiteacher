@@ -12,6 +12,8 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { requireAdminActor } from "./user-management";
+import { logAudit } from "@/lib/audit";
+import { notifyQuietly, audienceForSchedule } from "@/lib/notifications/core";
 import type { ActionResult } from "./materials";
 
 const scheduleInputSchema = z.object({
@@ -45,8 +47,10 @@ async function loadManageableSchedule(scheduleId: string) {
 export async function createExamSchedule(input: unknown): Promise<ActionResult<{ id: string }>> {
   try {
     const actor = await requireAdminActor();
-    if (!actor.isSuperAdmin && !actor.schoolId) {
-      return { ok: false, error: "Your account isn't associated with a school, so it can't schedule exams. Contact the super administrator." };
+    // A schedule belongs to the school of the admin who creates it (that is how students are matched to it), so an
+    // administrator without a school - including the super administrator - cannot create one: nobody could ever see it.
+    if (!actor.schoolId) {
+      return { ok: false, error: "Exam schedules belong to a school. Sign in as a school administrator to schedule an exam." };
     }
     const parsed = scheduleInputSchema.safeParse(input);
     if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
@@ -83,9 +87,17 @@ export async function setExamSchedulePublished(scheduleId: string, isPublished: 
         userId: found.actor.userId,
         action: isPublished ? "EXAM_PUBLISH" : "EXAM_UNPUBLISH",
         resource: `ExamSchedule:${scheduleId}`,
-        message: `${isPublished ? "Published" : "Unpublished"} exam schedule`,
+        message: `${isPublished ? "Published" : "Unpublished"} exam schedule "${found.schedule.name}"`,
       },
     });
+    const ownerSchoolId = found.schedule.createdBy?.admin?.schoolId ?? null;
+    if (isPublished && !found.schedule.isPublished && ownerSchoolId) {
+      await notifyQuietly(audienceForSchedule({ schoolId: ownerSchoolId, boardId: found.schedule.boardId, schoolClassId: found.schedule.schoolClassId }), {
+        type: "EXAM",
+        title: "Exam scheduled",
+        message: `${found.schedule.name} - ${found.schedule.subjectName} on ${found.schedule.examDate.toISOString().slice(0, 10)}.`,
+      });
+    }
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -98,6 +110,7 @@ export async function deleteExamSchedule(scheduleId: string): Promise<ActionResu
     const found = await loadManageableSchedule(scheduleId);
     if (!found) return { ok: false, error: "Exam schedule not found." };
     await prisma.examSchedule.delete({ where: { id: scheduleId } });
+    await logAudit(found.actor.userId, "USER_UPDATE", `ExamSchedule:${scheduleId}`, `Deleted exam schedule "${found.schedule.name}"`);
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };

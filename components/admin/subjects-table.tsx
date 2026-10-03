@@ -295,7 +295,7 @@ export function SubjectsTable() {
       </CardHeader>
       <CardContent className="space-y-5">
         {dbUnavailable ? (
-          <p className="py-4 text-center text-sm text-gray-400">Curriculum needs a connected database. Set DATABASE_URL (see docs/DATABASE.md).</p>
+          <p className="py-4 text-center text-sm text-gray-400">The curriculum couldn&apos;t be loaded right now. Refresh the page in a moment.</p>
         ) : (
           <>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

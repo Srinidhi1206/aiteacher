@@ -15,8 +15,10 @@ import { isKnownDefaultPassword } from "@/lib/auth/known-defaults";
 export interface MyAccount {
   name: string;
   username: string;
+  email: string;
   role: "admin" | "teacher" | "student";
   schoolName: string | null;
+  stateName: string | null;
   boardName: string | null;
   className: string | null;
 }
@@ -29,8 +31,9 @@ export async function getMyAccount(): Promise<MyAccount> {
     select: {
       name: true,
       username: true,
+      email: true,
       role: true,
-      student: { select: { school: { select: { name: true } }, schoolClass: { select: { label: true, board: { select: { shortName: true } } } } } },
+      student: { select: { school: { select: { name: true } }, state: { select: { name: true } }, schoolClass: { select: { label: true, board: { select: { shortName: true } } } } } },
       teacher: { select: { school: { select: { name: true, board: { select: { shortName: true } } } } } },
       admin: { select: { school: { select: { name: true, board: { select: { shortName: true } } } } } },
     },
@@ -39,8 +42,10 @@ export async function getMyAccount(): Promise<MyAccount> {
   return {
     name: user.name,
     username: user.username,
+    email: user.email,
     role: session.role,
     schoolName: user.student?.school?.name ?? user.teacher?.school?.name ?? user.admin?.school?.name ?? null,
+    stateName: user.student?.state?.name ?? null,
     boardName: user.student?.schoolClass?.board.shortName ?? user.teacher?.school?.board?.shortName ?? user.admin?.school?.board?.shortName ?? null,
     className: user.student?.schoolClass?.label ?? null,
   };

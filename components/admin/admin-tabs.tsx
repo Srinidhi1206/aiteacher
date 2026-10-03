@@ -15,6 +15,7 @@ import { LogsTable } from "@/components/admin/logs-table";
 import { StudyMaterialsCard } from "@/components/admin/study-materials-card";
 import { ExamScheduleCard } from "@/components/admin/exam-schedule-card";
 import { SchoolsPanel } from "@/components/admin/schools-panel";
+import { AcademicsOverview } from "@/components/admin/academics-overview";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 
 export function AdminTabs() {
@@ -33,6 +34,7 @@ export function AdminTabs() {
         <TabsTrigger value="users">Users</TabsTrigger>
         <TabsTrigger value="subjects">Subjects &amp; Curriculum</TabsTrigger>
         <TabsTrigger value="materials">Study Materials</TabsTrigger>
+        <TabsTrigger value="academics">Exams &amp; Assignments</TabsTrigger>
         <TabsTrigger value="exam-schedule">Exam Schedule</TabsTrigger>
         <TabsTrigger value="logs">Logs</TabsTrigger>
       </TabsList>
@@ -53,6 +55,9 @@ export function AdminTabs() {
       </TabsContent>
       <TabsContent value="materials">
         <StudyMaterialsCard />
+      </TabsContent>
+      <TabsContent value="academics">
+        <AcademicsOverview />
       </TabsContent>
       <TabsContent value="exam-schedule">
         <ExamScheduleCard />
