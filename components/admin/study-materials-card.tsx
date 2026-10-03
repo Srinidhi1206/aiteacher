@@ -63,6 +63,7 @@ export function StudyMaterialsCard() {
   const [dbUnavailable, setDbUnavailable] = React.useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = React.useState<string | null>(null);
   const [indexingId, setIndexingId] = React.useState<string | null>(null);
+  const [indexProgress, setIndexProgress] = React.useState<{ done: number; total: number } | null>(null);
   // Materials belong to a school. A school administrator always uploads to their own school. The
   // platform super administrator is not attached to one, so they choose an existing school instead.
   // Any other admin with no school has nothing to upload to - say so instead of showing a form that
@@ -235,9 +236,20 @@ export function StudyMaterialsCard() {
 
   async function runIndex(id: string, materialTitle: string) {
     setIndexingId(id);
-    const res = await indexMaterial(id);
+    setIndexProgress(null);
+    let res = await indexMaterial(id);
+    // A long book takes several calls because the AI provider limits how many passages it processes
+    // per minute; each call saves what it finished, so keep going until it reports complete.
+    for (let round = 0; round < 30 && res.ok && res.data && !res.data.complete; round++) {
+      const { chunks, total, waitMs } = res.data;
+      setIndexProgress({ done: chunks, total });
+      await new Promise((r) => setTimeout(r, waitMs));
+      res = await indexMaterial(id);
+    }
     setIndexingId(null);
-    if (res.ok) showToast("AI Tutor can now use this material", `"${materialTitle}" was indexed (${res.data?.chunks ?? 0} passages).`);
+    setIndexProgress(null);
+    if (res.ok && res.data?.complete) showToast("AI Tutor can now use this material", `"${materialTitle}" was indexed (${res.data.chunks} passages).`);
+    else if (res.ok) showToast("Indexing is not finished yet", "Click \"Index for AI Tutor\" again to continue.");
     else showToast("Could not index for the AI Tutor", res.error ?? "");
     refreshMaterials();
   }
@@ -495,6 +507,7 @@ export function StudyMaterialsCard() {
                         {indexingId === m.id ? (
                           <span className="flex items-center gap-1 text-gray-500">
                             <Loader2 className="h-3 w-3 animate-spin" /> Indexing for the AI Tutor...
+                            {indexProgress ? ` ${indexProgress.done} of ${indexProgress.total} passages` : ""}
                           </span>
                         ) : m.indexedAt ? (
                           <span className="flex items-center gap-1 text-success-600 dark:text-success-400">

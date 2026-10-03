@@ -74,6 +74,34 @@ async function embedBatch(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "RET
   throw lastError instanceof Error ? lastError : new Error("Embedding failed.");
 }
 
+// Gemini's free tier allows 100 embedding requests per minute per project and model, and every text in
+// a batch counts as one. Indexing paces itself to stay under that (override with GEMINI_EMBED_PER_MINUTE
+// on a paid plan) instead of firing every batch at once and being refused.
+export const EMBED_PER_MINUTE = Math.max(10, Number(process.env.GEMINI_EMBED_PER_MINUTE) || 90);
+export const INDEX_BATCH_SIZE = 30;
+
+export interface EmbeddingFailure {
+  status: number | null;
+  category: "quota" | "auth" | "bad_request" | "server" | "timeout" | "unknown";
+  /** How long the provider asked us to wait before retrying, when it said. */
+  retryAfterMs: number | null;
+}
+
+/** Classifies an embedding error into safe metadata only - never the raw message, which could echo request details. */
+export function describeEmbeddingError(err: unknown): EmbeddingFailure {
+  const e = err as { status?: unknown; name?: unknown; message?: unknown } | null;
+  const status = typeof e?.status === "number" ? e.status : null;
+  const message = typeof e?.message === "string" ? e.message : "";
+  const retry = /retry in ([\d.]+)\s*s/i.exec(message);
+  const retryAfterMs = retry ? Math.ceil(Number(retry[1]) * 1000) : null;
+  if (status === 429) return { status, category: "quota", retryAfterMs };
+  if (status === 401 || status === 403) return { status, category: "auth", retryAfterMs: null };
+  if (status !== null && status >= 400 && status < 500) return { status, category: "bad_request", retryAfterMs: null };
+  if (status !== null && status >= 500) return { status, category: "server", retryAfterMs: null };
+  if (e?.name === "TimeoutError" || e?.name === "AbortError") return { status, category: "timeout", retryAfterMs: null };
+  return { status, category: "unknown", retryAfterMs: null };
+}
+
 export async function embedTexts(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY"): Promise<number[][]> {
   const out: number[][] = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
