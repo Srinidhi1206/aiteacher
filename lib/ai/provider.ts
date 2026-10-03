@@ -23,6 +23,16 @@ function envMs(name: string, fallback: number): number {
   return Number.isFinite(n) && n >= 5_000 ? n : fallback;
 }
 const DEFAULT_GEMINI_MODEL = "gemini-flash-latest"; // "gemini-2.5-flash" has been retired by Google (404)
+// Tried in this order after the configured/default model fails as unavailable. Override with GEMINI_FALLBACK_MODELS
+// (comma-separated); set it to a single space-free "none" to disable the fallback.
+const DEFAULT_FALLBACK_MODELS = ["gemini-3.6-flash", "gemini-2.5-flash"];
+
+function geminiModelChain(): string[] {
+  const primary = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+  const raw = process.env.GEMINI_FALLBACK_MODELS?.trim();
+  const fallbacks = raw === "none" ? [] : raw ? raw.split(",").map((m) => m.trim()).filter(Boolean) : DEFAULT_FALLBACK_MODELS;
+  return [primary, ...fallbacks.filter((m) => m !== primary)];
+}
 
 /**
  * Renders the assembled student context (lib/ai/context.ts) into plain
@@ -77,10 +87,15 @@ class GeminiProvider implements AIProvider {
     const thinkingBudgetRaw = process.env.GEMINI_THINKING_BUDGET;
     const thinkingBudget = thinkingBudgetRaw !== undefined && thinkingBudgetRaw.trim() !== "" && Number.isInteger(Number(thinkingBudgetRaw)) ? Number(thinkingBudgetRaw) : undefined;
 
+    // The first model that answers wins. Google rejects individual models for hours at a time ("high demand" 503,
+    // a retired name 404, or that model's own daily quota 429 - each model has its own bucket), so when the
+    // preferred model fails like that the next one is tried straight away instead of failing the student's question.
+    const models = geminiModelChain();
+
     try {
-      const generate = () =>
+      const generate = (model: string) =>
         ai.models.generateContent({
-          model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+          model,
           contents: toGeminiContents(request.messages, request.userMessage),
           config: {
             systemInstruction: request.systemPrompt + formatContextBlock(request.studentContext),
@@ -96,12 +111,21 @@ class GeminiProvider implements AIProvider {
       // burns more of the quota.
       let response;
       const RETRY_DELAYS_MS = [1500, 3500]; // up to two retries, only for transient server-side errors
+      let modelIndex = 0;
       for (let attempt = 0; ; attempt++) {
         try {
-          response = await generate();
+          response = await generate(models[modelIndex]);
           break;
         } catch (transient) {
           const transientStatus = (transient as { status?: number } | null)?.status;
+          // Another model is available and this one is overloaded, retired or out of its own quota: switch, no waiting.
+          if (modelIndex < models.length - 1 && (transientStatus === 404 || transientStatus === 429 || transientStatus === 500 || transientStatus === 503 || transientStatus === 504)) {
+            // eslint-disable-next-line no-console
+            console.warn("[ai/provider] model unavailable, trying the next one", { status: transientStatus, model: models[modelIndex] });
+            modelIndex++;
+            attempt = -1; // the next model gets its own retries
+            continue;
+          }
           const retryable = transientStatus === 500 || transientStatus === 503 || transientStatus === 504;
           if (!retryable || attempt >= RETRY_DELAYS_MS.length) throw transient;
           // No point starting another attempt that cannot finish inside the overall cap.
