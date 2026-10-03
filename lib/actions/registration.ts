@@ -12,6 +12,7 @@
 //   7. writes an AuditLog entry.
 // Nothing here ever accepts `role` or `isSuperAdmin` as client input for
 // the admin-request path - the server hardcodes both.
+import { notifyAdminsQuietly } from "@/lib/notifications/core";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { hashPassword } from "@/lib/auth/password";
@@ -192,6 +193,10 @@ export async function registerStudent(input: unknown): Promise<ActionResult<{ us
       return newUser;
     });
 
+    await notifyAdminsQuietly(
+      { schoolId: data.schoolId || null },
+      { type: "SYSTEM", title: "New student registration", message: `${data.name} ("${data.username}") is waiting for approval.` }
+    );
     return { ok: true, data: { userId: user.id } };
   } catch (e) {
     if (isDuplicateAccountConstraintError(e)) return { ok: false, error: DUPLICATE_ACCOUNT_RACE_MESSAGE };
@@ -291,6 +296,10 @@ export async function registerTeacher(input: unknown): Promise<ActionResult<{ us
       return newUser;
     });
 
+    await notifyAdminsQuietly(
+      { schoolId: data.schoolId || null },
+      { type: "SYSTEM", title: "New teacher registration", message: `${data.name} ("${data.username}") is waiting for approval.` }
+    );
     return { ok: true, data: { userId: user.id } };
   } catch (e) {
     if (isDuplicateAccountConstraintError(e)) return { ok: false, error: DUPLICATE_ACCOUNT_RACE_MESSAGE };
@@ -420,6 +429,13 @@ export async function registerAdminRequest(input: unknown): Promise<ActionResult
       return newUser;
     });
 
+    if (!(AUTO_APPROVE_ADMIN_IN_DEV && !joinPending)) {
+      // Only a super administrator can approve another administrator.
+      await notifyAdminsQuietly(
+        { superOnly: true },
+        { type: "SYSTEM", title: "New administrator request", message: `${data.name} ("${data.username}") asked for admin access.` }
+      );
+    }
     return { ok: true, data: { userId: user.id, joinPending } };
   } catch (e) {
     if (isDuplicateAccountConstraintError(e)) return { ok: false, error: DUPLICATE_ACCOUNT_RACE_MESSAGE };

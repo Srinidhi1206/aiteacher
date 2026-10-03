@@ -1,7 +1,7 @@
 "use client";
-// The student's notification bell: an unread count and a short list of what is new (a published material, assignment,
-// exam, a graded exam). Shown to students only - they are the audience the app notifies. Backed by
-// lib/actions/notifications.ts; opening the list marks it read.
+// The notification bell: an unread count and a short list of what is new. Students are told about published materials,
+// assignments, exams and grades; teachers about work handed in; administrators about registrations waiting for approval.
+// Backed by lib/actions/notifications.ts (which only ever returns the caller's own rows); opening the list marks it read.
 import * as React from "react";
 import Link from "next/link";
 import { Bell, FileText, ClipboardList, FileEdit, Award, Info } from "lucide-react";
@@ -10,14 +10,23 @@ import { getMyNotifications, markMyNotificationsRead, type MyNotification } from
 import { useSessionUser } from "@/components/layout/session-user-context";
 
 const ICONS: Record<string, React.ComponentType<{ className?: string }>> = { MATERIAL: FileText, ASSIGNMENT: ClipboardList, EXAM: FileEdit, GRADE: Award };
-const LINKS: Record<string, string> = { MATERIAL: "/materials", ASSIGNMENT: "/assignments", EXAM: "/exams", GRADE: "/results" };
+const LINKS_BY_ROLE: Record<string, Record<string, string>> = {
+  student: { MATERIAL: "/materials", ASSIGNMENT: "/assignments", EXAM: "/exams", GRADE: "/results" },
+  teacher: { ASSIGNMENT: "/teacher/worksheets", EXAM: "/teacher/exams" },
+  admin: { SYSTEM: "/admin" },
+};
+const EMPTY_BY_ROLE: Record<string, string> = {
+  student: "Nothing new yet. New study materials, assignments and exams for your class will show up here.",
+  teacher: "Nothing new yet. You'll be told here when a student hands in an assignment or submits an exam.",
+  admin: "Nothing new yet. You'll be told here when a registration is waiting for your approval.",
+};
 
 export function NotificationBell() {
   const user = useSessionUser();
   const [data, setData] = React.useState<{ unread: number; items: MyNotification[] } | null>(null);
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef<HTMLDivElement>(null);
-  const isStudent = user?.role === "student";
+  const role = user?.role && LINKS_BY_ROLE[user.role] ? user.role : null;
 
   const load = React.useCallback(() => {
     getMyNotifications()
@@ -26,11 +35,11 @@ export function NotificationBell() {
   }, []);
 
   React.useEffect(() => {
-    if (!isStudent) return;
+    if (!role) return;
     load();
     const t = setInterval(load, 120_000); // quietly pick up new items while the page is open
     return () => clearInterval(t);
-  }, [isStudent, load]);
+  }, [role, load]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -46,7 +55,7 @@ export function NotificationBell() {
     };
   }, [open]);
 
-  if (!isStudent) return null;
+  if (!role) return null;
   const unread = data?.unread ?? 0;
 
   async function toggle() {
@@ -84,7 +93,7 @@ export function NotificationBell() {
           {data === null ? (
             <p className="px-4 py-6 text-center text-sm text-gray-400">Loading...</p>
           ) : data.items.length === 0 ? (
-            <p className="px-4 py-6 text-center text-sm text-gray-400">Nothing new yet. New study materials, assignments and exams for your class will show up here.</p>
+            <p className="px-4 py-6 text-center text-sm text-gray-400">{EMPTY_BY_ROLE[role]}</p>
           ) : (
             <ul className="max-h-80 divide-y divide-gray-50 overflow-y-auto dark:divide-gray-800">
               {data.items.map((n) => {
@@ -104,7 +113,7 @@ export function NotificationBell() {
                     </span>
                   </div>
                 );
-                const href = LINKS[n.type];
+                const href = LINKS_BY_ROLE[role][n.type];
                 return (
                   <li key={n.id}>
                     {href ? (

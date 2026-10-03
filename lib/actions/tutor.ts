@@ -13,6 +13,7 @@ import { requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/curre
 import { AIError, getAIProvider, getPromptTemplate, interpolate, buildStudentContext, getStudentPerformanceContext } from "@/lib/ai";
 import { checkTutorRateLimit } from "@/lib/ai/rate-limit";
 import { retrieveForStudent, type RetrievedPassage, type RetrievalStats } from "@/lib/rag";
+import { isStructureQuestion, isStructureOnlyQuestion, loadOutline, outlinePromptBlock } from "@/lib/rag/outline";
 import type { AIChatMessage, AIStudentContext } from "@/lib/ai/types";
 import type { ActionResult } from "./materials";
 
@@ -278,9 +279,22 @@ async function generateAndPersistReply(
     where: { id: conversationId },
     select: { studentId: true, student: { select: { schoolId: true, schoolClassId: true, boardId: true } } },
   });
+  // Questions about the book's STRUCTURE ("what is the first lesson?", "how many units?") are answered from the course
+  // outline an administrator set up - similarity search over page text cannot order or count anything. When the question
+  // is only about structure, no passages are fetched at all (which also spares the embedding quota).
+  let outlineText = "";
+  if (owner?.student.schoolClassId && isStructureQuestion(lastUserMessage.content)) {
+    try {
+      outlineText = await loadOutline(prisma, owner.student.schoolClassId);
+    } catch (err) {
+      console.error("[tutor] could not load the course outline", (err as Error)?.message);
+    }
+  }
+  const outlineOnly = outlineText !== "" && isStructureOnlyQuestion(lastUserMessage.content);
+
   let passages: RetrievedPassage[] = [];
   try {
-    if (owner) {
+    if (owner && !outlineOnly) {
       const stats: { out?: RetrievalStats } = {};
       passages = await retrieveForStudent(owner.student, lastUserMessage.content, 4, stats);
       // Counts and timings only - never the question or any passage text.
@@ -302,7 +316,7 @@ async function generateAndPersistReply(
       console.error("[tutor] could not refresh learning context", (err as Error)?.message); // keep the snapshot
     }
   }
-  const systemPrompt = (await buildSystemPrompt(liveContext)) + buildMaterialsBlock(passages);
+  const systemPrompt = (await buildSystemPrompt(liveContext)) + buildMaterialsBlock(passages) + outlinePromptBlock(outlineText);
 
   let result;
   try {
@@ -324,7 +338,10 @@ async function generateAndPersistReply(
     // The model sometimes writes its own "Sources:" line, which may not match the
     // materials actually retrieved. Drop it and show the authoritative one only.
     replyText = replyText.replace(/^[ \t]*[*_]*sources?:[*_]*[^\n]*\n?/gim, "").trim();
-    replyText += `\n\nSources: ${sourcesLine(passages)}`;
+    replyText += `\n\nSources: ${sourcesLine(passages)}${outlineText ? "; Course outline for your class" : ""}`;
+  } else if (outlineText) {
+    replyText = replyText.replace(/^[ \t]*[*_]*sources?:[*_]*[^\n]*\n?/gim, "").trim();
+    replyText += "\n\nSources: Course outline for your class";
   }
 
   const assistantMessage = await prisma.aIMessage.create({

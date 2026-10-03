@@ -7,7 +7,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { notifyQuietly, audienceForClassInSchool } from "@/lib/notifications/core";
+import { notifyQuietly, notifyUserQuietly, audienceForClassInSchool } from "@/lib/notifications/core";
 import { getCurrentSession, requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
 import type { ActionResult } from "./materials";
@@ -219,7 +219,7 @@ export async function submitWorksheet(worksheetId: string): Promise<ActionResult
     const student = await prisma.student.findUnique({ where: { userId: session.id } });
     if (!student) return { ok: false, error: "Student profile not found." };
 
-    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: { select: { schoolId: true } } } });
+    const worksheet = await prisma.worksheet.findUnique({ where: { id: worksheetId }, include: { teacher: { select: { schoolId: true, userId: true } } } });
     if (
       !worksheet ||
       !worksheet.isPublished ||
@@ -240,6 +240,14 @@ export async function submitWorksheet(worksheetId: string): Promise<ActionResult
       update: { submittedAt: new Date() },
       create: { worksheetId, studentId: student.id, submittedAt: new Date() },
     });
+    // Tell the teacher who set it - once, the first time this student hands it in (a re-submit is not news).
+    if (!existing?.submittedAt) {
+      await notifyUserQuietly(worksheet.teacher.userId, {
+        type: "ASSIGNMENT",
+        title: "Assignment handed in",
+        message: `${session.name} handed in "${worksheet.title}".`,
+      });
+    }
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
@@ -337,6 +345,14 @@ export async function gradeWorksheetSubmission(
       where: { id: submissionId },
       data: { score, maxScore, feedback },
     });
+    const graded = await prisma.student.findUnique({ where: { id: submission.studentId }, select: { userId: true } });
+    if (graded) {
+      await notifyUserQuietly(graded.userId, {
+        type: "GRADE",
+        title: "Assignment graded",
+        message: `Your assignment "${submission.worksheet.title}" was graded: ${score}/${maxScore}.`,
+      });
+    }
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };

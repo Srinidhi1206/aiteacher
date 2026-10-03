@@ -9,7 +9,7 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
-import { extractContentTerms, isDefinitionQuery, rankLexical, fuseResults } from "@/lib/rag/lexical";
+import { extractContentTerms, isDefinitionQuery, rankLexical, fuseResults, limitPerPage } from "@/lib/rag/lexical";
 import { studentMaterialWhere, studentChunkWhere } from "@/lib/materials/scope";
 
 // Configurable like GEMINI_MODEL; the stored vectors are 768-dimensional, so only change it to a
@@ -279,14 +279,19 @@ export async function retrieveForStudent(scope: RetrievalScope, question: string
   }
   const tSemantic = Date.now();
 
+  // With the meaning-based search unavailable there is nothing else to lean on, so let any word of the question
+  // that occurs in the material - not only the rare ones - identify passages (ranked by rarity).
+  const keywordHits = needSemantic && semantic.length === 0 ? rankLexical(entry.passages, terms, definition, { relaxed: true }) : lexical;
+
   const byId = new Map(entry.passages.map((p) => [p.id, p]));
-  const fused = fuseResults(lexical, semantic, { k, definition });
+  // Fuse more than needed, then keep at most two passages per page so one page cannot crowd out the rest of the book.
+  const fused = limitPerPage(fuseResults(keywordHits, semantic, { k: k * 3, definition }), (id) => byId.get(id)?.page ?? null, 2, k);
   if (stats) {
     stats.out = {
       passagesInScope: entry.passages.length,
       cacheHit,
       keywordTerms: terms.length,
-      keywordHits: lexical.length,
+      keywordHits: keywordHits.length,
       usedSemantic: needSemantic,
       vectorsLoaded,
       ms: { scope: tScope - t0, keyword: tKeyword - tScope, semantic: tSemantic - tKeyword, total: tSemantic - t0 },

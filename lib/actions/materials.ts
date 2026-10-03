@@ -12,6 +12,7 @@ import { checkMaterialPlacement } from "@/lib/materials/placement";
 import { logAudit } from "@/lib/audit";
 import { notifyQuietly, audienceForMaterial } from "@/lib/notifications/core";
 import { studentMaterialWhere } from "@/lib/materials/scope";
+import { changeMaterialScopeCore } from "@/lib/materials/share";
 import { resolveActorSchool as resolveActorSchoolFor, actorMayManageMaterial as actorMayManageMaterialFor, resolveMaterialTarget } from "@/lib/materials/owner";
 
 const materialInputSchema = z.object({
@@ -168,6 +169,29 @@ export async function setMaterialPublished(materialId: string, isPublished: bool
       await notifyQuietly(audienceForMaterial(material), { type: "MATERIAL", title: "New study material", message: `"${material.title}" is now available in Study Materials.` });
     }
     return { ok: true };
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    throw e;
+  }
+}
+
+/**
+ * Super administrator only: shares an existing material with every school on its board + class ("common"), or hands it
+ * back to one school. The file, its indexed passages and its publish state are untouched - only who owns it changes, so
+ * the same textbook never has to be uploaded (or indexed, which costs embedding quota) once per school.
+ */
+export async function setMaterialScope(materialId: string, target: { common: true } | { schoolId: string }): Promise<ActionResult<{ message: string }>> {
+  try {
+    const session = await requireAdminOrTeacher();
+    const admin = session.role === "admin" ? await prisma.admin.findUnique({ where: { userId: session.id }, select: { isSuperAdmin: true } }) : null;
+    if (admin?.isSuperAdmin !== true) return { ok: false, error: "Only the super administrator can share a material with every school." };
+
+    const result = await changeMaterialScopeCore(prisma, materialId, target);
+    if (!result.ok) return { ok: false, error: result.error };
+
+    const where = result.to === null ? "now shared with every school on its board and class" : "now private to one school";
+    await logAudit(session.id, "USER_UPDATE", `StudyMaterial:${materialId}`, `Material ${where}: "${result.title}" (${result.passages} indexed passages moved with it)`);
+    return { ok: true, data: { message: `"${result.title}" is ${where}.` } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
     throw e;

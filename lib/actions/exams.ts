@@ -591,6 +591,17 @@ export async function submitExam(submissionId: string): Promise<ActionResult> {
 
     if (!hasSubjective) await refreshStudentAnalytics(student.id);
 
+    // Tell the teacher who set the exam that it is in (and, if it has written answers, that it needs marking).
+    const author = await prisma.teacher.findUnique({ where: { id: submission.exam.teacherId }, select: { userId: true } });
+    if (author) {
+      const who = await prisma.user.findUnique({ where: { id: student.userId }, select: { name: true } });
+      await notifyUserQuietly(author.userId, {
+        type: "EXAM",
+        title: hasSubjective ? "Exam submitted - needs marking" : "Exam submitted",
+        message: `${who?.name ?? "A student"} submitted "${submission.exam.title}".`,
+      });
+    }
+
     return { ok: true };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };

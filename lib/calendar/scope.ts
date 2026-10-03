@@ -29,3 +29,29 @@ export function studentAcademicEventWhere(student: StudentCalendarScope): Prisma
     ],
   };
 }
+
+export interface TeacherCalendarScope {
+  schoolId: string | null;
+  /** The board + class of every class the teacher is assigned to teach. */
+  classes: { boardId: string; schoolClassId: string }[];
+}
+
+/**
+ * Which academic-calendar events a teacher sees: published ones that apply to their own school (or to every school),
+ * and either to everyone (no board/class set) or to a board + class they are assigned to teach. The same scope columns
+ * and NULL-means-all rule as for students, applied once per assigned class. A teacher without a school sees nothing,
+ * just as a student without one does.
+ */
+export function teacherAcademicEventWhere(teacher: TeacherCalendarScope): Prisma.AcademicEventWhereInput | null {
+  if (!teacher.schoolId) return null;
+  const forClass = (c: { boardId: string; schoolClassId: string }): Prisma.AcademicEventWhereInput => ({
+    AND: [{ OR: [{ boardId: null }, { boardId: c.boardId }] }, { OR: [{ schoolClassId: null }, { schoolClassId: c.schoolClassId }] }],
+  });
+  return {
+    isPublished: true,
+    AND: [
+      { OR: [{ schoolId: null }, { schoolId: teacher.schoolId }] },
+      { OR: [{ boardId: null, schoolClassId: null }, ...teacher.classes.map(forClass)] },
+    ],
+  };
+}

@@ -6,14 +6,17 @@
 //                              because a student without a school sees no materials yet);
 //   - an assignment / exam  -> students of that class in the author's school;
 //   - an exam schedule      -> students of that board + class in the scheduling admin's school;
-//   - a graded exam         -> that one student.
+//   - a graded exam or assignment -> that one student;
+//   - a student handing in an assignment / exam -> the one teacher who set it;
+//   - a registration waiting for approval -> the administrators who may approve it (the super administrators, plus the
+//                              administrators of the school the applicant named).
 // Only ACTIVE students are notified. Fan-out is capped, and a failure here must never fail the publish that triggered it
 // (callers use notifyQuietly).
 import type { NotificationType, Prisma } from "@prisma/client";
 import type { prisma } from "@/lib/prisma";
 import { prisma as client } from "@/lib/prisma";
 
-export type NotifyDb = Pick<typeof prisma, "student" | "notification">;
+export type NotifyDb = Pick<typeof prisma, "student" | "admin" | "notification">;
 export interface NotificationContent {
   type: NotificationType;
   title: string;
@@ -48,6 +51,30 @@ export async function notifyStudents(db: NotifyDb, audience: Prisma.StudentWhere
   return res.count;
 }
 
+/**
+ * Notifies the ACTIVE administrators who may act on something: every super administrator, plus - unless `superOnly` -
+ * the administrators of `schoolId`. A school administrator is never told about another school's business.
+ */
+export async function notifyAdmins(
+  db: NotifyDb,
+  scope: { schoolId?: string | null; superOnly?: boolean },
+  content: NotificationContent
+): Promise<number> {
+  const admins = await db.admin.findMany({
+    where: {
+      user: { status: "ACTIVE" },
+      OR: [{ isSuperAdmin: true }, ...(!scope.superOnly && scope.schoolId ? [{ schoolId: scope.schoolId }] : [])],
+    },
+    select: { userId: true },
+    take: 200,
+  });
+  if (admins.length === 0) return 0;
+  const res = await db.notification.createMany({
+    data: admins.map((a) => ({ userId: a.userId, type: content.type, title: content.title.slice(0, 120), message: content.message.slice(0, 400) })),
+  });
+  return res.count;
+}
+
 export async function notifyUser(db: NotifyDb, userId: string, content: NotificationContent): Promise<void> {
   await db.notification.create({ data: { userId, type: content.type, title: content.title.slice(0, 120), message: content.message.slice(0, 400) } });
 }
@@ -56,6 +83,14 @@ export async function notifyUser(db: NotifyDb, userId: string, content: Notifica
 export async function notifyQuietly(audience: Prisma.StudentWhereInput, content: NotificationContent): Promise<void> {
   try {
     await notifyStudents(client, audience, content);
+  } catch (err) {
+    console.error("[notifications] could not notify", (err as Error)?.name);
+  }
+}
+
+export async function notifyAdminsQuietly(scope: { schoolId?: string | null; superOnly?: boolean }, content: NotificationContent): Promise<void> {
+  try {
+    await notifyAdmins(client, scope, content);
   } catch (err) {
     console.error("[notifications] could not notify", (err as Error)?.name);
   }

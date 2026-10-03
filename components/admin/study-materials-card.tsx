@@ -15,7 +15,7 @@ import { useToast } from "@/components/ui/toast";
 import { inputClass, labelClass } from "@/components/register/field-styles";
 import { formatDate, cn } from "@/lib/utils";
 import { listStates, listBoards, listSchools, listSchoolClasses, listSubjectsForClass, listChaptersForSubject } from "@/lib/actions/curriculum";
-import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin } from "@/lib/actions/materials";
+import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin, setMaterialScope } from "@/lib/actions/materials";
 import { indexMaterial } from "@/lib/actions/material-index";
 import { parseIndexStatus } from "@/lib/rag/index-status";
 import { importMaterialFromUrl } from "@/lib/actions/material-import";
@@ -115,6 +115,9 @@ export function StudyMaterialsCard() {
   const [materials, setMaterials] = React.useState<MaterialRow[] | null>(null);
   const [dbUnavailable, setDbUnavailable] = React.useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = React.useState<string | null>(null);
+  // Super administrator only: the material whose "who owns this" control is open, and the school picked for it.
+  const [scopeEditId, setScopeEditId] = React.useState<string | null>(null);
+  const [scopeSchoolId, setScopeSchoolId] = React.useState("");
   const [indexingId, setIndexingId] = React.useState<string | null>(null);
   const [indexProgress, setIndexProgress] = React.useState<{ done: number; total: number | null } | null>(null);
   // Materials belong to a school. A school administrator always uploads to their own school. The
@@ -321,6 +324,18 @@ export function StudyMaterialsCard() {
       showToast("Could not update", result.error ?? "");
       return;
     }
+    refreshMaterials();
+  }
+
+  async function handleScope(m: MaterialRow, target: { common: true } | { schoolId: string }) {
+    const result = await setMaterialScope(m.id, target);
+    setScopeEditId(null);
+    setScopeSchoolId("");
+    if (!result.ok) {
+      showToast("Could not change who this belongs to", result.error ?? "");
+      return;
+    }
+    showToast(result.data?.message ?? "Updated");
     refreshMaterials();
   }
 
@@ -604,6 +619,64 @@ export function StudyMaterialsCard() {
                           </p>
                         );
                       })()}
+                      {isSuperAdmin && (
+                        <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                          {scopeEditId === m.id ? (
+                            m.school ? (
+                              <>
+                                <span>
+                                  Share with every school on {m.board.shortName} {m.schoolClass.label}? Students there will see it once it is published.
+                                </span>
+                                <button onClick={() => handleScope(m, { common: true })} className="font-semibold text-primary-600 hover:underline dark:text-primary-300">
+                                  Confirm
+                                </button>
+                                <button onClick={() => setScopeEditId(null)} className="hover:underline">
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <label className="sr-only" htmlFor={`scope-${m.id}`}>
+                                  School
+                                </label>
+                                <select
+                                  id={`scope-${m.id}`}
+                                  className="rounded-lg border border-gray-200 bg-white px-1.5 py-1 text-xs dark:border-gray-700 dark:bg-gray-900"
+                                  value={scopeSchoolId}
+                                  onChange={(e) => setScopeSchoolId(e.target.value)}
+                                >
+                                  <option value="">Choose a school</option>
+                                  {schools.map((sc) => (
+                                    <option key={sc.id} value={sc.id}>
+                                      {sc.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  disabled={!scopeSchoolId}
+                                  onClick={() => handleScope(m, { schoolId: scopeSchoolId })}
+                                  className="font-semibold text-primary-600 hover:underline disabled:opacity-40 dark:text-primary-300"
+                                >
+                                  Make private
+                                </button>
+                                <button onClick={() => setScopeEditId(null)} className="hover:underline">
+                                  Cancel
+                                </button>
+                              </>
+                            )
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setScopeEditId(m.id);
+                                setScopeSchoolId("");
+                              }}
+                              className="font-medium text-primary-600 hover:underline dark:text-primary-300"
+                            >
+                              {m.school ? "Share with all schools" : "Make private to one school"}
+                            </button>
+                          )}
+                        </p>
+                      )}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
