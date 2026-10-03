@@ -414,6 +414,58 @@ export async function resetUserPassword(userId: string): Promise<ActionResult<{ 
 }
 
 // ---------------------------------------------------------------------------
+// Assign (or move) an existing student to an existing school
+//
+// Registration is the only other place a student gets a school, and the field
+// is optional there, so a student can legitimately end up with none - which
+// hides every school-scoped item (materials, exams, schedules) from them. This
+// is the platform super administrator's way to attach such a student to a real,
+// already-existing school. It never creates a school, and it only ever changes
+// Student.schoolId - class, board and state stay exactly as the student chose.
+// ---------------------------------------------------------------------------
+
+export async function assignStudentSchool(userId: string, schoolId: string): Promise<ActionResult> {
+  try {
+    const actor = await requireAdminActor();
+    requireSuperAdmin(actor);
+
+    const target = await prisma.user.findUnique({
+      where: { id: userId },
+      omit: { passwordHash: true },
+      include: { student: { include: { school: true } } },
+    });
+    if (!target || target.role !== Role.STUDENT || !target.student) return { ok: false, error: "Student not found." };
+
+    const school = await prisma.school.findUnique({ where: { id: schoolId } });
+    if (!school) return { ok: false, error: "School not found." };
+    if (!school.isEnabled) return { ok: false, error: "That school is disabled." };
+    // A school with a board only teaches that board; attaching a student of another board would
+    // leave them with a school whose content they could never see.
+    if (school.boardId && target.student.boardId && school.boardId !== target.student.boardId) {
+      return { ok: false, error: "This student's board does not match the school's board." };
+    }
+    if (target.student.schoolId === school.id) return { ok: false, error: "The student is already in this school." };
+
+    const previous = target.student.school?.name ?? "no school";
+    await prisma.$transaction([
+      prisma.student.update({ where: { id: target.student.id }, data: { schoolId: school.id } }),
+      prisma.auditLog.create({
+        data: {
+          userId: actor.userId,
+          action: "USER_UPDATE",
+          resource: `Student:${target.student.id}`,
+          message: `School of "${target.username}" changed from ${previous} to "${school.name}"`,
+        },
+      }),
+    ]);
+    return { ok: true };
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // UI convenience only - lets the client show/hide admin-only controls. This
 // is NOT the authorization boundary; every mutation above re-checks
 // isSuperAdmin itself regardless of what the client was told here.
@@ -471,7 +523,7 @@ export async function listUsersForAdmin(filters?: { role?: Role; status?: "PENDI
         : {}),
     },
     include: {
-      student: { include: { schoolClass: true, board: true, state: true } },
+      student: { include: { schoolClass: true, board: true, state: true, school: true } },
       teacher: { include: { school: true, assignments: { include: { schoolClass: true, subject: true } } } },
       admin: true,
       registrationRequest: true,

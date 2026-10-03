@@ -18,6 +18,9 @@ const materialInputSchema = z.object({
   subjectId: z.string().min(1, "Subject is required"),
   chapterId: z.string().min(1, "Chapter is required"),
   topicId: z.string().optional(),
+  // Honoured ONLY for the platform super administrator (who belongs to no school and so must name
+  // one). For every other uploader the school is derived from their own profile and this is ignored.
+  schoolId: z.string().optional(),
 });
 
 export interface ActionResult<T = void> {
@@ -43,15 +46,36 @@ async function requireAdminOrTeacher() {
  * with no school set) - callers decide what "no school" means for their
  * case: reject a create, return an empty list, or deny a mutation.
  */
-async function resolveActorSchool(session: { id: string; role: string }): Promise<{ schoolId: string; boardId: string | null } | null> {
+async function resolveActorSchool(
+  session: { id: string; role: string },
+  requestedSchoolId?: string
+): Promise<{ schoolId: string; schoolName: string; boardId: string | null } | null> {
   if (session.role === "admin") {
     const admin = await prisma.admin.findUnique({ where: { userId: session.id }, include: { school: true } });
+    // The super administrator is platform-level: they may name any existing, enabled school.
+    // Anyone else's school always comes from their own row, never from the request.
+    if (admin?.isSuperAdmin && requestedSchoolId) {
+      const chosen = await prisma.school.findUnique({ where: { id: requestedSchoolId } });
+      if (!chosen || !chosen.isEnabled) return null;
+      return { schoolId: chosen.id, schoolName: chosen.name, boardId: chosen.boardId };
+    }
     if (!admin?.school) return null;
-    return { schoolId: admin.school.id, boardId: admin.school.boardId };
+    return { schoolId: admin.school.id, schoolName: admin.school.name, boardId: admin.school.boardId };
   }
   const teacher = await prisma.teacher.findUnique({ where: { userId: session.id }, include: { school: true } });
   if (!teacher?.school) return null;
-  return { schoolId: teacher.school.id, boardId: teacher.school.boardId };
+  return { schoolId: teacher.school.id, schoolName: teacher.school.name, boardId: teacher.school.boardId };
+}
+
+/** True when this actor may publish/unpublish/delete a material of `materialSchoolId`. */
+async function actorMayManageMaterial(session: { id: string; role: string }, materialSchoolId: string): Promise<boolean> {
+  if (session.role === "admin") {
+    const admin = await prisma.admin.findUnique({ where: { userId: session.id }, select: { isSuperAdmin: true, schoolId: true } });
+    if (!admin) return false;
+    return admin.isSuperAdmin || (admin.schoolId !== null && admin.schoolId === materialSchoolId);
+  }
+  const actorSchool = await resolveActorSchool(session);
+  return actorSchool !== null && actorSchool.schoolId === materialSchoolId;
 }
 
 /**
@@ -80,11 +104,13 @@ export async function createMaterial(
     // The material's school is always derived from the uploader's own
     // school - never accepted from the form/browser. An actor with no
     // school at all cannot create a material that would have no owner.
-    const actorSchool = await resolveActorSchool(session);
+    const actorSchool = await resolveActorSchool(session, data.schoolId);
     if (!actorSchool) {
       return {
         ok: false,
-        error: "Your account isn't associated with a school yet. Contact a super administrator before uploading materials.",
+        error: data.schoolId
+          ? "That school doesn't exist or is disabled."
+          : "Your account isn't associated with a school yet. Contact a super administrator before uploading materials.",
       };
     }
     // A school with a board already set only ever teaches that board - a
@@ -146,7 +172,7 @@ export async function createMaterial(
     });
 
     await prisma.auditLog.create({
-      data: { userId: session.id, action: "MATERIAL_UPLOAD", resource: `StudyMaterial:${material.id}`, message: `Uploaded "${material.title}"` },
+      data: { userId: session.id, action: "MATERIAL_UPLOAD", resource: `StudyMaterial:${material.id}`, message: `Uploaded "${material.title}" to ${actorSchool.schoolName}` },
     });
 
     return { ok: true, data: { id: material.id } };
@@ -159,12 +185,11 @@ export async function createMaterial(
 export async function setMaterialPublished(materialId: string, isPublished: boolean): Promise<ActionResult> {
   try {
     const session = await requireAdminOrTeacher();
-    const actorSchool = await resolveActorSchool(session);
     const material = await prisma.studyMaterial.findUnique({ where: { id: materialId } });
     // Deliberately the same "Material not found" message for a real
     // cross-school id as for a genuinely missing one - an admin/teacher
     // from another school shouldn't be able to tell the two apart.
-    if (!material || !actorSchool || material.schoolId !== actorSchool.schoolId) {
+    if (!material || !(await actorMayManageMaterial(session, material.schoolId))) {
       return { ok: false, error: "Material not found." };
     }
     if (session.role === "teacher" && material.uploadedByUserId !== session.id) {
@@ -181,9 +206,8 @@ export async function setMaterialPublished(materialId: string, isPublished: bool
 export async function deleteMaterial(materialId: string): Promise<ActionResult> {
   try {
     const session = await requireAdminOrTeacher();
-    const actorSchool = await resolveActorSchool(session);
     const material = await prisma.studyMaterial.findUnique({ where: { id: materialId } });
-    if (!material || !actorSchool || material.schoolId !== actorSchool.schoolId) {
+    if (!material || !(await actorMayManageMaterial(session, material.schoolId))) {
       return { ok: false, error: "Material not found." };
     }
     if (session.role === "teacher" && material.uploadedByUserId !== session.id) {
@@ -215,19 +239,24 @@ export async function deleteMaterial(materialId: string): Promise<ActionResult> 
  * An actor with no school sees an empty list rather than every school's
  * materials (the safe default, not a crash).
  */
-export async function listMaterialsForAdmin(filters?: { boardId?: string; schoolClassId?: string; subjectId?: string }) {
+export async function listMaterialsForAdmin(filters?: { boardId?: string; schoolClassId?: string; subjectId?: string; schoolId?: string }) {
   const session = await requireAdminOrTeacher();
-  const actorSchool = await resolveActorSchool(session);
-  if (!actorSchool) return [];
+  // The super administrator sees every school's materials (optionally narrowed to one school);
+  // everyone else is pinned to their own school and any schoolId filter is ignored.
+  const isSuperAdmin =
+    session.role === "admin" &&
+    (await prisma.admin.findUnique({ where: { userId: session.id }, select: { isSuperAdmin: true } }))?.isSuperAdmin === true;
+  const actorSchool = isSuperAdmin ? null : await resolveActorSchool(session);
+  if (!isSuperAdmin && !actorSchool) return [];
 
   return prisma.studyMaterial.findMany({
     where: {
-      schoolId: actorSchool.schoolId,
+      schoolId: isSuperAdmin ? filters?.schoolId : actorSchool!.schoolId,
       boardId: filters?.boardId,
       schoolClassId: filters?.schoolClassId,
       subjectId: filters?.subjectId,
     },
-    include: { board: true, schoolClass: true, subject: true, chapter: true, topic: true, uploadedBy: { omit: { passwordHash: true } }, _count: { select: { chunks: true } } },
+    include: { school: true, board: true, schoolClass: true, subject: true, chapter: true, topic: true, uploadedBy: { omit: { passwordHash: true } }, _count: { select: { chunks: true } } },
     orderBy: { uploadedAt: "desc" },
   });
 }

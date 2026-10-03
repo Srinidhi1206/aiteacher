@@ -7,7 +7,7 @@
 // actual authorization (e.g. "only a super admin may approve an admin") is
 // enforced server-side on every call, regardless of what this UI shows.
 import * as React from "react";
-import { Check, X, Ban, RotateCcw, ShieldAlert, Loader2, UserPlus, Copy, CheckCheck, KeyRound, BookUser } from "lucide-react";
+import { Check, X, Ban, RotateCcw, ShieldAlert, Loader2, UserPlus, Copy, CheckCheck, KeyRound, BookUser, School as SchoolIcon } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,7 @@ import {
   getMyAdminStatus,
   createStudent,
   resetUserPassword,
+  assignStudentSchool,
 } from "@/lib/actions/user-management";
 import { listAllBoardsWithClasses, listSchools, listSchoolClasses, listSubjectsForClass } from "@/lib/actions/curriculum";
 import {
@@ -96,6 +97,7 @@ export function UsersTable() {
   const [showCreateStudent, setShowCreateStudent] = React.useState(false);
   const [resetTarget, setResetTarget] = React.useState<AdminUserRow | null>(null);
   const [assignTarget, setAssignTarget] = React.useState<AdminUserRow | null>(null);
+  const [schoolTarget, setSchoolTarget] = React.useState<AdminUserRow | null>(null);
   const { showToast } = useToast();
 
   const refresh = React.useCallback(async () => {
@@ -263,6 +265,11 @@ export function UsersTable() {
                       {isProtectedSuperAdmin && <Badge variant="primary" className="ml-1.5">Super Admin</Badge>}
                       {u.status === "PENDING" && u.role === "ADMIN" && <AdminRequestDetails details={u.registrationRequest?.requestedDetails} />}
                       {u.status === "PENDING" && u.role === "TEACHER" && <TeacherRequestDetails details={u.registrationRequest?.requestedDetails} />}
+                      {u.role === "STUDENT" && u.student && (
+                        <span className="mt-0.5 block text-xs font-normal text-gray-400">
+                          {u.student.school?.name ?? "No school assigned"}
+                        </span>
+                      )}
                     </td>
                     <td className="py-2.5 pr-3 text-gray-500 dark:text-gray-400">{u.email}</td>
                     <td className="py-2.5 pr-3">
@@ -300,6 +307,11 @@ export function UsersTable() {
                         {u.status === "ACTIVE" && u.role === "TEACHER" && (
                           <Button size="sm" variant="outline" disabled={acting} onClick={() => setAssignTarget(u)}>
                             <BookUser className="h-3.5 w-3.5" /> Assignments
+                          </Button>
+                        )}
+                        {isSuperAdmin && u.status === "ACTIVE" && u.role === "STUDENT" && (
+                          <Button size="sm" variant="outline" disabled={acting} onClick={() => setSchoolTarget(u)}>
+                            <SchoolIcon className="h-3.5 w-3.5" /> {u.student?.school ? "Change school" : "Set school"}
                           </Button>
                         )}
                         {u.status === "ACTIVE" && (u.role === "STUDENT" || u.role === "TEACHER") && (
@@ -360,6 +372,12 @@ export function UsersTable() {
       </Modal>
 
       <ResetPasswordModal target={resetTarget} onClose={() => setResetTarget(null)} />
+
+      <AssignSchoolModal
+        target={schoolTarget}
+        onClose={() => setSchoolTarget(null)}
+        onAssigned={refresh}
+      />
 
       <TeacherAssignmentsModal target={assignTarget} onClose={() => setAssignTarget(null)} />
 
@@ -518,6 +536,89 @@ function TeacherAssignmentsModal({ target, onClose }: { target: AdminUserRow | n
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BookUser className="h-3.5 w-3.5" />} Assign
             </Button>
           </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Set / change a student's school (assignStudentSchool in
+// lib/actions/user-management.ts, super admin only). Only existing, enabled
+// schools are offered; this never creates a school.
+// ---------------------------------------------------------------------------
+function AssignSchoolModal({
+  target,
+  onClose,
+  onAssigned,
+}: {
+  target: AdminUserRow | null;
+  onClose: () => void;
+  onAssigned: () => void;
+}) {
+  const { showToast } = useToast();
+  const [schools, setSchools] = React.useState<SchoolOption[] | null>(null);
+  const [schoolId, setSchoolId] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!target) return;
+    setSchoolId("");
+    setError(null);
+    setSchools(null);
+    listSchools()
+      .then((rows) => setSchools(rows))
+      .catch(() => setSchools([]));
+  }, [target]);
+
+  async function submit() {
+    if (!target || !schoolId) return;
+    setSubmitting(true);
+    setError(null);
+    const res = await assignStudentSchool(target.id, schoolId);
+    setSubmitting(false);
+    if (!res.ok) {
+      setError(res.error || "Could not set the school.");
+      return;
+    }
+    showToast("School updated", `${target.name} now belongs to the selected school.`);
+    onAssigned();
+    onClose();
+  }
+
+  const current = target?.student?.school?.name ?? null;
+
+  return (
+    <Modal
+      open={!!target}
+      onClose={onClose}
+      title="Set student's school"
+      description={target ? `Choose an existing school for "${target.name}". Current school: ${current ?? "none"}.` : undefined}
+    >
+      <div className="space-y-4">
+        <div>
+          <label className={labelClass}>School</label>
+          <select className={inputClass} value={schoolId} onChange={(e) => setSchoolId(e.target.value)} disabled={submitting || schools === null}>
+            <option value="">{schools === null ? "Loading..." : "Select a school"}</option>
+            {(schools ?? []).map((s) => (
+              <option key={s.id} value={s.id} disabled={s.id === target?.student?.schoolId}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+            The student&apos;s state, board and class are not changed. They will see only the materials, exams and schedules of the school you choose.
+          </p>
+        </div>
+        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={submitting || !schoolId}>
+            {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <SchoolIcon className="h-3.5 w-3.5" />} Save school
+          </Button>
         </div>
       </div>
     </Modal>

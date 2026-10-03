@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { inputClass, labelClass } from "@/components/register/field-styles";
 import { formatDate, cn } from "@/lib/utils";
-import { listStates, listBoards, listSchoolClasses, listSubjectsForClass, listChaptersForSubject } from "@/lib/actions/curriculum";
+import { listStates, listBoards, listSchools, listSchoolClasses, listSubjectsForClass, listChaptersForSubject } from "@/lib/actions/curriculum";
 import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin } from "@/lib/actions/materials";
 import { indexMaterial } from "@/lib/actions/material-index";
 import { importMaterialFromUrl } from "@/lib/actions/material-import";
@@ -27,6 +27,7 @@ type SchoolClass = Awaited<ReturnType<typeof listSchoolClasses>>[number];
 type Subject = Awaited<ReturnType<typeof listSubjectsForClass>>[number];
 type Chapter = Awaited<ReturnType<typeof listChaptersForSubject>>[number];
 type MaterialRow = Awaited<ReturnType<typeof listMaterialsForAdmin>>[number];
+type SchoolOption = Awaited<ReturnType<typeof listSchools>>[number];
 
 const MATERIAL_TYPES = ["TEXTBOOK", "NOTES", "REFERENCE", "VIDEO", "PDF", "PRESENTATION", "OTHER"] as const;
 
@@ -62,13 +63,22 @@ export function StudyMaterialsCard() {
   const [dbUnavailable, setDbUnavailable] = React.useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = React.useState<string | null>(null);
   const [indexingId, setIndexingId] = React.useState<string | null>(null);
-  // Materials belong to a school. The platform super administrator is not attached to one, so
-  // there is nothing to upload to - say so instead of showing a form that can only fail.
+  // Materials belong to a school. A school administrator always uploads to their own school. The
+  // platform super administrator is not attached to one, so they choose an existing school instead.
+  // Any other admin with no school has nothing to upload to - say so instead of showing a form that
+  // can only fail.
   const [noSchool, setNoSchool] = React.useState(false);
+  const [isSuperAdmin, setIsSuperAdmin] = React.useState(false);
+  const [schools, setSchools] = React.useState<SchoolOption[]>([]);
+  const [schoolId, setSchoolId] = React.useState("");
 
   React.useEffect(() => {
     getMyAdminStatus()
-      .then((me) => setNoSchool(me !== null && me.schoolId === null))
+      .then((me) => {
+        setIsSuperAdmin(me?.isSuperAdmin === true);
+        setNoSchool(me !== null && me.schoolId === null && !me.isSuperAdmin);
+        if (me?.isSuperAdmin) listSchools().then(setSchools).catch(() => {});
+      })
       .catch(() => {});
   }, []);
 
@@ -129,6 +139,7 @@ export function StudyMaterialsCard() {
 
   async function handleImport() {
     if (!title.trim()) return setFormError("Title is required.");
+    if (isSuperAdmin && !schoolId) return setFormError("Choose the school this material belongs to.");
     if (!boardId || !schoolClassId || !subjectId || !chapterId) return setFormError("Select board, class, subject, and chapter.");
     if (!importUrl.trim()) return setFormError("Enter the web address of a PDF file.");
     if (!rightsConfirmed) return setFormError("Please confirm that you have the right to use this file.");
@@ -145,6 +156,7 @@ export function StudyMaterialsCard() {
         subjectId,
         chapterId,
         topicId: topicId || undefined,
+        schoolId: isSuperAdmin ? schoolId : undefined,
       });
       if (!result.ok) {
         setFormError(result.error ?? "Import failed.");
@@ -168,6 +180,7 @@ export function StudyMaterialsCard() {
     if (mode === "url") return handleImport();
 
     if (!title.trim()) return setFormError("Title is required.");
+    if (isSuperAdmin && !schoolId) return setFormError("Choose the school this material belongs to.");
     if (!boardId || !schoolClassId || !subjectId || !chapterId) return setFormError("Select board, class, subject, and chapter.");
     if (!file) return setFormError("Choose a file to upload.");
     const fileCheck = validateUploadFile({ type: file.type, size: file.size });
@@ -189,7 +202,17 @@ export function StudyMaterialsCard() {
         { access: "public", contentType: file.type, handleUploadUrl: "/api/materials/upload" }
       );
       const result = await createMaterial(
-        { title, description: description || undefined, materialType, boardId, schoolClassId, subjectId, chapterId, topicId: topicId || undefined },
+        {
+          title,
+          description: description || undefined,
+          materialType,
+          boardId,
+          schoolClassId,
+          subjectId,
+          chapterId,
+          topicId: topicId || undefined,
+          schoolId: isSuperAdmin ? schoolId : undefined,
+        },
         { storageKey: blob.pathname, fileName: file.name }
       );
       if (!result.ok) {
@@ -269,6 +292,22 @@ export function StudyMaterialsCard() {
       </CardHeader>
       <CardContent>
         <form onSubmit={handleUpload} className="space-y-3">
+          {isSuperAdmin && (
+            <div>
+              <label className={labelClass}>School</label>
+              <select className={inputClass} value={schoolId} onChange={(e) => setSchoolId(e.target.value)} disabled={uploading}>
+                <option value="">Select the school this material belongs to</option>
+                {schools.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Only students of this school (in the matching board and class) will see the material.
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className={labelClass}>Title</label>
@@ -450,7 +489,7 @@ export function StudyMaterialsCard() {
                     <div>
                       <p className="text-sm font-medium text-gray-800 dark:text-gray-100">{m.title}</p>
                       <p className="text-xs text-gray-400">
-                        {m.subject.name} - {m.schoolClass.label} - {m.chapter.name} - {(m.sizeKb / 1024).toFixed(1)} MB - {formatDate(m.uploadedAt)}
+                        {isSuperAdmin ? `${m.school.name} - ` : ""}{m.subject.name} - {m.schoolClass.label} - {m.chapter.name} -{(m.sizeKb / 1024).toFixed(1)} MB - {formatDate(m.uploadedAt)}
                       </p>
                       <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
                         {indexingId === m.id ? (
