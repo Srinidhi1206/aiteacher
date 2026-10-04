@@ -18,9 +18,10 @@ import { ExamScheduleCard } from "@/components/admin/exam-schedule-card";
 import { SchoolsPanel } from "@/components/admin/schools-panel";
 import { AcademicsOverview } from "@/components/admin/academics-overview";
 import { AcademicCalendarPanel } from "@/components/admin/academic-calendar-panel";
+import { TimetablePanel } from "@/components/admin/timetable-panel";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 
-const TAB_VALUES = ["analytics", "schools", "users", "subjects", "materials", "academics", "exam-schedule", "calendar", "logs"];
+const TAB_VALUES = ["analytics", "schools", "users", "subjects", "materials", "academics", "exam-schedule", "calendar", "timetable", "logs"];
 
 export function AdminTabs() {
   // /admin?tab=academics opens that tab (used by "Back" links from the exam page).
@@ -44,6 +45,7 @@ export function AdminTabs() {
         <TabsTrigger value="academics">Exams &amp; Assignments</TabsTrigger>
         <TabsTrigger value="exam-schedule">Exam Schedule</TabsTrigger>
         <TabsTrigger value="calendar">Academic Calendar</TabsTrigger>
+        <TabsTrigger value="timetable">Timetables</TabsTrigger>
         <TabsTrigger value="logs">Logs</TabsTrigger>
       </TabsList>
 
@@ -72,6 +74,9 @@ export function AdminTabs() {
       </TabsContent>
       <TabsContent value="calendar">
         <AcademicCalendarPanel />
+      </TabsContent>
+      <TabsContent value="timetable">
+        <TimetablePanel />
       </TabsContent>
       <TabsContent value="logs">
         <LogsTable />

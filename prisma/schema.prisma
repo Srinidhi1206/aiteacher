@@ -328,6 +328,7 @@ model School {
   academicEvents AcademicEvent[]
 
   @@index([boardId])
+  timetables Timetable[]
 }
 
 // Grade level (Class 1..Class 10), scoped to a board so an admin can enable
@@ -355,6 +356,7 @@ model SchoolClass {
   academicEvents     AcademicEvent[]
 
   @@unique([boardId, grade])
+  timetables Timetable[]
 }
 
 // Which subjects an admin has enabled for a given board+grade.
@@ -412,6 +414,7 @@ model User {
 
   @@index([role])
   @@index([status])
+  timetablesCreated Timetable[] @relation("TimetableCreatedBy")
 }
 
 model Student {
@@ -617,6 +620,7 @@ model Subject {
   // creates generic subjects.
   @@unique([slug, boardId, grade])
   @@index([boardId])
+  timetableEntries TimetableEntry[]
 }
 
 model Chapter {
@@ -1426,4 +1430,56 @@ model AcademicEvent {
 
   @@index([boardId, schoolClassId, startDate])
   @@index([schoolId, startDate])
+}
+
+// ---------------------------------------------------------------------------
+// Class timetables. A timetable is imported from a document (PDF / image), reviewed and edited by an administrator, and only
+// then saved - it is school-specific, belongs to one class (and optionally one section) and is a different thing from the
+// academic calendar (AcademicEvent): it is the weekly pattern of periods, not dated events.
+// ---------------------------------------------------------------------------
+
+model Timetable {
+  id            String      @id @default(cuid())
+  schoolId      String
+  school        School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  schoolClassId String
+  schoolClass   SchoolClass @relation(fields: [schoolClassId], references: [id], onDelete: Restrict)
+  // "" = the whole class; otherwise a section label such as "A". Never NULL, so one timetable per class + section is enforceable.
+  section       String      @default("")
+  title         String?
+  academicYear  String?
+  // A draft is visible to administrators only; publishing is what makes it visible to the class.
+  isPublished   Boolean     @default(false)
+  // The uploaded original is kept for reference.
+  sourceName    String?
+  sourceUrl     String?
+
+  createdByUserId String?
+  createdBy       User?    @relation("TimetableCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  entries TimetableEntry[]
+
+  @@unique([schoolId, schoolClassId, section])
+  @@index([schoolId, schoolClassId])
+}
+
+model TimetableEntry {
+  id          String    @id @default(cuid())
+  timetableId String
+  timetable   Timetable @relation(fields: [timetableId], references: [id], onDelete: Cascade)
+  day         Int // 1 = Monday ... 7 = Sunday
+  // Period number and clock times are each optional - a document may give one, both or neither; nothing is assumed.
+  period      Int?
+  startTime   String? // "HH:MM", 24-hour
+  endTime     String?
+  subjectName String // as written (and corrected) in the reviewed preview
+  // The class's subject this was matched to, when the name matches one; free-text subjects stay unlinked.
+  subjectId   String?
+  subject     Subject?  @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  teacherName String?
+  room        String?
+
+  @@index([timetableId, day])
 }

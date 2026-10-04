@@ -42,6 +42,7 @@ import {
   Library,
   FileEdit,
   Award,
+  Clock,
 } from "lucide-react";
 
 // Explicit registry (rather than `import * as` from lucide-react) so
@@ -89,6 +90,7 @@ const iconRegistry: Record<string, LucideIcon> = {
   Library,
   FileEdit,
   Award,
+  Clock,
 };
 
 export function DynamicIcon({ name, ...props }: { name: string } & LucideProps) {
