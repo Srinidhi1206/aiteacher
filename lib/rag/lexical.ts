@@ -11,8 +11,16 @@
 
 export const SPECIFIC_MAX_DF = 12; // a term in more passages than this is too common to identify one
 export const MAX_TERMS = 6;
-export const SEMANTIC_MIN_SCORE = 0.55; // unchanged from before
+// Measured on the real textbook with real questions: off-topic questions (quantum computers, photosynthesis, capital of France...)
+// never scored above 0.568 on any passage; genuine questions, even vague ones ("What is a noun?"), scored 0.611 or more on their
+// best passage. 0.59 sits between, so an off-topic question returns no excerpts (and so no misleading page citations).
+export const SEMANTIC_MIN_SCORE = 0.59;
 export const SEMANTIC_FILL_MIN_SCORE = 0.65; // a stricter bar for padding keyword hits with similar passages
+// A keyword hit that is clearly off-topic by meaning is an accident of a rare everyday word ("talks" appears on only
+// two pages of the book). Measured on the real textbook: such stray hits sat 0.16-0.18 below the best meaning score,
+// while genuine ones (names, terms) sat within about 0.11. Glossary lookups are exempt - a dictionary entry can be
+// far from the question by meaning and still be exactly right.
+export const LEXICAL_MAX_SEMANTIC_GAP = 0.12;
 
 // Words that carry no identifying power in a question: question words, auxiliaries, prepositions, and
 // the generic words students use to talk about a book ("lesson", "textbook", "page").
@@ -23,7 +31,7 @@ const STOPWORDS = new Set(
     "what whats which who whom whose when where why how whether that this these those there here it its it's they them their he him his she her " +
     "i me my mine we us our you your yours " +
     "mean means meant meaning meanings define defined definition refer refers referred stand stands synonym synonyms antonym antonyms " +
-    "explain tell give show list describe say said write find please help need want know understand " +
+    "explain tell give show list describe say said write find please help need want know understand talk discuss mention cover contain " +
     "word words term terms phrase glossary dictionary vocabulary " +
     "lesson lessons chapter chapters unit units page pages book books textbook textbooks passage text story stories poem poems play plays " +
     "first second third last next previous main topic topics question questions answer answers example examples " +
@@ -171,6 +179,14 @@ export interface FusedHit {
  */
 export function fuseResults(lexical: LexicalHit[], semantic: SemanticHit[], opts: { k: number; definition: boolean }): FusedHit[] {
   const sem = new Map(semantic.map((s) => [s.id, s.score]));
+  // For ordinary (non-glossary) questions, ignore keyword hits that are far less similar in meaning than the best passage.
+  if (!opts.definition && semantic.length > 0) {
+    const bestSemantic = Math.max(...semantic.map((x) => x.score));
+    lexical = lexical.filter((l) => {
+      const score = sem.get(l.id);
+      return score === undefined || score >= bestSemantic - LEXICAL_MAX_SEMANTIC_GAP;
+    });
+  }
   if (lexical.length === 0) {
     return semantic
       .filter((s) => s.score >= SEMANTIC_MIN_SCORE)
