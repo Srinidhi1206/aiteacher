@@ -4,6 +4,8 @@
 import type { CurriculumImportChapter } from "./telangana-bse-class8-mathematics";
 import { TELANGANA_BSE_CLASS8_MATHEMATICS } from "./telangana-bse-class8-mathematics";
 import { TELANGANA_BSE_CLASS10_ENGLISH } from "./telangana-bse-class10-english";
+import { TELANGANA_BSE_CLASS10_BIOLOGICAL_SCIENCE } from "./telangana-bse-class10-biological-science";
+import { TELANGANA_BSE_CLASS10_SOCIAL_STUDIES } from "./telangana-bse-class10-social-studies";
 import { TELANGANA_BSE_CLASS10_HINDI } from "./telangana-bse-class10-hindi";
 import { TELANGANA_BSE_CLASS10_MATHEMATICS } from "./telangana-bse-class10-mathematics";
 import { TELANGANA_BSE_CLASS10_PHYSICAL_SCIENCE } from "./telangana-bse-class10-physical-science";
@@ -66,6 +68,24 @@ export const CURRICULUM_IMPORTS: CurriculumImportDefinition[] = [
     chapterNoun: "lessons",
     topicNoun: "topics",
     chapters: TELANGANA_BSE_CLASS10_HINDI,
+  },
+  {
+    boardShortName: "BSE Telangana",
+    grade: 10,
+    subjectSlug: "biological-science",
+    label: "BSE Telangana Class 10 Biological Science",
+    chapterNoun: "chapters",
+    topicNoun: "topics",
+    chapters: TELANGANA_BSE_CLASS10_BIOLOGICAL_SCIENCE,
+  },
+  {
+    boardShortName: "BSE Telangana",
+    grade: 10,
+    subjectSlug: "social-science", // the Class 10 "Social Studies" subject keeps the slug it was created with
+    label: "BSE Telangana Class 10 Social Studies",
+    chapterNoun: "chapters",
+    topicNoun: "topics",
+    chapters: TELANGANA_BSE_CLASS10_SOCIAL_STUDIES,
   },
 ];
 
