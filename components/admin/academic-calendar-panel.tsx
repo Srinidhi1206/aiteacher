@@ -4,7 +4,7 @@
 // own school's events (and can see, read-only, the common ones that reach their students). Backed by
 // lib/actions/academic-calendar.ts; the rules are enforced there, this screen only reflects them.
 import * as React from "react";
-import { CalendarDays, Plus, Pencil, Trash2, Loader2, Eye, EyeOff } from "lucide-react";
+import { CalendarDays, Plus, Pencil, Trash2, Loader2, Eye, EyeOff, FileUp } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -14,6 +14,7 @@ import { inputClass, labelClass } from "@/components/register/field-styles";
 import { formatDate } from "@/lib/utils";
 import { listStates, listBoards, listSchoolClasses, listSchools } from "@/lib/actions/curriculum";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
+import { CalendarImportDialog } from "@/components/admin/calendar-import-dialog";
 import { listAcademicEventsForAdmin, createAcademicEvent, updateAcademicEvent, setAcademicEventPublished, deleteAcademicEvent } from "@/lib/actions/academic-calendar";
 
 type EventRow = Awaited<ReturnType<typeof listAcademicEventsForAdmin>>[number];
@@ -62,6 +63,7 @@ export function AcademicCalendarPanel() {
   const [saving, setSaving] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
+  const [importOpen, setImportOpen] = React.useState(false);
 
   const isSuperAdmin = me?.isSuperAdmin === true;
   const schoolBoardId = me?.schoolBoardId ?? null;
@@ -161,9 +163,14 @@ export function AcademicCalendarPanel() {
           Holidays, exam dates, terms and school events. New events start as drafts; once published they appear on the calendar of exactly the students in the
           audience you choose.
         </CardDescription>
-        <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setForm({ ...EMPTY })} disabled={!me || (!isSuperAdmin && !me.schoolId)}>
-          <Plus className="h-3.5 w-3.5" /> Add event
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setImportOpen(true)} disabled={!me || (!isSuperAdmin && !me.schoolId)}>
+            <FileUp className="h-3.5 w-3.5" /> Import calendar
+          </Button>
+          <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setForm({ ...EMPTY })} disabled={!me || (!isSuperAdmin && !me.schoolId)}>
+            <Plus className="h-3.5 w-3.5" /> Add event
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="overflow-x-auto">
         {me && !isSuperAdmin && !me.schoolId && <p className="py-2 text-sm text-gray-500 dark:text-gray-400">Your account is not attached to a school, so there is no school calendar to manage.</p>}
@@ -241,6 +248,8 @@ export function AcademicCalendarPanel() {
           </table>
         )}
       </CardContent>
+
+      {me && <CalendarImportDialog open={importOpen} onClose={() => setImportOpen(false)} admin={{ isSuperAdmin, schoolId: me.schoolId ?? null, schoolName: me.schoolName ?? null, schoolBoardId: me.schoolBoardId ?? null }} onImported={refresh} />}
 
       <Modal
         open={!!form}

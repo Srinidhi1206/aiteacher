@@ -40,22 +40,28 @@ export const eventInputSchema = eventFieldsSchema.extend({
   schoolClassId: z.string().trim().optional().or(z.literal("")),
 });
 
-function toDate(s: string): Date {
+export function toDate(s: string): Date {
   return new Date(`${s}T00:00:00.000Z`);
 }
 
+/** A date that really exists. `new Date("2026-02-31")` silently becomes March 3, so the day is checked after the round trip. */
+export function isRealDate(s: string): boolean {
+  const d = toDate(s);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
 function checkDates(startDate: string, endDate?: string): string | null {
-  if (Number.isNaN(toDate(startDate).getTime())) return "Use a valid start date.";
+  if (!isRealDate(startDate)) return "Use a valid start date.";
   if (endDate) {
-    if (Number.isNaN(toDate(endDate).getTime())) return "Use a valid end date.";
+    if (!isRealDate(endDate)) return "Use a valid end date.";
     if (endDate < startDate) return "The end date cannot be before the start date.";
   }
   return null;
 }
 
-type Scope = { schoolId: string | null; boardId: string | null; schoolClassId: string | null };
+export type Scope = { schoolId: string | null; boardId: string | null; schoolClassId: string | null };
 
-async function resolveScope(db: CalendarDb, actor: CalendarActor, input: { schoolId?: string; boardId?: string; schoolClassId?: string }): Promise<{ ok: true; value: Scope } | { ok: false; error: string }> {
+export async function resolveScope(db: CalendarDb, actor: CalendarActor, input: { schoolId?: string; boardId?: string; schoolClassId?: string }): Promise<{ ok: true; value: Scope } | { ok: false; error: string }> {
   let schoolId = input.schoolId || null;
   let boardId = input.boardId || null;
   const schoolClassId = input.schoolClassId || null;

@@ -27,7 +27,7 @@ const DEFAULT_GEMINI_MODEL = "gemini-flash-latest"; // "gemini-2.5-flash" has be
 // (comma-separated); set it to a single space-free "none" to disable the fallback.
 const DEFAULT_FALLBACK_MODELS = ["gemini-3.6-flash", "gemini-2.5-flash"];
 
-function geminiModelChain(): string[] {
+export function geminiModelChain(): string[] {
   const primary = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
   const raw = process.env.GEMINI_FALLBACK_MODELS?.trim();
   const fallbacks = raw === "none" ? [] : raw ? raw.split(",").map((m) => m.trim()).filter(Boolean) : DEFAULT_FALLBACK_MODELS;
