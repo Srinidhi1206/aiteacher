@@ -10,7 +10,8 @@
 // Limits (keeps one request bounded): PDFs only, at most MAX_PDF_MB, at most
 // MAX_PASSAGES passages per material - a safety ceiling well above a full textbook, never a
 // silent cut: if a book is ever longer, the status says "first N of M". A scanned PDF with no
-// text layer can't be indexed and says so instead of pretending.
+// text layer, or one whose text layer is a legacy font encoding (gibberish), can't be indexed and says so
+// instead of pretending.
 //
 // Pacing and resuming: the embedding provider caps how many passages it will process per
 // minute (see EMBED_PER_MINUTE in lib/rag), so a book takes several minutes. Each call embeds
@@ -25,6 +26,7 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentSession, UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
 import { chunkText, embedTexts, describeEmbeddingError, EMBED_PER_MINUTE, INDEX_BATCH_SIZE } from "@/lib/rag";
 import { formatIndexStatus } from "@/lib/rag/index-status";
+import { assessTextLayer, UNREADABLE_TEXT_MESSAGE } from "@/lib/rag/text-quality";
 import { logAudit } from "@/lib/audit";
 import type { ActionResult } from "./materials";
 
@@ -123,6 +125,9 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
     } catch {
       return fail(material.id, "This PDF could not be read.");
     }
+
+    // A legacy-font text layer extracts as symbols, not words: refuse it rather than index gibberish.
+    if (!assessTextLayer(pages).readable) return fail(material.id, UNREADABLE_TEXT_MESSAGE);
 
     // Count every passage the PDF produces, but only keep up to the ceiling to embed.
     const passages: { page: number; text: string }[] = [];
