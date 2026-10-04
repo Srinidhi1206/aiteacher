@@ -91,7 +91,7 @@ export async function LearningHub() {
             <Empty>No subjects are set up for your class yet.</Empty>
           ) : (
             <ul className="divide-y divide-gray-50 dark:divide-gray-800">
-              {subjectsRes.value.subjects.slice(0, 6).map((s) => (
+              {subjectsRes.value.subjects.slice(0, 10).map((s) => (
                 <li key={s.id}>
                   <Link href={`/subjects/${s.id}`} className="flex items-center justify-between gap-3 py-2 text-sm hover:text-primary-600">
                     <span className="font-medium text-gray-800 dark:text-gray-100">{s.name}</span>
