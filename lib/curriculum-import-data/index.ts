@@ -4,6 +4,7 @@
 import type { CurriculumImportChapter } from "./telangana-bse-class8-mathematics";
 import { TELANGANA_BSE_CLASS8_MATHEMATICS } from "./telangana-bse-class8-mathematics";
 import { TELANGANA_BSE_CLASS10_ENGLISH } from "./telangana-bse-class10-english";
+import { TELANGANA_BSE_CLASS10_HINDI } from "./telangana-bse-class10-hindi";
 import { TELANGANA_BSE_CLASS10_MATHEMATICS } from "./telangana-bse-class10-mathematics";
 import { TELANGANA_BSE_CLASS10_PHYSICAL_SCIENCE } from "./telangana-bse-class10-physical-science";
 
@@ -56,6 +57,15 @@ export const CURRICULUM_IMPORTS: CurriculumImportDefinition[] = [
     chapterNoun: "chapters",
     topicNoun: "topics",
     chapters: TELANGANA_BSE_CLASS10_PHYSICAL_SCIENCE,
+  },
+  {
+    boardShortName: "BSE Telangana",
+    grade: 10,
+    subjectSlug: "hindi",
+    label: "BSE Telangana Class 10 Hindi",
+    chapterNoun: "lessons",
+    topicNoun: "topics",
+    chapters: TELANGANA_BSE_CLASS10_HINDI,
   },
 ];
 
