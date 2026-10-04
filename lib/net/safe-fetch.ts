@@ -88,6 +88,26 @@ export function validateImportUrl(raw: string): URL {
   return url;
 }
 
+/**
+ * A safe-to-show reason for a failed connection, from the error code alone. The importer used to answer every failure with
+ * "Could not reach that address", which hid whether the address was wrong, the site was down, its certificate could not be
+ * verified, or it refuses automated downloads (common for government sites and cloud servers). Nothing from the error
+ * itself - host names, IP addresses, certificate details - is ever included.
+ */
+export function describeConnectionError(e: unknown): string {
+  const code = String((e as { code?: unknown } | null)?.code ?? "");
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "That website address could not be found. Check it and try again.";
+  if (code === "ECONNREFUSED") return "The website refused the connection.";
+  if (code === "ETIMEDOUT" || code === "ESOCKETTIMEDOUT" || code === "EHOSTUNREACH" || code === "ENETUNREACH") return "The website did not respond in time.";
+  if (code === "ECONNRESET" || code === "EPIPE" || code === "ECONNABORTED") {
+    return "The website closed the connection before sending the file. Some websites block downloads that come from cloud servers - download the file yourself and use \"Upload a file\" instead.";
+  }
+  if (/^(UNABLE_TO_|CERT_|DEPTH_ZERO|SELF_SIGNED|ERR_TLS_CERT|ERR_SSL|EPROTO|HOSTNAME_MISMATCH)/.test(code) || code === "ERR_TLS_CERT_ALTNAME_INVALID") {
+    return "The website's security certificate could not be verified, so the download was refused for your safety. Download the file yourself and upload it instead.";
+  }
+  return "Could not reach that address.";
+}
+
 function download(url: URL, maxBytes: number, timeoutMs: number): Promise<{ status: number; location?: string; contentType: string; body: Buffer }> {
   return new Promise((resolve, reject) => {
     const req = https.get(
@@ -128,7 +148,14 @@ function download(url: URL, maxBytes: number, timeoutMs: number): Promise<{ stat
       req.destroy();
       reject(new ImportError("The website took too long to respond."));
     });
-    req.on("error", (e) => reject(e instanceof ImportError ? e : new ImportError(e.message === "That address is not allowed." ? e.message : "Could not reach that address.")));
+    req.on("error", (e) => {
+      if (e instanceof ImportError) return reject(e);
+      if (e.message === "That address is not allowed.") return reject(new ImportError(e.message));
+      // Only the error CODE is logged (never the address or any detail), so a failing site can be diagnosed from the server logs.
+      // eslint-disable-next-line no-console
+      console.error("[url-import] connection failed", { code: (e as NodeJS.ErrnoException).code ?? e.name });
+      reject(new ImportError(describeConnectionError(e)));
+    });
   });
 }
 
