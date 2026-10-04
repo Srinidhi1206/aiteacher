@@ -4,6 +4,8 @@
 import type { CurriculumImportChapter } from "./telangana-bse-class8-mathematics";
 import { TELANGANA_BSE_CLASS8_MATHEMATICS } from "./telangana-bse-class8-mathematics";
 import { TELANGANA_BSE_CLASS10_ENGLISH } from "./telangana-bse-class10-english";
+import { TELANGANA_BSE_CLASS10_MATHEMATICS } from "./telangana-bse-class10-mathematics";
+import { TELANGANA_BSE_CLASS10_PHYSICAL_SCIENCE } from "./telangana-bse-class10-physical-science";
 
 export interface CurriculumImportDefinition {
   boardShortName: string;
@@ -36,6 +38,24 @@ export const CURRICULUM_IMPORTS: CurriculumImportDefinition[] = [
     chapterNoun: "units",
     topicNoun: "lessons",
     chapters: TELANGANA_BSE_CLASS10_ENGLISH,
+  },
+  {
+    boardShortName: "BSE Telangana",
+    grade: 10,
+    subjectSlug: "mathematics",
+    label: "BSE Telangana Class 10 Mathematics",
+    chapterNoun: "chapters",
+    topicNoun: "topics",
+    chapters: TELANGANA_BSE_CLASS10_MATHEMATICS,
+  },
+  {
+    boardShortName: "BSE Telangana",
+    grade: 10,
+    subjectSlug: "science", // the Class 10 "Physical Science" subject keeps the slug it was created with
+    label: "BSE Telangana Class 10 Physical Science",
+    chapterNoun: "chapters",
+    topicNoun: "topics",
+    chapters: TELANGANA_BSE_CLASS10_PHYSICAL_SCIENCE,
   },
 ];
 

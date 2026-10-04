@@ -451,7 +451,8 @@ const bulkTopicSchema = z.object({
 const bulkChapterSchema = z.object({
   name: z.string().trim().min(1).max(200),
   slug: slugSchema,
-  topics: z.array(bulkTopicSchema).min(1),
+  // May be empty: a textbook whose contents page lists chapters but no topics is imported as chapters only, never padded.
+  topics: z.array(bulkTopicSchema),
 });
 
 const bulkImportInputSchema = z.object({
