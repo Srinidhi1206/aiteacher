@@ -19,6 +19,7 @@ export const navItems: NavItem[] = [
   { label: "Weak Areas", href: "/weak-areas", icon: "Target" },
   { label: "Strengths", href: "/strengths", icon: "Award" },
   { label: "Calendar", href: "/calendar", icon: "Calendar" },
+  { label: "Timetable", href: "/timetable", icon: "Clock" },
   { label: "AI Tutor Chat", href: "/ai-tutor", icon: "MessageCircleQuestion" },
   { label: "Settings", href: "/settings", icon: "Settings" },
 ];
