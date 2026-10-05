@@ -7,6 +7,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getCurrentSession, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
+import { deleteOcr } from "@/lib/rag/ocr-store";
 import { MaterialType } from "@prisma/client";
 import { checkMaterialPlacement } from "@/lib/materials/placement";
 import { logAudit } from "@/lib/audit";
@@ -237,6 +238,7 @@ export async function deleteMaterial(materialId: string): Promise<ActionResult> 
     if (storage.isConfigured) {
       try {
         await storage.delete(material.storageKey);
+        await deleteOcr(material.id); // the text read from its pages with OCR, if any
       } catch {
         // Storage delete failing shouldn't block removing the catalog
         // entry - the object becoming orphaned in the bucket is a lesser

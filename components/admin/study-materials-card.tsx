@@ -17,7 +17,8 @@ import { formatDate, cn } from "@/lib/utils";
 import { listStates, listBoards, listSchools, listSchoolClasses, listSubjectsForClass, listChaptersForSubject } from "@/lib/actions/curriculum";
 import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin, setMaterialScope, updateMaterialDetails } from "@/lib/actions/materials";
 import { indexMaterial } from "@/lib/actions/material-index";
-import { parseIndexStatus } from "@/lib/rag/index-status";
+import { ocrMaterial } from "@/lib/actions/material-ocr";
+import { parseIndexStatus, needsOcr } from "@/lib/rag/index-status";
 import { importMaterialFromUrl } from "@/lib/actions/material-import";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 import { ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES, validateUploadFile, safeFilename } from "@/lib/storage/types";
@@ -53,7 +54,7 @@ const LEGACY_PASSAGE_CAP = 400;
 interface IndexView {
   label: string;
   tone: "ok" | "partial" | "idle";
-  action: { label: string; rebuild: boolean } | null;
+  action: { label: string; rebuild: boolean; ocr?: boolean } | null;
 }
 
 /** What the indexing state of a material means, in words an admin can act on. */
@@ -75,6 +76,16 @@ function describeIndex(m: MaterialRow): IndexView {
       };
     }
     return { label: `Complete: AI Tutor ready (${saved} / ${saved} passages)`, tone: "ok", action: { label: "Re-index", rebuild: true } };
+  }
+  // A book that cannot be read straight from its PDF (old font encoding, scanned, or too big) is read page by page first.
+  if (note?.kind === "ocr_progress") {
+    return { label: `Reading pages (OCR): ${note.done} / ${note.total} pages`, tone: "partial", action: { label: "Continue reading pages", rebuild: false, ocr: true } };
+  }
+  if (note?.kind === "ocr_ready") {
+    return { label: `Pages read (OCR): all ${note.total} pages - ready to index`, tone: "partial", action: { label: "Continue indexing", rebuild: false } };
+  }
+  if (saved === 0 && needsOcr(m.indexError)) {
+    return { label: m.indexError ?? "", tone: "idle", action: { label: "Read pages (OCR) and index", rebuild: false, ocr: true } };
   }
   if (note?.kind === "in_progress" || saved > 0) {
     const total = note?.kind === "in_progress" ? ` / ${note.total}` : "";
@@ -126,7 +137,7 @@ export function StudyMaterialsCard() {
   const [editSaving, setEditSaving] = React.useState(false);
   const [publishBusyId, setPublishBusyId] = React.useState<string | null>(null);
   const [indexingId, setIndexingId] = React.useState<string | null>(null);
-  const [indexProgress, setIndexProgress] = React.useState<{ done: number; total: number | null } | null>(null);
+  const [indexProgress, setIndexProgress] = React.useState<{ done: number; total: number | null; unit: "passages" | "pages" } | null>(null);
   // Materials belong to a school. A school administrator always uploads to their own school. The
   // platform super administrator is not attached to one, so they choose an existing school instead.
   // Any other admin with no school has nothing to upload to - say so instead of showing a form that
@@ -299,18 +310,32 @@ export function StudyMaterialsCard() {
     }
   }
 
-  async function runIndex(id: string, materialTitle: string, opts?: { rebuild?: boolean; savedSoFar?: number }) {
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function runIndex(id: string, materialTitle: string, opts?: { rebuild?: boolean; savedSoFar?: number; afterOcr?: boolean }) {
     setIndexingId(id);
-    setIndexProgress({ done: opts?.savedSoFar ?? 0, total: null });
+    setIndexProgress({ done: opts?.savedSoFar ?? 0, total: null, unit: "passages" });
     // Only the first call may rebuild from scratch; every later call resumes from what is saved.
     let res = await indexMaterial(id, opts?.rebuild ? { rebuild: true } : undefined);
+    // The PDF's own text cannot be used (old font encoding, scanned, or too big): read its pages with OCR, then index that text.
+    if (!res.ok && !opts?.afterOcr && needsOcr(res.error)) {
+      await runOcr(id, materialTitle);
+      return;
+    }
     // A long book takes several calls because the AI provider limits how many passages it processes
     // per minute; each call saves what it finished, so keep going until it reports complete. An
     // interrupted run is picked up again by "Continue indexing" - nothing saved is re-embedded.
+    // Stop early when the provider's daily limit is hit, or when calls stop making progress.
+    let stalled = 0;
+    let lastChunks = -1;
     for (let round = 0; round < 40 && res.ok && res.data && !res.data.complete; round++) {
-      const { chunks, total, waitMs } = res.data;
-      setIndexProgress({ done: chunks, total });
-      await new Promise((r) => setTimeout(r, waitMs));
+      const { chunks, total, waitMs, quotaExhausted } = res.data;
+      setIndexProgress({ done: chunks, total, unit: "passages" });
+      if (quotaExhausted) break;
+      stalled = chunks === lastChunks ? stalled + 1 : 0;
+      lastChunks = chunks;
+      if (stalled >= 3) break;
+      await pause(waitMs);
       res = await indexMaterial(id);
     }
     setIndexingId(null);
@@ -319,9 +344,41 @@ export function StudyMaterialsCard() {
       showToast("Indexed part of this material", `Only the first ${res.data.total} of ${res.data.available} passages fit the per-material limit.`);
     } else if (res.ok && res.data?.complete) {
       showToast("AI Tutor can now use this material", `"${materialTitle}" is fully indexed (${res.data.chunks} / ${res.data.total} passages).`);
+    } else if (res.ok && res.data?.quotaExhausted) {
+      showToast("AI provider limit reached", `${res.data.chunks} / ${res.data.total} passages are saved. The provider's daily limit resets once a day - click "Continue indexing" later and it carries on from here.`);
     } else if (res.ok) {
       showToast("Indexing is not finished yet", "Click \"Continue indexing\" to carry on from where it stopped.");
     } else showToast("Could not index for the AI Tutor", res.error ?? "");
+    refreshMaterials();
+  }
+
+  // Reads a book's pages with OCR (a few pages per call, each saved as it is read), then indexes the text that was read.
+  async function runOcr(id: string, materialTitle: string) {
+    setIndexingId(id);
+    setIndexProgress({ done: 0, total: null, unit: "pages" });
+    let res = await ocrMaterial(id);
+    let stalled = 0;
+    let lastDone = -1;
+    for (let round = 0; round < 80 && res.ok && res.data && !res.data.complete; round++) {
+      const { pagesDone, totalPages, quotaExhausted } = res.data;
+      setIndexProgress({ done: pagesDone, total: totalPages, unit: "pages" });
+      if (quotaExhausted) break;
+      stalled = pagesDone === lastDone ? stalled + 1 : 0;
+      lastDone = pagesDone;
+      if (stalled >= 3) break;
+      await pause(500);
+      res = await ocrMaterial(id);
+    }
+    if (res.ok && res.data?.complete) {
+      showToast("All pages read", `"${materialTitle}": ${res.data.totalPages} pages read. Indexing it now.`);
+      await runIndex(id, materialTitle, { afterOcr: true });
+      return;
+    }
+    setIndexingId(null);
+    setIndexProgress(null);
+    if (res.ok && res.data?.quotaExhausted) showToast("AI provider limit reached", `${res.data.pagesDone} / ${res.data.totalPages} pages are read and saved. Click "Continue reading pages" later.`);
+    else if (res.ok) showToast("Reading is not finished yet", "Click \"Continue reading pages\" to carry on from where it stopped.");
+    else showToast("Could not read the pages", res.error ?? "");
     refreshMaterials();
   }
 
@@ -626,9 +683,9 @@ export function StudyMaterialsCard() {
                           <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
                             {indexingId === m.id ? (
                               <span className="flex items-center gap-1 text-gray-500">
-                                <Loader2 className="h-3 w-3 animate-spin" /> Indexing for the AI Tutor...
+                                <Loader2 className="h-3 w-3 animate-spin" /> {indexProgress?.unit === "pages" ? "Reading pages (OCR)..." : "Indexing for the AI Tutor..."}
                                 {indexProgress && indexProgress.done > 0
-                                  ? ` ${indexProgress.done}${indexProgress.total ? ` / ${indexProgress.total}` : ""} passages`
+                                  ? ` ${indexProgress.done}${indexProgress.total ? ` / ${indexProgress.total}` : ""} ${indexProgress.unit}`
                                   : ""}
                               </span>
                             ) : (
@@ -647,7 +704,7 @@ export function StudyMaterialsCard() {
                             )}
                             {indexingId !== m.id && isPdf && idx.action && (
                               <button
-                                onClick={() => runIndex(m.id, m.title, { rebuild: idx.action!.rebuild, savedSoFar: m._count.chunks })}
+                                onClick={() => (idx.action!.ocr ? runOcr(m.id, m.title) : runIndex(m.id, m.title, { rebuild: idx.action!.rebuild, savedSoFar: m._count.chunks }))}
                                 className="font-medium text-primary-600 hover:underline dark:text-primary-300"
                               >
                                 {idx.action.label}

@@ -22,19 +22,27 @@
 // Saved passages are checked against the freshly chunked file before resuming; if they no
 // longer fit it (a different file, or text extraction changed) they are replaced rather than
 // left orphaned. `rebuild` is the only way to throw away a good prefix.
+import { createHash } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import { getCurrentSession, UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
+import { UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
+import { loadManagedMaterial, requireManager } from "@/lib/materials/manager";
 import { chunkText, embedTexts, describeEmbeddingError, EMBED_PER_MINUTE, INDEX_BATCH_SIZE } from "@/lib/rag";
 import { formatIndexStatus } from "@/lib/rag/index-status";
 import { assessTextLayer, UNREADABLE_TEXT_MESSAGE } from "@/lib/rag/text-quality";
+import { MAX_DIRECT_READ_MB } from "@/lib/rag/limits";
+import { loadCompleteOcr } from "@/lib/rag/ocr-store";
+import { saveChunksAtomically } from "@/lib/rag/save-chunks";
+import { CHAPTER_PAGE_MAPS, chapterSlugForPage } from "@/lib/curriculum-import-data/chapter-page-maps";
 import { logAudit } from "@/lib/audit";
 import type { ActionResult } from "./materials";
 
-const MAX_PDF_MB = 40;
+const MAX_PDF_MB = MAX_DIRECT_READ_MB;
 const MAX_PASSAGES = 2500;
 // One call stays well inside a 60 s function limit.
 const CALL_BUDGET_MS = 48_000;
 const BATCH_MARGIN_MS = 6_000;
+/** A provider wait longer than this is a daily limit, not a per-minute one: stop and let the admin come back later. */
+const LONG_WAIT_MS = 5 * 60_000;
 
 export interface IndexProgress {
   /** Passages saved so far. */
@@ -46,25 +54,11 @@ export interface IndexProgress {
   complete: boolean;
   /** How long to wait before calling again when not complete. */
   waitMs: number;
+  /** The embedding provider's daily (or repeated) limit was hit with nothing saved this call: progress is kept, come back later. */
+  quotaExhausted?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function requireManager() {
-  const session = await getCurrentSession();
-  if (!session) throw new UnauthorizedError();
-  if (session.role === "admin") {
-    const admin = await prisma.admin.findUnique({ where: { userId: session.id }, select: { isSuperAdmin: true, schoolId: true } });
-    if (!admin) throw new ForbiddenError("Admin profile not found.");
-    return { session, isSuperAdmin: admin.isSuperAdmin, schoolId: admin.schoolId };
-  }
-  if (session.role === "teacher") {
-    const teacher = await prisma.teacher.findUnique({ where: { userId: session.id }, select: { schoolId: true } });
-    if (!teacher) throw new ForbiddenError("Teacher profile not found.");
-    return { session, isSuperAdmin: false, schoolId: teacher.schoolId };
-  }
-  throw new ForbiddenError("Only admins and teachers can index study materials.");
-}
 
 async function fail(materialId: string, message: string): Promise<ActionResult<IndexProgress>> {
   await prisma.studyMaterial.update({ where: { id: materialId }, data: { indexError: message, indexedAt: null } });
@@ -92,42 +86,47 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
   const callStartedAt = Date.now();
   try {
     const actor = await requireManager();
-    const material = await prisma.studyMaterial.findUnique({ where: { id: materialId } });
     // A material from another school answers exactly like a missing one.
-    const allowed =
-      material &&
-      (actor.isSuperAdmin || (actor.schoolId !== null && material.schoolId === actor.schoolId)) &&
-      (actor.session.role === "admin" || material.uploadedByUserId === actor.session.id);
-    if (!material || !allowed) return { ok: false, error: "Material not found." };
+    const material = await loadManagedMaterial(actor, materialId);
+    if (!material) return { ok: false, error: "Material not found." };
 
     if (!material.fileName.toLowerCase().endsWith(".pdf")) {
       return fail(material.id, "Only PDF files can be used by the AI Tutor for now.");
     }
 
-    let bytes: Uint8Array;
-    try {
-      const res = await fetch(material.fileUrl);
-      if (!res.ok) return fail(material.id, "The stored file could not be downloaded.");
-      const length = Number(res.headers.get("content-length") ?? 0);
-      if (length > MAX_PDF_MB * 1024 * 1024) return fail(material.id, `This PDF is larger than ${MAX_PDF_MB} MB, which is too large to index.`);
-      bytes = new Uint8Array(await res.arrayBuffer());
-      if (bytes.length > MAX_PDF_MB * 1024 * 1024) return fail(material.id, `This PDF is larger than ${MAX_PDF_MB} MB, which is too large to index.`);
-    } catch {
-      return fail(material.id, "The stored file could not be downloaded.");
-    }
-
+    // Where the text comes from. A finished OCR run (lib/actions/material-ocr.ts) replaces the PDF's own text layer - it is the only
+    // readable text such a book has - and then the PDF is not even downloaded. Otherwise the PDF's text layer is read directly.
     let pages: string[];
-    try {
-      const { extractText, getDocumentProxy } = await import("unpdf");
-      const pdf = await getDocumentProxy(bytes);
-      const extracted = await extractText(pdf, { mergePages: false });
-      pages = extracted.text;
-    } catch {
-      return fail(material.id, "This PDF could not be read.");
+    let sourceSha: string | null;
+    const ocr = await loadCompleteOcr(material.id);
+    if (ocr) {
+      pages = ocr.pages;
+      sourceSha = ocr.sourceSha256;
+    } else {
+      let bytes: Uint8Array;
+      try {
+        const res = await fetch(material.fileUrl);
+        if (!res.ok) return fail(material.id, "The stored file could not be downloaded.");
+        const tooBig = `This PDF is larger than ${MAX_PDF_MB} MB, so it cannot be read in one go. It is read page by page (OCR) instead.`;
+        const length = Number(res.headers.get("content-length") ?? 0);
+        if (length > MAX_PDF_MB * 1024 * 1024) return fail(material.id, tooBig);
+        bytes = new Uint8Array(await res.arrayBuffer());
+        if (bytes.length > MAX_PDF_MB * 1024 * 1024) return fail(material.id, tooBig);
+      } catch {
+        return fail(material.id, "The stored file could not be downloaded.");
+      }
+      sourceSha = createHash("sha256").update(bytes).digest("hex");
+      try {
+        const { extractText, getDocumentProxy } = await import("unpdf");
+        const pdf = await getDocumentProxy(bytes);
+        const extracted = await extractText(pdf, { mergePages: false });
+        pages = extracted.text;
+      } catch {
+        return fail(material.id, "This PDF could not be read.");
+      }
+      // A legacy-font text layer extracts as symbols, not words: refuse it rather than index gibberish.
+      if (!assessTextLayer(pages).readable) return fail(material.id, UNREADABLE_TEXT_MESSAGE);
     }
-
-    // A legacy-font text layer extracts as symbols, not words: refuse it rather than index gibberish.
-    if (!assessTextLayer(pages).readable) return fail(material.id, UNREADABLE_TEXT_MESSAGE);
 
     // Count every passage the PDF produces, but only keep up to the ceiling to embed.
     const passages: { page: number; text: string }[] = [];
@@ -139,8 +138,22 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
       }
     }
     if (passages.length === 0) {
-      return fail(material.id, "No readable text was found in this PDF (it may be a scanned image), so the AI Tutor can't use it.");
+      return fail(material.id, "No readable text was found in this PDF (it may be a scanned image), so the AI Tutor can't use it. It can be read page by page (OCR) instead.");
     }
+
+    // Chapter links: only for a file whose chapter pages were established and checked (chapter-page-maps.ts, keyed by the file's
+    // hash) AND whose subject really has all those chapters. Anything else leaves passages whole-subject rather than guess.
+    const pageMap = sourceSha ? CHAPTER_PAGE_MAPS[sourceSha] : undefined;
+    const chapterIdBySlug = new Map<string, string>();
+    if (pageMap) {
+      const rows = await prisma.chapter.findMany({ where: { subjectId: material.subjectId, slug: { in: pageMap.ranges.map((r) => r.slug) } }, select: { id: true, slug: true } });
+      if (rows.length === pageMap.ranges.length) for (const r of rows) chapterIdBySlug.set(r.slug, r.id);
+    }
+    const linking = chapterIdBySlug.size > 0;
+    const chapterIdForPage = (page: number): string | null => {
+      const slug = linking ? chapterSlugForPage(pageMap, page) : null;
+      return (slug && chapterIdBySlug.get(slug)) || material.chapterId;
+    };
 
     const total = passages.length;
     const truncated = available > total;
@@ -167,9 +180,22 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
       await prisma.studyMaterial.update({ where: { id: material.id }, data: { indexedAt: null } });
     }
 
+    // Passages saved earlier (before the links existed, or by an interrupted run) get their chapter now; harmless to repeat.
+    if (linking && pageMap) {
+      for (const r of pageMap.ranges) {
+        const chapterId = chapterIdBySlug.get(r.slug) as string;
+        await prisma.materialChunk.updateMany({
+          where: { materialId: material.id, page: { gte: r.start, lte: r.end }, OR: [{ chapterId: null }, { chapterId: { not: chapterId } }] },
+          data: { chapterId },
+        });
+      }
+    }
+
     let embeddedThisCall = 0;
     let firstEmbedAt: number | null = null;
     let waitMs = 0;
+    let quotaHits = 0;
+    let quotaExhausted = false;
 
     while (done < total && embeddedThisCall < EMBED_PER_MINUTE) {
       if (Date.now() + BATCH_MARGIN_MS > callStartedAt + CALL_BUDGET_MS) break;
@@ -186,9 +212,15 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
         if (info.category !== "quota") {
           return fail(material.id, "The AI service could not process this material right now. Try indexing again in a moment.");
         }
-        // Rate limit: wait as long as the provider asked and retry the same slice if it fits in this
-        // call; otherwise hand the wait to the caller.
+        // Rate limit: wait as long as the provider asked and retry the same slice if it fits in this call; otherwise hand the
+        // wait to the caller. A long wait, or the same refusal again straight after waiting, is a daily limit: say so and stop.
+        quotaHits++;
         const retryMs = (info.retryAfterMs ?? 60_000) + 1_000;
+        if (retryMs > LONG_WAIT_MS || (quotaHits >= 2 && embeddedThisCall === 0)) {
+          waitMs = retryMs;
+          quotaExhausted = embeddedThisCall === 0;
+          break;
+        }
         if (Date.now() + retryMs + BATCH_MARGIN_MS <= callStartedAt + CALL_BUDGET_MS) {
           await sleep(retryMs);
           continue;
@@ -197,24 +229,25 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
         break;
       }
 
-      // Another run on the same material would make the saved prefix stop matching `done`.
-      if ((await prisma.materialChunk.count({ where: { materialId: material.id } })) !== done) {
-        return { ok: false, error: "This material is already being indexed. Wait a minute and try again." };
-      }
-      await prisma.materialChunk.createMany({
-        data: slice.map((p, j) => ({
+      // The saved count is re-checked and the rows inserted in one locked transaction, so a second run on the same material (another
+      // tab, a double click) can never insert the same passages twice.
+      const saveResult = await saveChunksAtomically(
+        material.id,
+        done,
+        slice.map((p, j) => ({
           materialId: material.id,
           schoolId: material.schoolId,
           schoolClassId: material.schoolClassId,
           subjectId: material.subjectId,
-          chapterId: material.chapterId,
+          chapterId: chapterIdForPage(p.page),
           topicId: material.topicId,
           chunkIndex: done + j,
           page: p.page,
           text: p.text,
           embedding: vectors[j],
         })),
-      });
+      );
+      if (saveResult !== "ok") return { ok: false, error: "This material is already being indexed. Wait a minute and try again." };
       done += slice.length;
       embeddedThisCall += slice.length;
     }
@@ -237,7 +270,7 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
       where: { id: material.id },
       data: { indexError: formatIndexStatus({ kind: "in_progress", done, total }) },
     });
-    return { ok: true, data: { chunks: done, total, available, complete: false, waitMs } };
+    return { ok: true, data: { chunks: done, total, available, complete: false, waitMs, quotaExhausted } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
     throw e;

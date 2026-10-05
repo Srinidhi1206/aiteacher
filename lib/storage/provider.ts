@@ -3,7 +3,7 @@
 // requires that token to exist for the module to load/compile, only to
 // actually perform an upload/delete/getUrl call.
 import "server-only";
-import { put, del, head } from "@vercel/blob";
+import { put, del, head, list } from "@vercel/blob";
 import { StorageProvider, StorageNotConfiguredError, UploadResult, BlobMetadata } from "./types";
 
 export class VercelBlobProvider implements StorageProvider {
@@ -40,6 +40,18 @@ export class VercelBlobProvider implements StorageProvider {
     const meta = await head(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN });
     return { url: meta.url, size: meta.size, contentType: meta.contentType };
   }
+
+  async list(prefix: string): Promise<{ pathname: string; url: string }[]> {
+    if (!this.isConfigured) throw new StorageNotConfiguredError(this.name);
+    const out: { pathname: string; url: string }[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await list({ prefix, cursor, limit: 1000, token: process.env.BLOB_READ_WRITE_TOKEN });
+      out.push(...page.blobs.map((b) => ({ pathname: b.pathname, url: b.url })));
+      cursor = page.hasMore ? page.cursor : undefined;
+    } while (cursor);
+    return out;
+  }
 }
 
 // Used automatically whenever BLOB_READ_WRITE_TOKEN isn't set (the current
@@ -61,6 +73,9 @@ export class UnavailableStorageProvider implements StorageProvider {
     throw new StorageNotConfiguredError(this.name);
   }
   async getMetadata(): Promise<BlobMetadata> {
+    throw new StorageNotConfiguredError(this.name);
+  }
+  async list(): Promise<{ pathname: string; url: string }[]> {
     throw new StorageNotConfiguredError(this.name);
   }
 }

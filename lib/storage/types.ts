@@ -30,6 +30,8 @@ export interface StorageProvider {
    * claimed by the browser (see lib/actions/materials.ts).
    */
   getMetadata(storageKey: string): Promise<BlobMetadata>;
+  /** Every stored object whose key starts with `prefix` (used to find the per-page files of an OCR run). */
+  list(prefix: string): Promise<{ pathname: string; url: string }[]>;
 }
 
 export class StorageNotConfiguredError extends Error {
