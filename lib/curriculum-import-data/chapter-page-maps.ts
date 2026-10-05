@@ -12,6 +12,8 @@ import { TELANGANA_BSE_CLASS10_MATHEMATICS } from "./telangana-bse-class10-mathe
 import { TELANGANA_BSE_CLASS10_PHYSICAL_SCIENCE } from "./telangana-bse-class10-physical-science";
 import { TELANGANA_BSE_CLASS10_BIOLOGICAL_SCIENCE } from "./telangana-bse-class10-biological-science";
 import { TELANGANA_BSE_CLASS10_SOCIAL_STUDIES } from "./telangana-bse-class10-social-studies";
+import { TELANGANA_BSE_CLASS10_HINDI } from "./telangana-bse-class10-hindi";
+import { TELANGANA_BSE_CLASS10_TELUGU } from "./telangana-bse-class10-telugu";
 
 export interface ChapterPageRange {
   slug: string;
@@ -51,6 +53,21 @@ export const CHAPTER_PAGE_MAPS: Record<string, ChapterPageMap> = {
     label: "Class 10 Social Studies (10th_social_em.pdf, 2019-20)",
     subjectSlug: "social-science",
     ranges: rangesFromStarts(TELANGANA_BSE_CLASS10_SOCIAL_STUDIES.map((c) => c.slug), [13, 26, 40, 56, 70, 83, 99, 114, 129, 143, 157, 174, 198, 214, 228, 244, 254, 270, 288, 304, 320], 336),
+  },
+  a0bc4ea50a8e34f19122822310acfc2f9c769c8b716b6fc8722abc2b98763495: {
+    label: "Class 10 Hindi (10th_hindi_sl_2020-21.pdf; read page by page with OCR)",
+    subjectSlug: "hindi",
+    // Lesson openers confirmed on the pages themselves (each opens with its "विषय प्रवेश" box). The book's printed numbering is not a
+    // constant offset from the PDF's, so these are PDF pages. Lesson 12 includes its supplementary story (to PDF page 88); pages 89-90
+    // (glossary, safety rules) belong to no lesson.
+    ranges: rangesFromStarts(TELANGANA_BSE_CLASS10_HINDI.map((c) => c.slug), [12, 15, 23, 30, 34, 40, 48, 52, 61, 68, 71, 79], 88),
+  },
+  b7d3831e37193acaac8b6c5fb0db56b75af146cf9212d4f3b3b4508c7f5dee4a: {
+    label: "Class 10 Telugu (10_TEL.pdf; read page by page with OCR)",
+    subjectSlug: "environmental-education",
+    // Lesson openers confirmed on the pages (numbered banner + title). Lesson 12 ends at PDF page 143; the supplementary reader
+    // (from 144) and the vocabulary section (from 178) are not lessons.
+    ranges: rangesFromStarts(TELANGANA_BSE_CLASS10_TELUGU.map((c) => c.slug), [14, 25, 38, 48, 59, 68, 78, 89, 99, 107, 121, 132], 143),
   },
 };
 

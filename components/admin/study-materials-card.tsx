@@ -384,8 +384,8 @@ export function StudyMaterialsCard() {
       if (quotaExhausted) break;
       stalled = pagesDone === lastDone ? stalled + 1 : 0;
       lastDone = pagesDone;
-      if (stalled >= 3) break;
-      await pause(500);
+      if (stalled >= 8) break; // the AI reader has overload spells of a few minutes; windows are saved as read, so waiting loses nothing
+      await pause(stalled > 0 ? 4000 : 500);
       res = await attempt(() => ocrMaterial(id), { ok: true as const, data: { pagesDone, totalPages, complete: false, quotaExhausted: false, failedWindows: 0 } });
     }
     if (res.ok && res.data?.complete) {
