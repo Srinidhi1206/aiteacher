@@ -18,6 +18,7 @@ import { listStates, listBoards, listSchools, listSchoolClasses, listSubjectsFor
 import { createMaterial, setMaterialPublished, deleteMaterial, listMaterialsForAdmin, setMaterialScope, updateMaterialDetails } from "@/lib/actions/materials";
 import { indexMaterial } from "@/lib/actions/material-index";
 import { ocrMaterial } from "@/lib/actions/material-ocr";
+import { linkMaterialChapters } from "@/lib/actions/material-chapters";
 import { parseIndexStatus, needsOcr } from "@/lib/rag/index-status";
 import { importMaterialFromUrl } from "@/lib/actions/material-import";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
@@ -358,6 +359,14 @@ export function StudyMaterialsCard() {
     } else if (res.ok) {
       showToast("Indexing is not finished yet", "Click \"Continue indexing\" to carry on from where it stopped.");
     } else showToast("Could not index for the AI Tutor", res.error ?? "");
+    refreshMaterials();
+  }
+
+  async function runLinkChapters(id: string, materialTitle: string) {
+    const res = await attempt(() => linkMaterialChapters(id), { ok: false as const, error: "The request was interrupted. Try again." });
+    if (!res.ok) showToast("Could not link chapters", res.error ?? "");
+    else if (!res.data?.mapped) showToast("No chapter pages on record for this file", `"${materialTitle}" stays whole-subject: its chapter pages have not been established, so nothing was linked.`);
+    else showToast("Passages linked to chapters", res.data.linked > 0 ? `${res.data.linked} passages of "${materialTitle}" were linked to their chapters.` : `"${materialTitle}" was already linked.`);
     refreshMaterials();
   }
 
@@ -711,6 +720,11 @@ export function StudyMaterialsCard() {
                                 {idx.tone === "partial" && <AlertTriangle className="h-3 w-3" />}
                                 {idx.label}
                               </span>
+                            )}
+                            {indexingId !== m.id && isPdf && idx.tone === "ok" && (
+                              <button onClick={() => runLinkChapters(m.id, m.title)} className="font-medium text-primary-600 hover:underline dark:text-primary-300">
+                                Link chapters
+                              </button>
                             )}
                             {indexingId !== m.id && isPdf && idx.action && (
                               <button

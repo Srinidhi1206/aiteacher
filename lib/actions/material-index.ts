@@ -32,7 +32,8 @@ import { assessTextLayer, UNREADABLE_TEXT_MESSAGE } from "@/lib/rag/text-quality
 import { MAX_DIRECT_READ_MB } from "@/lib/rag/limits";
 import { loadCompleteOcr } from "@/lib/rag/ocr-store";
 import { saveChunksAtomically } from "@/lib/rag/save-chunks";
-import { CHAPTER_PAGE_MAPS, chapterSlugForPage } from "@/lib/curriculum-import-data/chapter-page-maps";
+import { chapterSlugForPage } from "@/lib/curriculum-import-data/chapter-page-maps";
+import { planChapterLinks, linkSavedPassages } from "@/lib/rag/chapter-link";
 import { logAudit } from "@/lib/audit";
 import type { ActionResult } from "./materials";
 
@@ -143,16 +144,10 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
 
     // Chapter links: only for a file whose chapter pages were established and checked (chapter-page-maps.ts, keyed by the file's
     // hash) AND whose subject really has all those chapters. Anything else leaves passages whole-subject rather than guess.
-    const pageMap = sourceSha ? CHAPTER_PAGE_MAPS[sourceSha] : undefined;
-    const chapterIdBySlug = new Map<string, string>();
-    if (pageMap) {
-      const rows = await prisma.chapter.findMany({ where: { subjectId: material.subjectId, slug: { in: pageMap.ranges.map((r) => r.slug) } }, select: { id: true, slug: true } });
-      if (rows.length === pageMap.ranges.length) for (const r of rows) chapterIdBySlug.set(r.slug, r.id);
-    }
-    const linking = chapterIdBySlug.size > 0;
+    const links = await planChapterLinks(material.subjectId, sourceSha);
     const chapterIdForPage = (page: number): string | null => {
-      const slug = linking ? chapterSlugForPage(pageMap, page) : null;
-      return (slug && chapterIdBySlug.get(slug)) || material.chapterId;
+      const slug = links ? chapterSlugForPage(links.pageMap, page) : null;
+      return (slug && links?.chapterIdBySlug.get(slug)) || material.chapterId;
     };
 
     const total = passages.length;
@@ -181,15 +176,7 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
     }
 
     // Passages saved earlier (before the links existed, or by an interrupted run) get their chapter now; harmless to repeat.
-    if (linking && pageMap) {
-      for (const r of pageMap.ranges) {
-        const chapterId = chapterIdBySlug.get(r.slug) as string;
-        await prisma.materialChunk.updateMany({
-          where: { materialId: material.id, page: { gte: r.start, lte: r.end }, OR: [{ chapterId: null }, { chapterId: { not: chapterId } }] },
-          data: { chapterId },
-        });
-      }
-    }
+    if (links) await linkSavedPassages(material.id, links);
 
     let embeddedThisCall = 0;
     let firstEmbedAt: number | null = null;
