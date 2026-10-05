@@ -17,14 +17,14 @@ import { formatIndexStatus } from "@/lib/rag/index-status";
 import { expectedScriptForSubject, planWindows, validateOcrWindow, OCR_WINDOW_PAGES, type OcrWindowFile } from "@/lib/rag/ocr";
 import { openPageRenderer } from "@/lib/rag/ocr-render";
 import { ocrReaderConfigured, OcrReaderUnavailableError, readPages } from "@/lib/rag/ocr-reader";
-import { savedWindowStarts, saveWindow } from "@/lib/rag/ocr-store";
+import { savedPages, saveWindow } from "@/lib/rag/ocr-store";
 import type { ActionResult } from "./materials";
 
 // One call stays inside a 60 s function limit; windows are read a few at a time in parallel.
 const CALL_BUDGET_MS = 50_000;
 const PARALLEL_WINDOWS = 4;
 /** Roughly how long one batch of windows takes; a new batch is only started when this much time is left. */
-const BATCH_ALLOWANCE_MS = 16_000;
+const BATCH_ALLOWANCE_MS = 30_000;
 
 export interface OcrProgress {
   pagesDone: number;
@@ -39,12 +39,6 @@ export interface OcrProgress {
 async function recordStatus(materialId: string, pagesDone: number, totalPages: number): Promise<void> {
   const status = pagesDone >= totalPages ? formatIndexStatus({ kind: "ocr_ready", total: totalPages }) : formatIndexStatus({ kind: "ocr_progress", done: pagesDone, total: totalPages });
   await prisma.studyMaterial.update({ where: { id: materialId }, data: { indexError: status, indexedAt: null } });
-}
-
-function pagesInWindows(starts: Set<number>, totalPages: number): number {
-  let n = 0;
-  for (const w of planWindows(totalPages)) if (starts.has(w.start)) n += w.end - w.start + 1;
-  return n;
 }
 
 export async function ocrMaterial(materialId: string): Promise<ActionResult<OcrProgress>> {
@@ -91,8 +85,12 @@ export async function ocrMaterial(materialId: string): Promise<ActionResult<OcrP
     }
     try {
       const totalPages = renderer.pageCount;
-      const saved = await savedWindowStarts(material.id);
-      const todo = planWindows(totalPages).filter((w) => !saved.has(w.start));
+      const saved = await savedPages(material.id);
+      // A window is still to do unless every one of its pages has been read (the window size may have changed since an earlier call).
+      const todo = planWindows(totalPages).filter((w) => {
+        for (let p = w.start; p <= w.end; p++) if (!saved.has(p)) return true;
+        return false;
+      });
       let failedWindows = 0;
       let savedThisCall = 0;
       let quotaHit = false;
@@ -128,8 +126,9 @@ export async function ocrMaterial(materialId: string): Promise<ActionResult<OcrP
         if (savedThisCall === 0 && failedWindows >= batch.length) break; // nothing worked: do not keep spending calls
       }
 
-      const doneStarts = await savedWindowStarts(material.id);
-      const pagesDone = pagesInWindows(doneStarts, totalPages);
+      const doneNow = await savedPages(material.id);
+      let pagesDone = 0;
+      for (let p = 1; p <= totalPages; p++) if (doneNow.has(p)) pagesDone++;
       const complete = pagesDone >= totalPages;
       await recordStatus(material.id, pagesDone, totalPages);
       if (complete && savedThisCall > 0) {

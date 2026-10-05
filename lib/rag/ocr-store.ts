@@ -18,9 +18,11 @@ async function listWindows(materialId: string): Promise<{ start: number; end: nu
   return out;
 }
 
-/** First page of every window already saved (cheap: only the file listing is read). */
-export async function savedWindowStarts(materialId: string): Promise<Set<number>> {
-  return new Set((await listWindows(materialId)).map((w) => w.start));
+/** Every page already read, whatever the window size it was read in (cheap: only the file listing is read). */
+export async function savedPages(materialId: string): Promise<Set<number>> {
+  const pages = new Set<number>();
+  for (const w of await listWindows(materialId)) for (let p = w.start; p <= w.end; p++) pages.add(p);
+  return pages;
 }
 
 export async function saveWindow(materialId: string, w: OcrWindowFile): Promise<void> {
@@ -47,10 +49,10 @@ export async function loadCompleteOcr(materialId: string): Promise<{ pages: stri
     return null; // storage not configured / not reachable: behave as "no OCR text"
   }
   if (listed.length === 0) return null;
-  const byStart = new Map<number, string>();
-  for (const w of listed) if (!byStart.has(w.start)) byStart.set(w.start, w.url);
+  const byRange = new Map<string, string>();
+  for (const w of listed) if (!byRange.has(`${w.start}-${w.end}`)) byRange.set(`${w.start}-${w.end}`, w.url);
   const files: OcrWindowFile[] = [];
-  const entries = [...byStart.values()];
+  const entries = [...byRange.values()];
   for (let i = 0; i < entries.length; i += 10) {
     const got = await Promise.all(entries.slice(i, i + 10).map(fetchWindow));
     for (const g of got) if (g) files.push(g);

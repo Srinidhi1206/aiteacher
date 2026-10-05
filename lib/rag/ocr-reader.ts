@@ -12,6 +12,15 @@ export class OcrReaderUnavailableError extends Error {
   }
 }
 
+// Models that read these pages accurately (checked against pages whose text was read by eye). The free tier counts requests per DAY per model,
+// so a long book needs several; the configured tutor models come first, then these, and the oldest, least accurate one last.
+const OCR_EXTRA_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3-flash-preview", "gemini-3.5-flash"];
+
+export function ocrModelChain(): string[] {
+  const [primary, ...rest] = geminiModelChain();
+  return [...new Set([primary, ...OCR_EXTRA_MODELS, ...rest])];
+}
+
 export function ocrReaderConfigured(): boolean {
   return process.env.AI_PROVIDER?.trim().toLowerCase() === "gemini" && Boolean(process.env.GEMINI_API_KEY);
 }
@@ -28,13 +37,14 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
   ];
   let lastStatus: number | undefined;
   let sawQuota = false;
-  // Gemini answers 500/503/504 ("high demand") for a while at a time, per model. One quick retry on the same model, then the next model;
-  // the caller tries again on its next call. Never wait past the deadline.
+  // Gemini answers 500/503/504 ("high demand") for a while at a time, per model, and each model has its own daily allowance. One attempt
+  // per model (a hung or overloaded model must not eat the whole call), then the next model; the caller tries again on its next call.
+  // Never wait past the deadline.
   const RETRY_DELAY_MS = 1500;
   const MIN_ATTEMPT_MS = 6000;
-  for (const model of geminiModelChain()) {
+  for (const model of ocrModelChain()) {
     let thinkingOff = true;
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 1; attempt++) {
       const remaining = deadlineAt - Date.now();
       if (remaining < MIN_ATTEMPT_MS) break;
       try {
@@ -44,7 +54,7 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
           config: {
             temperature: 0,
             maxOutputTokens: 12_000,
-            abortSignal: AbortSignal.timeout(Math.min(30_000, remaining - 1000)),
+            abortSignal: AbortSignal.timeout(Math.min(28_000, remaining - 1000)),
             // Reading text needs no reasoning; switching it off is faster and cheaper. Some models refuse that, so retry once without.
             ...(thinkingOff ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
           },

@@ -5,8 +5,12 @@
 // book's own language - so it can be tested without any AI call. Nothing here touches the database.
 import { assessTextLayer } from "@/lib/rag/text-quality";
 
-/** Pages read per AI call. One: a slow or refused call then costs a single page, and every page is saved the moment it is read. */
-export const OCR_WINDOW_PAGES = 1;
+/**
+ * Pages read per AI call. The provider's free allowance is counted in REQUESTS per day per model, so more pages per request means more book
+ * per day, so more pages per request means more book per day - but a reply has to finish well inside the function's time limit (four pages
+ * of Devanagari or Telugu is too slow for these models), so two pages; a window is saved the moment it is read.
+ */
+export const OCR_WINDOW_PAGES = 2;
 
 export interface OcrWindowFile {
   version: 1;
@@ -94,7 +98,9 @@ export function assembleOcrPages(windows: OcrWindowFile[]): { pages: string[]; t
   const totalPages = windows[0].totalPages;
   const sha = windows[0].sourceSha256;
   const pages: (string | null)[] = new Array(totalPages).fill(null);
-  for (const w of windows) {
+  // Windows can overlap (a run that changed its window size part-way): the earliest, then the widest, supplies a page - always the same choice.
+  const ordered = [...windows].sort((a, b) => a.startPage - b.startPage || b.endPage - a.endPage);
+  for (const w of ordered) {
     if (w.totalPages !== totalPages || w.sourceSha256 !== sha) continue; // a leftover from a different file is ignored
     for (let i = 0; i < w.pages.length; i++) {
       const at = w.startPage - 1 + i;
