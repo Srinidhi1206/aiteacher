@@ -5,8 +5,8 @@
 // book's own language - so it can be tested without any AI call. Nothing here touches the database.
 import { assessTextLayer } from "@/lib/rag/text-quality";
 
-/** Pages read per AI call. Small on purpose: an answer stays well inside the output limit and one bad window costs little. */
-export const OCR_WINDOW_PAGES = 2;
+/** Pages read per AI call. One: a slow or refused call then costs a single page, and every page is saved the moment it is read. */
+export const OCR_WINDOW_PAGES = 1;
 
 export interface OcrWindowFile {
   version: 1;

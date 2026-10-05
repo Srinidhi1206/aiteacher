@@ -16,7 +16,8 @@ export function ocrReaderConfigured(): boolean {
   return process.env.AI_PROVIDER?.trim().toLowerCase() === "gemini" && Boolean(process.env.GEMINI_API_KEY);
 }
 
-export async function readPages(images: { page: number; png: Uint8Array }[]): Promise<{ pages: string[]; model: string }> {
+/** `deadlineAt` (epoch ms) is the latest moment this call may still be waiting on the AI: the caller's function has a hard time limit. */
+export async function readPages(images: { page: number; png: Uint8Array }[], deadlineAt: number): Promise<{ pages: string[]; model: string }> {
   if (!ocrReaderConfigured()) throw new OcrReaderUnavailableError("The AI reader is not configured.");
   const { GoogleGenAI } = await import("@google/genai");
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY as string });
@@ -27,18 +28,23 @@ export async function readPages(images: { page: number; png: Uint8Array }[]): Pr
   ];
   let lastStatus: number | undefined;
   let sawQuota = false;
-  const RETRY_DELAYS_MS = [1500, 3500]; // Gemini answers 500/503/504 for a second or two under load; a short retry usually clears it
+  // Gemini answers 500/503/504 ("high demand") for a while at a time, per model. One quick retry on the same model, then the next model;
+  // the caller tries again on its next call. Never wait past the deadline.
+  const RETRY_DELAY_MS = 1500;
+  const MIN_ATTEMPT_MS = 6000;
   for (const model of geminiModelChain()) {
     let thinkingOff = true;
-    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const remaining = deadlineAt - Date.now();
+      if (remaining < MIN_ATTEMPT_MS) break;
       try {
         const res = await ai.models.generateContent({
           model,
           contents: [{ role: "user", parts }],
           config: {
             temperature: 0,
-            maxOutputTokens: 16_000,
-            abortSignal: AbortSignal.timeout(40_000),
+            maxOutputTokens: 12_000,
+            abortSignal: AbortSignal.timeout(Math.min(30_000, remaining - 1000)),
             // Reading text needs no reasoning; switching it off is faster and cheaper. Some models refuse that, so retry once without.
             ...(thinkingOff ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
           },
@@ -56,11 +62,12 @@ export async function readPages(images: { page: number; png: Uint8Array }[]): Pr
         }
         if (status === 400 && thinkingOff) {
           thinkingOff = false; // this model may not allow thinking to be disabled
+          attempt--;
           continue;
         }
         const transient = status === 500 || status === 503 || status === 504 || name === "TimeoutError" || name === "AbortError";
-        if (transient && attempt < RETRY_DELAYS_MS.length) {
-          await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+        if (transient && attempt === 0 && deadlineAt - Date.now() > MIN_ATTEMPT_MS + RETRY_DELAY_MS) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
           continue;
         }
         break;

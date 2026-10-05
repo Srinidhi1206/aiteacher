@@ -311,12 +311,21 @@ export function StudyMaterialsCard() {
   }
 
   const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // A call can be cut off by the platform's time limit (the browser then sees an error, not an answer). What the call had already
+  // saved is kept, so an exception is treated as "no progress this time" and the loop's no-progress stop decides when to give up.
+  async function attempt<T>(call: () => Promise<T>, lost: T): Promise<T> {
+    try {
+      return await call();
+    } catch {
+      return lost;
+    }
+  }
 
   async function runIndex(id: string, materialTitle: string, opts?: { rebuild?: boolean; savedSoFar?: number; afterOcr?: boolean }) {
     setIndexingId(id);
     setIndexProgress({ done: opts?.savedSoFar ?? 0, total: null, unit: "passages" });
     // Only the first call may rebuild from scratch; every later call resumes from what is saved.
-    let res = await indexMaterial(id, opts?.rebuild ? { rebuild: true } : undefined);
+    let res = await attempt(() => indexMaterial(id, opts?.rebuild ? { rebuild: true } : undefined), { ok: false as const, error: "The request was interrupted. Click Continue indexing to carry on." });
     // The PDF's own text cannot be used (old font encoding, scanned, or too big): read its pages with OCR, then index that text.
     if (!res.ok && !opts?.afterOcr && needsOcr(res.error)) {
       await runOcr(id, materialTitle);
@@ -336,7 +345,7 @@ export function StudyMaterialsCard() {
       lastChunks = chunks;
       if (stalled >= 3) break;
       await pause(waitMs);
-      res = await indexMaterial(id);
+      res = await attempt(() => indexMaterial(id), { ok: true as const, data: { chunks, total, available: total, complete: false, waitMs: 2000 } });
     }
     setIndexingId(null);
     setIndexProgress(null);
@@ -356,7 +365,8 @@ export function StudyMaterialsCard() {
   async function runOcr(id: string, materialTitle: string) {
     setIndexingId(id);
     setIndexProgress({ done: 0, total: null, unit: "pages" });
-    let res = await ocrMaterial(id);
+    const lost = { ok: true as const, data: { pagesDone: 0, totalPages: 0, complete: false, quotaExhausted: false, failedWindows: 0 } };
+    let res = await attempt(() => ocrMaterial(id), lost);
     let stalled = 0;
     let lastDone = -1;
     for (let round = 0; round < 80 && res.ok && res.data && !res.data.complete; round++) {
@@ -367,7 +377,7 @@ export function StudyMaterialsCard() {
       lastDone = pagesDone;
       if (stalled >= 3) break;
       await pause(500);
-      res = await ocrMaterial(id);
+      res = await attempt(() => ocrMaterial(id), { ok: true as const, data: { pagesDone, totalPages, complete: false, quotaExhausted: false, failedWindows: 0 } });
     }
     if (res.ok && res.data?.complete) {
       showToast("All pages read", `"${materialTitle}": ${res.data.totalPages} pages read. Indexing it now.`);
