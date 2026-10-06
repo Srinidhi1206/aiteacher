@@ -31,6 +31,7 @@ import { formatIndexStatus } from "@/lib/rag/index-status";
 import { assessTextLayer, UNREADABLE_TEXT_MESSAGE } from "@/lib/rag/text-quality";
 import { MAX_DIRECT_READ_MB } from "@/lib/rag/limits";
 import { loadCompleteOcr } from "@/lib/rag/ocr-store";
+import { fetchPdfCached } from "@/lib/rag/pdf-cache";
 import { saveChunksAtomically } from "@/lib/rag/save-chunks";
 import { chapterSlugForPage } from "@/lib/curriculum-import-data/chapter-page-maps";
 import { planChapterLinks, linkSavedPassages } from "@/lib/rag/chapter-link";
@@ -104,18 +105,14 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
       pages = ocr.pages;
       sourceSha = ocr.sourceSha256;
     } else {
-      let bytes: Uint8Array;
-      try {
-        const res = await fetch(material.fileUrl);
-        if (!res.ok) return fail(material.id, "The stored file could not be downloaded.");
-        const tooBig = `This PDF is larger than ${MAX_PDF_MB} MB, so it cannot be read in one go. It is read page by page (OCR) instead.`;
-        const length = Number(res.headers.get("content-length") ?? 0);
-        if (length > MAX_PDF_MB * 1024 * 1024) return fail(material.id, tooBig);
-        bytes = new Uint8Array(await res.arrayBuffer());
-        if (bytes.length > MAX_PDF_MB * 1024 * 1024) return fail(material.id, tooBig);
-      } catch {
-        return fail(material.id, "The stored file could not be downloaded.");
+      const got = await fetchPdfCached(material.fileUrl, MAX_PDF_MB * 1024 * 1024);
+      if (!got.ok) {
+        return fail(
+          material.id,
+          got.reason === "too_big" ? `This PDF is larger than ${MAX_PDF_MB} MB, so it cannot be read in one go. It is read page by page (OCR) instead.` : "The stored file could not be downloaded.",
+        );
       }
+      const bytes = got.bytes;
       sourceSha = createHash("sha256").update(bytes).digest("hex");
       try {
         const { extractText, getDocumentProxy } = await import("unpdf");

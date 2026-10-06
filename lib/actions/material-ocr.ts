@@ -18,6 +18,7 @@ import { expectedScriptForSubject, planWindows, validateOcrWindow, OCR_WINDOW_PA
 import { openPageRenderer } from "@/lib/rag/ocr-render";
 import { ocrReaderConfigured, OcrReaderUnavailableError, readPages } from "@/lib/rag/ocr-reader";
 import { savedPages, saveWindow } from "@/lib/rag/ocr-store";
+import { fetchPdfCached } from "@/lib/rag/pdf-cache";
 import type { ActionResult } from "./materials";
 
 // One call stays inside a 60 s function limit; windows are read a few at a time in parallel.
@@ -50,15 +51,9 @@ export async function ocrMaterial(materialId: string): Promise<ActionResult<OcrP
     if (!material.fileName.toLowerCase().endsWith(".pdf")) return { ok: false, error: "Only PDF files can be read this way." };
     if (!ocrReaderConfigured()) return { ok: false, error: "The AI reader is not set up, so pages cannot be read right now." };
 
-    let bytes: Uint8Array;
-    try {
-      const res = await fetch(material.fileUrl);
-      if (!res.ok) return { ok: false, error: "The stored file could not be downloaded." };
-      if (Number(res.headers.get("content-length") ?? 0) > MAX_UPLOAD_BYTES) return { ok: false, error: "This file is larger than the upload limit." };
-      bytes = new Uint8Array(await res.arrayBuffer());
-    } catch {
-      return { ok: false, error: "The stored file could not be downloaded." };
-    }
+    const got = await fetchPdfCached(material.fileUrl, MAX_UPLOAD_BYTES);
+    if (!got.ok) return { ok: false, error: got.reason === "too_big" ? "This file is larger than the upload limit." : "The stored file could not be downloaded." };
+    const bytes = got.bytes;
 
     // Only a book that cannot be read directly is read with OCR - it costs AI calls, and the PDF's own text is better when it works.
     if (bytes.length <= MAX_DIRECT_READ_MB * 1024 * 1024) {

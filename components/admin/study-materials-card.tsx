@@ -382,8 +382,8 @@ export function StudyMaterialsCard() {
       if (!res.ok) {
         // The reader was busy or the call was cut off: nothing is lost, so wait a little and go again - until it has failed for a while running.
         stalled++;
-        if (stalled >= 8) break;
-        await pause(5000);
+        if (stalled >= 4) break;
+        await pause(Math.min(60_000, 10_000 * 2 ** stalled)); // 20 s, 40 s, 60 s: each retry costs a file download, and a daily limit does not clear in seconds
         res = await attempt(() => ocrMaterial(id), lost);
         continue;
       }
@@ -393,8 +393,8 @@ export function StudyMaterialsCard() {
       if (quotaExhausted) break;
       stalled = pagesDone === lastDone ? stalled + 1 : 0;
       lastDone = pagesDone;
-      if (stalled >= 8) break; // the AI reader has overload spells of a few minutes; windows are saved as read, so waiting loses nothing
-      await pause(stalled > 0 ? 4000 : 500);
+      if (stalled >= 4) break; // windows are saved as read, so stopping loses nothing; every further try costs a file download
+      await pause(stalled > 0 ? Math.min(60_000, 10_000 * 2 ** stalled) : 500);
       res = await attempt(() => ocrMaterial(id), { ok: true as const, data: { pagesDone, totalPages, complete: false, quotaExhausted: false, failedWindows: 0 } });
     }
     if (res.ok && res.data?.complete) {
