@@ -96,8 +96,9 @@ export function describeEmbeddingError(err: unknown): EmbeddingFailure {
   const e = err as { status?: unknown; name?: unknown; message?: unknown } | null;
   const status = typeof e?.status === "number" ? e.status : null;
   const message = typeof e?.message === "string" ? e.message : "";
-  const retry = /retry in ([\d.]+)\s*s/i.exec(message);
-  const retryAfterMs = retry ? Math.ceil(Number(retry[1]) * 1000) : null;
+  // "Please retry in 37.2s" (a per-minute limit) or "retry in 5h23m14.9s" (the daily limit): hours and minutes count too.
+  const retry = /retry in (?:(\d+)h)?(?:(\d+)m)?([\d.]+)s/i.exec(message);
+  const retryAfterMs = retry ? Math.ceil((Number(retry[1] ?? 0) * 3600 + Number(retry[2] ?? 0) * 60 + Number(retry[3])) * 1000) : null;
   if (status === 429) return { status, category: "quota", retryAfterMs };
   if (status === 401 || status === 403) return { status, category: "auth", retryAfterMs: null };
   if (status !== null && status >= 400 && status < 500) return { status, category: "bad_request", retryAfterMs: null };

@@ -378,7 +378,16 @@ export function StudyMaterialsCard() {
     let res = await attempt(() => ocrMaterial(id), lost);
     let stalled = 0;
     let lastDone = -1;
-    for (let round = 0; round < 80 && res.ok && res.data && !res.data.complete; round++) {
+    for (let round = 0; round < 120 && !(res.ok && res.data?.complete); round++) {
+      if (!res.ok) {
+        // The reader was busy or the call was cut off: nothing is lost, so wait a little and go again - until it has failed for a while running.
+        stalled++;
+        if (stalled >= 8) break;
+        await pause(5000);
+        res = await attempt(() => ocrMaterial(id), lost);
+        continue;
+      }
+      if (!res.data) break;
       const { pagesDone, totalPages, quotaExhausted } = res.data;
       setIndexProgress({ done: pagesDone, total: totalPages, unit: "pages" });
       if (quotaExhausted) break;

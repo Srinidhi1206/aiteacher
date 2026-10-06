@@ -200,10 +200,11 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
           return fail(material.id, "The AI service could not process this material right now. Try indexing again in a moment.");
         }
         // Rate limit: wait as long as the provider asked and retry the same slice if it fits in this call; otherwise hand the
-        // wait to the caller. A long wait, or the same refusal again straight after waiting, is a daily limit: say so and stop.
+        // wait to the caller. Only a LONG wait (the provider says hours) is the daily limit: say so and stop. A short wait is the
+        // per-minute limit - other runs share it - so just wait it out.
         quotaHits++;
         const retryMs = (info.retryAfterMs ?? 60_000) + 1_000;
-        if (retryMs > LONG_WAIT_MS || (quotaHits >= 2 && embeddedThisCall === 0)) {
+        if (retryMs > LONG_WAIT_MS) {
           waitMs = retryMs;
           quotaExhausted = embeddedThisCall === 0;
           break;

@@ -22,7 +22,7 @@ import type { ActionResult } from "./materials";
 
 // One call stays inside a 60 s function limit; windows are read a few at a time in parallel.
 const CALL_BUDGET_MS = 50_000;
-const PARALLEL_WINDOWS = 4;
+const PARALLEL_WINDOWS = 3;
 /** Roughly how long one batch of windows takes; a new batch is only started when this much time is left. */
 const BATCH_ALLOWANCE_MS = 30_000;
 
@@ -108,7 +108,7 @@ export async function ocrMaterial(materialId: string): Promise<ActionResult<OcrP
         }
         const outcomes = await Promise.allSettled(
           rendered.map(async (w) => {
-            const { pages, model } = await readPages(w.images, startedAt + CALL_BUDGET_MS);
+            const { pages, model } = await readPages(w.images, startedAt + CALL_BUDGET_MS, w.start);
             const check = validateOcrWindow(pages, script);
             if (!check.ok) throw new Error(check.reason);
             const file: OcrWindowFile = { version: 1, totalPages, startPage: w.start, endPage: w.end, pages, sourceSha256: sha, model };

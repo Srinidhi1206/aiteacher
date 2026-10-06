@@ -26,7 +26,7 @@ export function ocrReaderConfigured(): boolean {
 }
 
 /** `deadlineAt` (epoch ms) is the latest moment this call may still be waiting on the AI: the caller's function has a hard time limit. */
-export async function readPages(images: { page: number; png: Uint8Array }[], deadlineAt: number): Promise<{ pages: string[]; model: string }> {
+export async function readPages(images: { page: number; png: Uint8Array }[], deadlineAt: number, firstModel = 0): Promise<{ pages: string[]; model: string }> {
   if (!ocrReaderConfigured()) throw new OcrReaderUnavailableError("The AI reader is not configured.");
   const { GoogleGenAI } = await import("@google/genai");
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY as string });
@@ -37,12 +37,16 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
   ];
   let lastStatus: number | undefined;
   let sawQuota = false;
+  let sawOther = false; // a model that failed for some reason other than quota (overload, timeout, unreadable answer)
+  // Start each window on a different model so parallel windows spread across the models' per-minute limits instead of all hitting one.
+  const chain = ocrModelChain();
+  const ordered = chain.map((_, i) => chain[(firstModel + i) % chain.length]);
   // Gemini answers 500/503/504 ("high demand") for a while at a time, per model, and each model has its own daily allowance. One attempt
   // per model (a hung or overloaded model must not eat the whole call), then the next model; the caller tries again on its next call.
   // Never wait past the deadline.
   const RETRY_DELAY_MS = 1500;
   const MIN_ATTEMPT_MS = 6000;
-  for (const model of ocrModelChain()) {
+  for (const model of ordered) {
     let thinkingOff = true;
     for (let attempt = 0; attempt < 1; attempt++) {
       const remaining = deadlineAt - Date.now();
@@ -61,6 +65,7 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
         });
         const pages = res.text ? parseOcrResponse(res.text, startPage, images.length) : null;
         if (pages) return { pages, model };
+        sawOther = true;
         break; // answered, but not in the requested shape: try the next model
       } catch (err) {
         const status = (err as { status?: number } | null)?.status;
@@ -75,6 +80,7 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
           attempt--;
           continue;
         }
+        sawOther = true;
         const transient = status === 500 || status === 503 || status === 504 || name === "TimeoutError" || name === "AbortError";
         if (transient && attempt === 0 && deadlineAt - Date.now() > MIN_ATTEMPT_MS + RETRY_DELAY_MS) {
           await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
@@ -86,5 +92,7 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
   }
   // eslint-disable-next-line no-console
   console.error("[ocr] reader failed", lastStatus ? { status: lastStatus } : {});
-  throw new OcrReaderUnavailableError(sawQuota ? "The AI reader is out of quota right now. Progress is saved; try again later." : "The AI reader could not read these pages right now.", sawQuota);
+  // "Out of quota" only when quota was the whole story; a mixture of refusals and overload is just a busy moment worth retrying.
+  const allQuota = sawQuota && !sawOther;
+  throw new OcrReaderUnavailableError(allQuota ? "The AI reader is out of quota right now. Progress is saved; try again later." : "The AI reader is busy right now. Progress is saved; it will be tried again.", allQuota);
 }
