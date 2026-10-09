@@ -8,7 +8,6 @@
 //
 // The pass itself is lib/rag/ocr-run.ts: it looks at saved progress before it downloads anything, and it stops at once - without retrying -
 // when file storage is blocked or the book's download budget is used up.
-import { createHash } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
 import { loadManagedMaterial, requireManager } from "@/lib/materials/manager";
@@ -18,11 +17,12 @@ import { StorageBlockedError, assertStorageAvailable } from "@/lib/storage/block
 import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 import { MAX_DIRECT_READ_MB } from "@/lib/rag/limits";
 import { assessTextLayer } from "@/lib/rag/text-quality";
-import { formatIndexStatus, parseIndexStatus } from "@/lib/rag/index-status";
+import { formatIndexStatus, mayWriteOcrStatus, parseIndexStatus } from "@/lib/rag/index-status";
 import { expectedScriptForSubject, validateOcrWindow, OCR_WINDOW_PAGES } from "@/lib/rag/ocr";
 import { openPageRenderer } from "@/lib/rag/ocr-render";
 import { ocrReaderConfigured, OcrReaderUnavailableError, readPages } from "@/lib/rag/ocr-reader";
-import { savedPages, saveWindow } from "@/lib/rag/ocr-store";
+import { savedPages, saveWindow, verifySaved } from "@/lib/rag/ocr-store";
+import { extractPdfPages } from "@/lib/rag/pdf-text";
 import { fetchPdfCached } from "@/lib/rag/pdf-cache";
 import { runOcrPass, type OcrProgress } from "@/lib/rag/ocr-run";
 import type { ActionResult } from "./materials";
@@ -37,9 +37,7 @@ const BATCH_ALLOWANCE_MS = 30_000;
 
 async function textLayerUsable(bytes: Uint8Array): Promise<boolean> {
   try {
-    const { extractText, getDocumentProxy } = await import("unpdf");
-    const extracted = await extractText(await getDocumentProxy(new Uint8Array(bytes)), { mergePages: false });
-    const pages = Array.isArray(extracted.text) ? extracted.text : [extracted.text];
+    const pages = await extractPdfPages(bytes); // pdf.js gets its own copy: the shared download is left intact
     return pages.join("").replace(/\s+/g, "").length >= 200 && assessTextLayer(pages).readable;
   } catch {
     return false; // the text layer could not even be opened: read the pages
@@ -64,18 +62,21 @@ export async function ocrMaterial(materialId: string): Promise<ActionResult<OcrP
     const result = await runOcrPass({
       knownTotalPages,
       getSavedPages: () => savedPages(material.id),
+      verifySaved: () => verifySaved(material.id),
       saveWindow: (w) => saveWindow(material.id, w),
-      getPdf: () => fetchPdfCached(material.fileUrl, MAX_UPLOAD_BYTES, { materialId: material.id }),
+      getPdf: () => fetchPdfCached(material.fileUrl, MAX_UPLOAD_BYTES, { materialId: material.id, expectedBytes: material.sizeKb * 1024 }),
       maxDirectBytes: MAX_DIRECT_READ_MB * 1024 * 1024,
       textLayerUsable,
-      sha256: (bytes) => createHash("sha256").update(bytes).digest("hex"),
       openRenderer: openPageRenderer,
       readWindow: (images, firstModel) => readPages(images, startedAt + CALL_BUDGET_MS, firstModel),
       validate: (pages) => validateOcrWindow(pages, script),
       isQuotaFailure: (reason) => reason instanceof OcrReaderUnavailableError && reason.quota,
       recordStatus: async (pagesDone, totalPages) => {
         const status = pagesDone >= totalPages ? formatIndexStatus({ kind: "ocr_ready", total: totalPages }) : formatIndexStatus({ kind: "ocr_progress", done: pagesDone, total: totalPages });
-        if (status !== material.indexError) await prisma.studyMaterial.update({ where: { id: material.id }, data: { indexError: status, indexedAt: null } });
+        // Never over-write the record of a book that is being (or has been) indexed: that status carries passage progress only indexing owns.
+        if (status !== material.indexError && mayWriteOcrStatus(material.indexError)) {
+          await prisma.studyMaterial.update({ where: { id: material.id }, data: { indexError: status, indexedAt: null } });
+        }
       },
       onComplete: (totalPages) => logAudit(actor.session.id, "USER_UPDATE", `StudyMaterial:${material.id}`, `Read all ${totalPages} pages with OCR (window of ${OCR_WINDOW_PAGES} pages): "${material.title}"`),
       now: Date.now,

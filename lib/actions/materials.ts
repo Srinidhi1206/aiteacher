@@ -7,6 +7,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getCurrentSession, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
+import { storageFailureMessage } from "@/lib/storage/errors";
 import { deleteOcr } from "@/lib/rag/ocr-store";
 import { MaterialType } from "@prisma/client";
 import { checkMaterialPlacement } from "@/lib/materials/placement";
@@ -95,7 +96,7 @@ export async function createMaterial(
       meta = await storage.getMetadata(fileRef.storageKey);
     } catch (e) {
       if (e instanceof StorageNotConfiguredError) return { ok: false, error: e.message };
-      return { ok: false, error: "Could not verify the uploaded file - please try uploading again." };
+      return { ok: false, error: storageFailureMessage(e, "Could not verify the uploaded file - please try uploading again.") };
     }
 
     const fileCheck = validateUploadFile({ type: meta.contentType, size: meta.size });
@@ -238,12 +239,12 @@ export async function deleteMaterial(materialId: string): Promise<ActionResult> 
     if (storage.isConfigured) {
       try {
         await storage.delete(material.storageKey);
-        await deleteOcr(material.id); // the text read from its pages with OCR, if any
       } catch {
         // Storage delete failing shouldn't block removing the catalog
         // entry - the object becoming orphaned in the bucket is a lesser
         // problem than a broken admin screen. Logged via AuditLog below.
       }
+      await deleteOcr(material.id); // the text read from its pages with OCR, if any - attempted even if the PDF could not be deleted (never throws)
     }
     await prisma.studyMaterial.delete({ where: { id: materialId } });
     await prisma.auditLog.create({

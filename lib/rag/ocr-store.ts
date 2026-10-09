@@ -6,7 +6,8 @@ import { createOcrStore } from "@/lib/rag/ocr-store-core";
 const store = createOcrStore({ storage });
 
 export const savedPages = store.savedPages;
+export const verifySaved = store.verifySaved;
 export const saveWindow = store.saveWindow;
-export const loadCompleteOcr = store.loadCompleteOcr;
+export const readOcrState = store.readOcrState;
 export const readOcrIdentity = store.readOcrIdentity;
 export const deleteOcr = store.deleteOcr;

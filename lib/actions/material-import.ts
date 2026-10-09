@@ -18,6 +18,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getCurrentSession, UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
 import { storage, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
+import { storageFailureMessage } from "@/lib/storage/errors";
 import { fetchPublicPdf, validateImportUrl, ImportError } from "@/lib/net/safe-fetch";
 import { MaterialType } from "@prisma/client";
 import { createMaterial, type ActionResult } from "./materials";
@@ -90,7 +91,7 @@ export async function importMaterialFromUrl(input: unknown): Promise<ActionResul
       });
     } catch (e) {
       if (e instanceof StorageNotConfiguredError) return { ok: false, error: e.message };
-      return { ok: false, error: "Could not store the downloaded file." };
+      return { ok: false, error: storageFailureMessage(e, "Could not store the downloaded file.") };
     }
 
     // All school/board/curriculum authorization happens here, exactly as for a manual upload.

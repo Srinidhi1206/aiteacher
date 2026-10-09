@@ -3,7 +3,6 @@
 // Links an already-indexed material's passages to its chapters (no re-reading, no re-embedding). Only does anything for a file whose
 // chapter pages were established and checked; says so plainly otherwise. Finding out WHICH file a material is goes through
 // lib/rag/source-identity.ts, so it never fetches the same PDF twice in a row and never fetches a very large one at all.
-import { createHash } from "node:crypto";
 import { UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
 import { loadManagedMaterial, requireManager } from "@/lib/materials/manager";
 import { readOcrIdentity } from "@/lib/rag/ocr-store";
@@ -28,8 +27,7 @@ export async function linkMaterialChapters(materialId: string): Promise<ActionRe
       material: { id: material.id, sizeKb: material.sizeKb },
       maxDirectBytes: MAX_DIRECT_READ_MB * 1024 * 1024,
       readOcrIdentity: () => readOcrIdentity(material.id),
-      getPdf: () => fetchPdfCached(material.fileUrl, MAX_UPLOAD_BYTES, { materialId: material.id }),
-      sha256: (bytes) => createHash("sha256").update(bytes).digest("hex"),
+      getPdf: () => fetchPdfCached(material.fileUrl, MAX_UPLOAD_BYTES, { materialId: material.id, expectedBytes: material.sizeKb * 1024 }),
     });
     if (!identity.ok) return { ok: false, error: identity.message };
 

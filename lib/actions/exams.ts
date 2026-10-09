@@ -12,6 +12,8 @@ import { notifyQuietly, notifyUserQuietly, audienceForClassInSchool } from "@/li
 import { getCurrentSession, requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { resolveAuthor, canManageAuthored, actingNote } from "@/lib/academics/acting";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
+import { isStorageBlocked } from "@/lib/storage/errors";
+import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 import { QuestionType } from "@prisma/client";
 import type { ActionResult } from "./materials";
 import { recalculateProgressForStudent } from "@/lib/analytics/progress";
@@ -113,6 +115,7 @@ export async function createExam(input: unknown, file?: File | null): Promise<Ac
         storageKey = uploaded.storageKey;
       } catch (e) {
         if (e instanceof StorageNotConfiguredError) return { ok: false, error: e.message };
+        if (isStorageBlocked(e)) return { ok: false, error: STORAGE_BLOCKED_MESSAGE };
         throw e;
       }
     }

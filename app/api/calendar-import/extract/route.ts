@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentSession } from "@/lib/auth/current-session";
 import { storage, safeFilename } from "@/lib/storage";
+import { uploadOrBlocked } from "@/lib/storage/errors";
+import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 import { extractCalendarPreview, ACCEPTED_TYPES, MAX_BYTES } from "@/lib/calendar-import/extract";
 import { getGeminiReader } from "@/lib/calendar-import/ai-reader";
 import { prisma } from "@/lib/prisma";
@@ -51,7 +53,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // Keep the original for reference, then read it. If reading fails nothing is kept.
   const pathname = `calendar-imports/${admin.schoolId ?? "platform"}/${Date.now()}-${safeFilename(file.name)}`;
-  const uploaded = await storage.upload({ file: new Blob([bytes], { type: kind }), pathname, contentType: kind });
+  // A blocked file store is answered plainly (nothing was kept, nothing was read); any other storage error behaves exactly as before.
+  const stored = await uploadOrBlocked(() => storage.upload({ file: new Blob([bytes], { type: kind }), pathname, contentType: kind }));
+  if (!stored.ok) return NextResponse.json({ ok: false, error: STORAGE_BLOCKED_MESSAGE }, { status: 503 });
+  const uploaded = stored.value;
 
   const outcome = await extractCalendarPreview(bytes, kind, { pdfText, reader: getGeminiReader() }, { defaultYear: null });
   if (!outcome.ok) {

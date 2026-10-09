@@ -49,3 +49,26 @@ const NEEDS_OCR_PREFIXES = ["This PDF's text uses an old font encoding", "No rea
 export function needsOcr(text: string | null | undefined): boolean {
   return !!text && NEEDS_OCR_PREFIXES.some((p) => text.startsWith(p));
 }
+
+/**
+ * True when the saved status says this book's text comes from OCR (its pages were read, are being read, or indexing from them is under way).
+ * Used so that a recoverable error never erases that fact: without it a resumed call would not know where the text lives.
+ */
+export function hasOcrMarker(text: string | null | undefined): boolean {
+  const n = parseIndexStatus(text);
+  return n?.kind === "ocr_ready" || n?.kind === "ocr_progress" || (n?.kind === "in_progress" && n.ocr === true);
+}
+
+/**
+ * Whether the page-reading step may write its own progress status over the current one. It must never replace the record of a book that is
+ * being (or has been) indexed - that status carries passage progress which only indexing owns.
+ */
+export function mayWriteOcrStatus(current: string | null | undefined): boolean {
+  const n = parseIndexStatus(current);
+  return !(n?.kind === "in_progress" || n?.kind === "complete" || n?.kind === "truncated");
+}
+
+/** Whether an ordinary failure may be written over the saved status. It may not when that status carries the OCR marker (see hasOcrMarker). */
+export function shouldRecordFailure(current: string | null | undefined): boolean {
+  return !hasOcrMarker(current);
+}

@@ -5,6 +5,8 @@ import { NextResponse } from "next/server";
 import { getCurrentSession } from "@/lib/auth/current-session";
 import { prisma } from "@/lib/prisma";
 import { storage, safeFilename } from "@/lib/storage";
+import { uploadOrBlocked } from "@/lib/storage/errors";
+import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 import { ACCEPTED_TYPES, MAX_BYTES } from "@/lib/calendar-import/extract";
 
 export type DocumentKind = (typeof ACCEPTED_TYPES)[number];
@@ -56,7 +58,9 @@ export async function receiveImportDocument(request: Request, folder: string) {
   if (!storage.isConfigured) return fail("File storage is not available, so the original document cannot be kept. Try again later.", 503);
 
   const name = safeFilename(file.name);
-  const uploaded = await storage.upload({ file: new Blob([bytes], { type: kind }), pathname: `${folder}/${admin.schoolId ?? "platform"}/${Date.now()}-${name}`, contentType: kind });
+  const stored = await uploadOrBlocked(() => storage.upload({ file: new Blob([bytes], { type: kind }), pathname: `${folder}/${admin.schoolId ?? "platform"}/${Date.now()}-${name}`, contentType: kind }));
+  if (!stored.ok) return fail(STORAGE_BLOCKED_MESSAGE, 503);
+  const uploaded = stored.value;
   return {
     ok: true as const,
     bytes,

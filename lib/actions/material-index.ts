@@ -22,17 +22,17 @@
 // Saved passages are checked against the freshly chunked file before resuming; if they no
 // longer fit it (a different file, or text extraction changed) they are replaced rather than
 // left orphaned. `rebuild` is the only way to throw away a good prefix.
-import { createHash } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
 import { loadManagedMaterial, requireManager } from "@/lib/materials/manager";
 import { chunkText, embedTexts, describeEmbeddingError, EMBED_PER_MINUTE, INDEX_BATCH_SIZE } from "@/lib/rag";
-import { formatIndexStatus, parseIndexStatus } from "@/lib/rag/index-status";
+import { formatIndexStatus, parseIndexStatus, shouldRecordFailure } from "@/lib/rag/index-status";
 import { assessTextLayer } from "@/lib/rag/text-quality";
 import { MAX_DIRECT_READ_MB } from "@/lib/rag/limits";
-import { loadCompleteOcr } from "@/lib/rag/ocr-store";
+import { readOcrState } from "@/lib/rag/ocr-store";
+import { extractPdfPages } from "@/lib/rag/pdf-text";
 import { fetchPdfCached } from "@/lib/rag/pdf-cache";
-import { resolveIndexSource, isAlreadyComplete } from "@/lib/rag/index-source";
+import { resolveIndexSource, isAlreadyComplete, ocrRepairStatus } from "@/lib/rag/index-source";
 import { StorageBlockedError } from "@/lib/storage/blocked";
 import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 import { saveChunksAtomically } from "@/lib/rag/save-chunks";
@@ -65,8 +65,15 @@ export interface IndexProgress {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function fail(materialId: string, message: string): Promise<ActionResult<IndexProgress>> {
-  await prisma.studyMaterial.update({ where: { id: materialId }, data: { indexError: message, indexedAt: null } });
+/**
+ * Records an ordinary failure on the material and reports it. A status that carries the OCR marker ("Pages read (OCR)...", "...(from OCR)") is
+ * left alone: the marker is how a resumed call knows where this book's text lives, and a recoverable error (a download hiccup, a busy AI
+ * service) must not erase it. The error is still returned to the admin.
+ */
+async function fail(material: { id: string; indexError: string | null }, message: string): Promise<ActionResult<IndexProgress>> {
+  if (shouldRecordFailure(material.indexError)) {
+    await prisma.studyMaterial.update({ where: { id: material.id }, data: { indexError: message, indexedAt: null } });
+  }
   return { ok: false, error: message };
 }
 
@@ -96,7 +103,7 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
     if (!material) return { ok: false, error: "Material not found." };
 
     if (!material.fileName.toLowerCase().endsWith(".pdf")) {
-      return fail(material.id, "Only PDF files can be used by the AI Tutor for now.");
+      return fail(material, "Only PDF files can be used by the AI Tutor for now.");
     }
 
     // Nothing to do for a book that is already complete: answer from the saved status, without downloading anything or listing storage.
@@ -112,17 +119,23 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
     const source = await resolveIndexSource({
       material: { id: material.id, sizeKb: material.sizeKb, indexError: material.indexError },
       maxDirectBytes: MAX_PDF_MB * 1024 * 1024,
-      loadOcr: () => loadCompleteOcr(material.id),
-      getPdf: () => fetchPdfCached(material.fileUrl, MAX_PDF_MB * 1024 * 1024, { materialId: material.id }),
-      extractPages: async (bytes) => {
-        const { extractText, getDocumentProxy } = await import("unpdf");
-        const extracted = await extractText(await getDocumentProxy(bytes), { mergePages: false });
-        return extracted.text;
-      },
+      loadOcr: () => readOcrState(material.id),
+      getPdf: () => fetchPdfCached(material.fileUrl, MAX_PDF_MB * 1024 * 1024, { materialId: material.id, expectedBytes: material.sizeKb * 1024 }),
+      extractPages: extractPdfPages, // gives pdf.js its own copy of the bytes; the downloader's copy and its hash stay intact
       textIsReadable: (pages) => assessTextLayer(pages).readable,
-      sha256: (bytes) => createHash("sha256").update(bytes).digest("hex"),
     });
-    if (!source.ok) return source.kind === "stop" ? { ok: false, error: source.message } : fail(material.id, source.message);
+    if (!source.ok) {
+      // Stop and temporary problems change nothing: the saved status (it carries resumable progress) is left exactly as it was.
+      if (source.kind === "stop" || source.kind === "transient") return { ok: false, error: source.message };
+      if (source.kind === "ocr_incomplete") {
+        // The saved page-reading results are missing or partly unusable. Make the status tell the truth, so the admin screen offers to
+        // continue reading pages - but only over a status that page-reading owns, never over indexing progress.
+        const repaired = ocrRepairStatus(material.indexError, source.progress);
+        if (repaired) await prisma.studyMaterial.update({ where: { id: material.id }, data: { indexError: repaired, indexedAt: null } });
+        return { ok: false, error: source.message };
+      }
+      return fail(material, source.message);
+    }
     const pages = source.pages;
     const sourceSha = source.sourceSha;
 
@@ -136,7 +149,7 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
       }
     }
     if (passages.length === 0) {
-      return fail(material.id, "No readable text was found in this PDF (it may be a scanned image), so the AI Tutor can't use it. It can be read page by page (OCR) instead.");
+      return fail(material, "No readable text was found in this PDF (it may be a scanned image), so the AI Tutor can't use it. It can be read page by page (OCR) instead.");
     }
 
     // Chapter links: only for a file whose chapter pages were established and checked (chapter-page-maps.ts, keyed by the file's
@@ -194,7 +207,7 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
         const info = describeEmbeddingError(err);
         console.error(`[index] embedding failed material=${material.id} status=${info.status ?? "none"} category=${info.category} done=${done}/${total} batch=${slice.length}`);
         if (info.category !== "quota") {
-          return fail(material.id, "The AI service could not process this material right now. Try indexing again in a moment.");
+          return fail(material, "The AI service could not process this material right now. Try indexing again in a moment.");
         }
         // Rate limit: wait as long as the provider asked and retry the same slice if it fits in this call; otherwise hand the
         // wait to the caller. Only a LONG wait (the provider says hours) is the daily limit: say so and stop. A short wait is the

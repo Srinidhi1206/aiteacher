@@ -11,6 +11,8 @@ import { notifyQuietly, notifyUserQuietly, audienceForClassInSchool } from "@/li
 import { getCurrentSession, requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { resolveAuthor, canManageAuthored, actingNote } from "@/lib/academics/acting";
 import { storage, validateUploadFile, safeFilename, StorageNotConfiguredError } from "@/lib/storage";
+import { isStorageBlocked } from "@/lib/storage/errors";
+import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 import type { ActionResult } from "./materials";
 
 const worksheetInputSchema = z.object({
@@ -79,6 +81,7 @@ export async function createWorksheet(input: unknown, file?: File | null): Promi
         storageKey = uploaded.storageKey;
       } catch (e) {
         if (e instanceof StorageNotConfiguredError) return { ok: false, error: e.message };
+        if (isStorageBlocked(e)) return { ok: false, error: STORAGE_BLOCKED_MESSAGE };
         throw e;
       }
     }

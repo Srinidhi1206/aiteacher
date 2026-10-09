@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { getCurrentSession } from "@/lib/auth/current-session";
 import { ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES } from "@/lib/storage";
+import { isStorageBreakerOpen } from "@/lib/storage/blocked";
+import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 
 // Issues short-lived client-upload tokens so the browser can send a study
 // material's bytes straight to Vercel Blob, never through this (or any)
@@ -13,6 +15,8 @@ import { ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES } from "@/lib/storage";
 // independently re-verifies the upload via storage.getMetadata() rather
 // than trusting anything the client claims.
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // Storage is already known to be blocked on this instance: say so now instead of letting the browser start a large upload that cannot succeed.
+  if (isStorageBreakerOpen()) return NextResponse.json({ error: STORAGE_BLOCKED_MESSAGE }, { status: 503 });
   const body = (await request.json()) as HandleUploadBody;
 
   try {
