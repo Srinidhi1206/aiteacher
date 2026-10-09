@@ -286,11 +286,37 @@ test("a readable-text book is refused BEFORE any page is read, and that check is
   assert.equal(checks, 0);
 });
 
-test("when every window fails on quota the pass reports it, saves nothing and keeps progress", async () => {
-  const h = passHarness({ saved: [1, 2], readWindow: async () => Promise.reject(new Error("quota")), isQuotaFailure: () => true });
+test("when every window fails on quota the pass returns the quotaExhausted RESULT (so the admin screen stops at once), saves nothing, keeps progress", async () => {
+  let reads = 0;
+  const h = passHarness({ saved: [1, 2], total: 12, parallelWindows: 1, readWindow: async () => (reads++, Promise.reject(new Error("quota"))), isQuotaFailure: () => true });
   const r = await runOcrPass(h.deps);
-  assert.ok(!r.ok && /out of quota/.test(r.error));
+  assert.ok(r.ok, "quota is a result, not an error: an error makes the screen retry");
+  assert.deepEqual([r.data.quotaExhausted, r.data.complete, r.data.pagesDone, r.data.totalPages], [true, false, 2, 12]);
   assert.deepEqual([...h.saved].sort(), [1, 2]);
+  assert.deepEqual(h.log.statuses.at(-1), [2, 12], "the saved progress is still recorded truthfully");
+  assert.equal(reads, 1, "one window was tried; no further batch starts once the limit is hit");
+});
+
+test("a busy / mixed failure (not all quota) with nothing saved is still an ERROR - the screen may retry it once", async () => {
+  const h = passHarness({ saved: [1, 2], readWindow: async () => Promise.reject(new Error("busy")), isQuotaFailure: () => false });
+  const r = await runOcrPass(h.deps);
+  assert.ok(!r.ok && /could not be read this time/.test(r.error));
+  assert.deepEqual([...h.saved].sort(), [1, 2]);
+});
+
+test("quota hit AFTER some windows were saved: progress is reported normally, not as an exhausted call", async () => {
+  let n = 0;
+  const h = passHarness({
+    total: 12,
+    parallelWindows: 1,
+    readWindow: async (images) => {
+      if (++n === 2) throw new Error("quota");
+      return { pages: images.map((i) => `page ${i.page}`), model: "m" };
+    },
+    isQuotaFailure: () => true,
+  });
+  const r = await runOcrPass(h.deps);
+  assert.ok(r.ok && !r.data.quotaExhausted && !r.data.complete && r.data.pagesDone === 2);
 });
 
 // ---------- 7. indexing: where the text comes from ----------

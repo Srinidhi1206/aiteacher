@@ -382,10 +382,11 @@ export function StudyMaterialsCard() {
     for (let round = 0; round < 120 && !(res.ok && res.data?.complete); round++) {
       if (!res.ok) {
         if (isStorageStopMessage(res.error)) break; // storage is blocked / the download budget is used up: stop now, no retry
-        // The reader was busy or the call was cut off: nothing is lost, so wait a little and go again - until it has failed for a while running.
+        // The reader was busy or the call was cut off: nothing is lost, so wait a little and go again - but only ONCE. Each further try costs a
+        // file download and a round of AI requests; "Continue reading pages" picks up from the saved pages whenever the reader is back.
         stalled++;
-        if (stalled >= 4) break;
-        await pause(Math.min(60_000, 10_000 * 2 ** stalled)); // 20 s, 40 s, 60 s: each retry costs a file download, and a daily limit does not clear in seconds
+        if (stalled >= 2) break;
+        await pause(20_000);
         res = await attempt(() => ocrMaterial(id), lost);
         continue;
       }

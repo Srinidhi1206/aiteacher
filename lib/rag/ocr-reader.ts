@@ -44,8 +44,9 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
   // Gemini answers 500/503/504 ("high demand") for a while at a time, per model, and each model has its own daily allowance. One attempt
   // per model (a hung or overloaded model must not eat the whole call), then the next model; the caller tries again on its next call.
   // Never wait past the deadline.
-  const RETRY_DELAY_MS = 1500;
   const MIN_ATTEMPT_MS = 6000;
+  // What went wrong with each model, for the log: the model's name and the HTTP status (or a short label) - never the key, prompt or page text.
+  const failures: { model: string; status: number | string }[] = [];
   for (const model of ordered) {
     let thinkingOff = true;
     for (let attempt = 0; attempt < 1; attempt++) {
@@ -66,11 +67,13 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
         const pages = res.text ? parseOcrResponse(res.text, startPage, images.length) : null;
         if (pages) return { pages, model };
         sawOther = true;
+        failures.push({ model, status: "unparseable" });
         break; // answered, but not in the requested shape: try the next model
       } catch (err) {
         const status = (err as { status?: number } | null)?.status;
         const name = (err as Error | null)?.name;
         lastStatus = status;
+        failures.push({ model, status: status ?? (name === "TimeoutError" || name === "AbortError" ? "timeout" : "error") });
         if (status === 429) {
           sawQuota = true;
           break; // quota is per model: go straight to the next one, never retry
@@ -81,17 +84,12 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
           continue;
         }
         sawOther = true;
-        const transient = status === 500 || status === 503 || status === 504 || name === "TimeoutError" || name === "AbortError";
-        if (transient && attempt === 0 && deadlineAt - Date.now() > MIN_ATTEMPT_MS + RETRY_DELAY_MS) {
-          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-          continue;
-        }
-        break;
+        break; // overloaded, timed out or failed: one attempt per model, so go straight to the next (no same-model retry, no waiting)
       }
     }
   }
   // eslint-disable-next-line no-console
-  console.error("[ocr] reader failed", lastStatus ? { status: lastStatus } : {});
+  console.error("[ocr] reader failed", lastStatus ? { status: lastStatus } : {}, { models: failures });
   // "Out of quota" only when quota was the whole story; a mixture of refusals and overload is just a busy moment worth retrying.
   const allQuota = sawQuota && !sawOther;
   throw new OcrReaderUnavailableError(allQuota ? "The AI reader is out of quota right now. Progress is saved; try again later." : "The AI reader is busy right now. Progress is saved; it will be tried again.", allQuota);

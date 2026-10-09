@@ -182,8 +182,10 @@ export async function runOcrPass(deps: OcrRunDeps): Promise<OcrRunResult> {
     if (!blocked || savedThisCall > 0) await deps.recordStatus(pagesDone, totalPages);
     if (blocked) return { ok: false, error: STORAGE_BLOCKED_MESSAGE };
     if (complete && savedThisCall > 0) await deps.onComplete?.(totalPages);
-    if (savedThisCall === 0 && !complete && failedWindows > 0) {
-      return { ok: false, error: quotaHit ? "The AI reader is out of quota right now. Everything read so far is saved - try again later." : `The pages could not be read this time (${lastReason}). Everything read so far is saved.` };
+    // Nothing could be read for a reason other than quota: an error (the admin screen may retry once). When it was QUOTA, fall through to the
+    // normal result below, which carries quotaExhausted - the screen stops at once and says so, instead of retrying a limit that resets daily.
+    if (savedThisCall === 0 && !complete && failedWindows > 0 && !quotaHit) {
+      return { ok: false, error: `The pages could not be read this time (${lastReason}). Everything read so far is saved.` };
     }
     return { ok: true, data: { pagesDone, totalPages, complete, quotaExhausted: quotaHit && savedThisCall === 0, failedWindows } };
   } finally {
