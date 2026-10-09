@@ -5,6 +5,7 @@
 import "server-only";
 import { put, del, head, list } from "@vercel/blob";
 import { StorageProvider, StorageNotConfiguredError, UploadResult, BlobMetadata } from "./types";
+import { guardStorage } from "./blocked";
 
 export class VercelBlobProvider implements StorageProvider {
   readonly name = "Vercel Blob";
@@ -15,29 +16,31 @@ export class VercelBlobProvider implements StorageProvider {
 
   async upload({ file, pathname, contentType }: { file: Blob; pathname: string; contentType: string }): Promise<UploadResult> {
     if (!this.isConfigured) throw new StorageNotConfiguredError(this.name);
-    const blob = await put(pathname, file, {
-      access: "public",
-      contentType,
-      addRandomSuffix: true,
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
+    const blob = await guardStorage(() =>
+      put(pathname, file, {
+        access: "public",
+        contentType,
+        addRandomSuffix: true,
+        token: process.env.BLOB_READ_WRITE_TOKEN,
+      }),
+    );
     return { url: blob.url, storageKey: blob.pathname, sizeBytes: file.size };
   }
 
   async delete(storageKey: string): Promise<void> {
     if (!this.isConfigured) throw new StorageNotConfiguredError(this.name);
-    await del(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN });
+    await guardStorage(() => del(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN }));
   }
 
   async getUrl(storageKey: string): Promise<string> {
     if (!this.isConfigured) throw new StorageNotConfiguredError(this.name);
-    const meta = await head(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN });
+    const meta = await guardStorage(() => head(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN }));
     return meta.url;
   }
 
   async getMetadata(storageKey: string): Promise<BlobMetadata> {
     if (!this.isConfigured) throw new StorageNotConfiguredError(this.name);
-    const meta = await head(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN });
+    const meta = await guardStorage(() => head(storageKey, { token: process.env.BLOB_READ_WRITE_TOKEN }));
     return { url: meta.url, size: meta.size, contentType: meta.contentType };
   }
 
@@ -46,7 +49,7 @@ export class VercelBlobProvider implements StorageProvider {
     const out: { pathname: string; url: string }[] = [];
     let cursor: string | undefined;
     do {
-      const page = await list({ prefix, cursor, limit: 1000, token: process.env.BLOB_READ_WRITE_TOKEN });
+      const page = await guardStorage(() => list({ prefix, cursor, limit: 1000, token: process.env.BLOB_READ_WRITE_TOKEN }));
       out.push(...page.blobs.map((b) => ({ pathname: b.pathname, url: b.url })));
       cursor = page.hasMore ? page.cursor : undefined;
     } while (cursor);

@@ -5,7 +5,7 @@
 // Deliberately free of server-only imports: the browser bundle uses it too.
 
 export type IndexStatusNote =
-  | { kind: "in_progress"; done: number; total: number }
+  | { kind: "in_progress"; done: number; total: number; /** The passages are built from OCR text, so a resumed call must look for it. */ ocr?: boolean }
   | { kind: "ocr_progress"; done: number; total: number }
   | { kind: "ocr_ready"; total: number }
   | { kind: "complete"; total: number }
@@ -14,7 +14,7 @@ export type IndexStatusNote =
 export function formatIndexStatus(note: IndexStatusNote): string {
   switch (note.kind) {
     case "in_progress":
-      return `Indexing in progress: ${note.done} / ${note.total} passages.`;
+      return `Indexing in progress: ${note.done} / ${note.total} passages${note.ocr ? " (from OCR)" : ""}.`;
     case "ocr_progress":
       return `Reading pages (OCR): ${note.done} / ${note.total} pages.`;
     case "ocr_ready":
@@ -28,8 +28,8 @@ export function formatIndexStatus(note: IndexStatusNote): string {
 
 export function parseIndexStatus(text: string | null | undefined): IndexStatusNote | null {
   if (!text) return null;
-  let m = /^Indexing in progress: (\d+) \/ (\d+) passages\.$/.exec(text);
-  if (m) return { kind: "in_progress", done: Number(m[1]), total: Number(m[2]) };
+  let m = /^Indexing in progress: (\d+) \/ (\d+) passages( \(from OCR\))?\.$/.exec(text);
+  if (m) return { kind: "in_progress", done: Number(m[1]), total: Number(m[2]), ...(m[3] ? { ocr: true } : {}) };
   m = /^Reading pages \(OCR\): (\d+) \/ (\d+) pages\.$/.exec(text);
   if (m) return { kind: "ocr_progress", done: Number(m[1]), total: Number(m[2]) };
   m = /^Pages read \(OCR\): all (\d+) pages\. Ready to index\.$/.exec(text);

@@ -14,6 +14,7 @@
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
     "db:verify": "tsx scripts/verify-database.ts",
+    "test:storage": "node --import tsx --test tests/storage-safety.test.ts",
     "admin:set-password": "tsx scripts/set-super-admin.ts"
   },
   "prisma": {

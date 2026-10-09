@@ -27,11 +27,14 @@ import { prisma } from "@/lib/prisma";
 import { UnauthorizedError, ForbiddenError } from "@/lib/auth/current-session";
 import { loadManagedMaterial, requireManager } from "@/lib/materials/manager";
 import { chunkText, embedTexts, describeEmbeddingError, EMBED_PER_MINUTE, INDEX_BATCH_SIZE } from "@/lib/rag";
-import { formatIndexStatus } from "@/lib/rag/index-status";
-import { assessTextLayer, UNREADABLE_TEXT_MESSAGE } from "@/lib/rag/text-quality";
+import { formatIndexStatus, parseIndexStatus } from "@/lib/rag/index-status";
+import { assessTextLayer } from "@/lib/rag/text-quality";
 import { MAX_DIRECT_READ_MB } from "@/lib/rag/limits";
 import { loadCompleteOcr } from "@/lib/rag/ocr-store";
 import { fetchPdfCached } from "@/lib/rag/pdf-cache";
+import { resolveIndexSource, isAlreadyComplete } from "@/lib/rag/index-source";
+import { StorageBlockedError } from "@/lib/storage/blocked";
+import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 import { saveChunksAtomically } from "@/lib/rag/save-chunks";
 import { chapterSlugForPage } from "@/lib/curriculum-import-data/chapter-page-maps";
 import { planChapterLinks, linkSavedPassages } from "@/lib/rag/chapter-link";
@@ -96,35 +99,32 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
       return fail(material.id, "Only PDF files can be used by the AI Tutor for now.");
     }
 
-    // Where the text comes from. A finished OCR run (lib/actions/material-ocr.ts) replaces the PDF's own text layer - it is the only
-    // readable text such a book has - and then the PDF is not even downloaded. Otherwise the PDF's text layer is read directly.
-    let pages: string[];
-    let sourceSha: string | null;
-    const ocr = await loadCompleteOcr(material.id);
-    if (ocr) {
-      pages = ocr.pages;
-      sourceSha = ocr.sourceSha256;
-    } else {
-      const got = await fetchPdfCached(material.fileUrl, MAX_PDF_MB * 1024 * 1024);
-      if (!got.ok) {
-        return fail(
-          material.id,
-          got.reason === "too_big" ? `This PDF is larger than ${MAX_PDF_MB} MB, so it cannot be read in one go. It is read page by page (OCR) instead.` : "The stored file could not be downloaded.",
-        );
-      }
-      const bytes = got.bytes;
-      sourceSha = createHash("sha256").update(bytes).digest("hex");
-      try {
-        const { extractText, getDocumentProxy } = await import("unpdf");
-        const pdf = await getDocumentProxy(bytes);
-        const extracted = await extractText(pdf, { mergePages: false });
-        pages = extracted.text;
-      } catch {
-        return fail(material.id, "This PDF could not be read.");
-      }
-      // A legacy-font text layer extracts as symbols, not words: refuse it rather than index gibberish.
-      if (!assessTextLayer(pages).readable) return fail(material.id, UNREADABLE_TEXT_MESSAGE);
+    // Nothing to do for a book that is already complete: answer from the saved status, without downloading anything or listing storage.
+    if (!options?.rebuild && material.indexedAt && parseIndexStatus(material.indexError)?.kind === "complete") {
+      const savedCount = await prisma.materialChunk.count({ where: { materialId: material.id } });
+      const done = isAlreadyComplete({ indexError: material.indexError, indexedAt: material.indexedAt, rebuild: false, savedPassages: savedCount });
+      if (done) return { ok: true, data: { chunks: savedCount, total: done.total, available: done.total, complete: true, waitMs: 0 } };
     }
+
+    // Where the text comes from (lib/rag/index-source.ts): OCR text when the book needs it - without fetching its PDF - otherwise the
+    // PDF's own text layer through the cached, budgeted downloader. Blocked storage / an exhausted budget stop here and leave the saved
+    // status untouched.
+    const source = await resolveIndexSource({
+      material: { id: material.id, sizeKb: material.sizeKb, indexError: material.indexError },
+      maxDirectBytes: MAX_PDF_MB * 1024 * 1024,
+      loadOcr: () => loadCompleteOcr(material.id),
+      getPdf: () => fetchPdfCached(material.fileUrl, MAX_PDF_MB * 1024 * 1024, { materialId: material.id }),
+      extractPages: async (bytes) => {
+        const { extractText, getDocumentProxy } = await import("unpdf");
+        const extracted = await extractText(await getDocumentProxy(bytes), { mergePages: false });
+        return extracted.text;
+      },
+      textIsReadable: (pages) => assessTextLayer(pages).readable,
+      sha256: (bytes) => createHash("sha256").update(bytes).digest("hex"),
+    });
+    if (!source.ok) return source.kind === "stop" ? { ok: false, error: source.message } : fail(material.id, source.message);
+    const pages = source.pages;
+    const sourceSha = source.sourceSha;
 
     // Count every passage the PDF produces, but only keep up to the ceiling to embed.
     const passages: { page: number; text: string }[] = [];
@@ -253,10 +253,11 @@ export async function indexMaterial(materialId: string, options?: { rebuild?: bo
     if (waitMs === 0 && firstEmbedAt !== null) waitMs = Math.max(0, 61_000 - (Date.now() - firstEmbedAt));
     await prisma.studyMaterial.update({
       where: { id: material.id },
-      data: { indexError: formatIndexStatus({ kind: "in_progress", done, total }) },
+      data: { indexError: formatIndexStatus({ kind: "in_progress", done, total, ocr: source.origin === "ocr" }) },
     });
     return { ok: true, data: { chunks: done, total, available, complete: false, waitMs, quotaExhausted } };
   } catch (e) {
+    if (e instanceof StorageBlockedError) return { ok: false, error: STORAGE_BLOCKED_MESSAGE };
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
     throw e;
   }

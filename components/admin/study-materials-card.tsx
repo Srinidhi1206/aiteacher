@@ -20,6 +20,7 @@ import { indexMaterial } from "@/lib/actions/material-index";
 import { ocrMaterial } from "@/lib/actions/material-ocr";
 import { linkMaterialChapters } from "@/lib/actions/material-chapters";
 import { parseIndexStatus, needsOcr } from "@/lib/rag/index-status";
+import { isStorageStopMessage } from "@/lib/storage/stop-messages";
 import { importMaterialFromUrl } from "@/lib/actions/material-import";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 import { ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES, validateUploadFile, safeFilename } from "@/lib/storage/types";
@@ -380,6 +381,7 @@ export function StudyMaterialsCard() {
     let lastDone = -1;
     for (let round = 0; round < 120 && !(res.ok && res.data?.complete); round++) {
       if (!res.ok) {
+        if (isStorageStopMessage(res.error)) break; // storage is blocked / the download budget is used up: stop now, no retry
         // The reader was busy or the call was cut off: nothing is lost, so wait a little and go again - until it has failed for a while running.
         stalled++;
         if (stalled >= 4) break;
