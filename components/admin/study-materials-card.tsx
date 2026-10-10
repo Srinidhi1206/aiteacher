@@ -20,7 +20,7 @@ import { indexMaterial } from "@/lib/actions/material-index";
 import { ocrMaterial } from "@/lib/actions/material-ocr";
 import { linkMaterialChapters } from "@/lib/actions/material-chapters";
 import { parseIndexStatus, needsOcr } from "@/lib/rag/index-status";
-import { isStorageStopMessage } from "@/lib/storage/stop-messages";
+import { OCR_INTERRUPTED_MESSAGE, describeOcrOutcome, driveOcr, type OcrCallResult } from "@/lib/rag/ocr-loop";
 import { importMaterialFromUrl } from "@/lib/actions/material-import";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 import { ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES, validateUploadFile, safeFilename } from "@/lib/storage/types";
@@ -140,6 +140,8 @@ export function StudyMaterialsCard() {
   const [publishBusyId, setPublishBusyId] = React.useState<string | null>(null);
   const [indexingId, setIndexingId] = React.useState<string | null>(null);
   const [indexProgress, setIndexProgress] = React.useState<{ done: number; total: number | null; unit: "passages" | "pages" } | null>(null);
+  // What the last unsuccessful page-reading attempt came to, kept under the material until the next attempt (a toast alone is easy to miss).
+  const [ocrNotes, setOcrNotes] = React.useState<Record<string, { title: string; detail: string }>>({});
   // Materials belong to a school. A school administrator always uploads to their own school. The
   // platform super administrator is not attached to one, so they choose an existing school instead.
   // Any other admin with no school has nothing to upload to - say so instead of showing a form that
@@ -371,45 +373,40 @@ export function StudyMaterialsCard() {
     refreshMaterials();
   }
 
-  // Reads a book's pages with OCR (a few pages per call, each saved as it is read), then indexes the text that was read.
+  // Reads a book's pages with OCR (a few pages per call, each saved as it is read), then indexes the text that was read. The loop's decisions
+  // (one retry, stop on quota, stop on a storage message) live in lib/rag/ocr-loop.ts; this only shows what happened.
   async function runOcr(id: string, materialTitle: string) {
+    setOcrNotes((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     setIndexingId(id);
     setIndexProgress({ done: 0, total: null, unit: "pages" });
-    const lost = { ok: true as const, data: { pagesDone: 0, totalPages: 0, complete: false, quotaExhausted: false, failedWindows: 0 } };
-    let res = await attempt(() => ocrMaterial(id), lost);
-    let stalled = 0;
-    let lastDone = -1;
-    for (let round = 0; round < 120 && !(res.ok && res.data?.complete); round++) {
-      if (!res.ok) {
-        if (isStorageStopMessage(res.error)) break; // storage is blocked / the download budget is used up: stop now, no retry
-        // The reader was busy or the call was cut off: nothing is lost, so wait a little and go again - but only ONCE. Each further try costs a
-        // file download and a round of AI requests; "Continue reading pages" picks up from the saved pages whenever the reader is back.
-        stalled++;
-        if (stalled >= 2) break;
-        await pause(20_000);
-        res = await attempt(() => ocrMaterial(id), lost);
-        continue;
+    const status = parseIndexStatus((materials ?? []).find((x) => x.id === id)?.indexError ?? null);
+    const known = status?.kind === "ocr_progress" ? { done: status.done, total: status.total } : null;
+    // A call that was thrown or cut off (a timeout, a dropped connection) is a FAILED result, never "ok, no progress": its saved pages are kept.
+    const call = async (): Promise<OcrCallResult> => {
+      try {
+        const r = await ocrMaterial(id);
+        return r.ok ? { ok: true, data: r.data } : { ok: false, error: r.error ?? "The pages could not be read." };
+      } catch {
+        return { ok: false, error: OCR_INTERRUPTED_MESSAGE };
       }
-      if (!res.data) break;
-      const { pagesDone, totalPages, quotaExhausted } = res.data;
-      setIndexProgress({ done: pagesDone, total: totalPages, unit: "pages" });
-      if (quotaExhausted) break;
-      stalled = pagesDone === lastDone ? stalled + 1 : 0;
-      lastDone = pagesDone;
-      if (stalled >= 4) break; // windows are saved as read, so stopping loses nothing; every further try costs a file download
-      await pause(stalled > 0 ? Math.min(60_000, 10_000 * 2 ** stalled) : 500);
-      res = await attempt(() => ocrMaterial(id), { ok: true as const, data: { pagesDone, totalPages, complete: false, quotaExhausted: false, failedWindows: 0 } });
-    }
-    if (res.ok && res.data?.complete) {
-      showToast("All pages read", `"${materialTitle}": ${res.data.totalPages} pages read. Indexing it now.`);
+    };
+    const outcome = await driveOcr({ call, pause, known, onProgress: (done, total) => setIndexProgress({ done, total, unit: "pages" }) });
+    if (outcome.kind === "complete") {
+      showToast("All pages read", `"${materialTitle}": ${outcome.totalPages} pages read. Indexing it now.`);
       await runIndex(id, materialTitle, { afterOcr: true });
       return;
     }
     setIndexingId(null);
     setIndexProgress(null);
-    if (res.ok && res.data?.quotaExhausted) showToast("AI provider limit reached", `${res.data.pagesDone} / ${res.data.totalPages} pages are read and saved. Click "Continue reading pages" later.`);
-    else if (res.ok) showToast("Reading is not finished yet", "Click \"Continue reading pages\" to carry on from where it stopped.");
-    else showToast("Could not read the pages", res.error ?? "");
+    const note = describeOcrOutcome(outcome);
+    if (note) {
+      setOcrNotes((prev) => ({ ...prev, [id]: note })); // stays under the material until the next attempt
+      showToast(note.title, note.detail, "warning");
+    }
     refreshMaterials();
   }
 
@@ -749,6 +746,14 @@ export function StudyMaterialsCard() {
                           </p>
                         );
                       })()}
+                      {indexingId !== m.id && ocrNotes[m.id] && (
+                        <p role="status" className="mt-1 flex items-start gap-1.5 text-xs text-warning-600 dark:text-warning-400">
+                          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                          <span>
+                            <span className="font-semibold">{ocrNotes[m.id].title}.</span> {ocrNotes[m.id].detail}
+                          </span>
+                        </p>
+                      )}
                       {isSuperAdmin && (
                         <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
                           {scopeEditId === m.id ? (
