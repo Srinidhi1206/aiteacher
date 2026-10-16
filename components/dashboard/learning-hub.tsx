@@ -12,6 +12,7 @@ import { listWorksheetsForStudent } from "@/lib/actions/worksheets";
 import { getMyCalendarEvents } from "@/lib/actions/student-calendar";
 import { listMaterialsForStudent } from "@/lib/actions/materials";
 import { eventTypeMeta } from "@/lib/calendar-meta";
+import { todayWindow } from "@/lib/calendar/day";
 import { formatDate } from "@/lib/utils";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -44,8 +45,8 @@ export async function LearningHub() {
     listMaterialsForStudent(),
   ]);
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // "Today" is the Indian calendar day, the same one the Next exam card and Today's Planner use (lib/calendar/day.ts).
+  const today = todayWindow(new Date()).start;
 
   // Assignments still to hand in: overdue first (the most urgent), then by due date; undated ones last.
   const due =

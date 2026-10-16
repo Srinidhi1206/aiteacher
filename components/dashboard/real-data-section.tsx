@@ -97,18 +97,13 @@ export async function RealDataSection() {
             </div>
           )}
           <CardContent className="space-y-1">
-            {overview.tasks.length === 0 && !overview.planItem && overview.dueWorksheets.length === 0 ? (
+            {overview.tasks.length === 0 && overview.planItems.length === 0 && overview.dueWorksheets.length === 0 ? (
               <p className="py-4 text-center text-sm text-gray-400">Nothing planned for today yet.</p>
             ) : (
               <>
-                {overview.planItem && (
-                  <RealPlannerTaskRow
-                    id={overview.planItem.id}
-                    title={overview.planItem.title}
-                    subject={overview.planItem.subject}
-                    done={overview.planItem.completed}
-                  />
-                )}
+                {overview.planItems.map((item) => (
+                  <RealPlannerTaskRow key={item.id} id={item.id} title={item.title} subject={item.subject} done={item.completed} source="plan" />
+                ))}
                 {overview.tasks.map((t) => (
                   <RealPlannerTaskRow key={t.id} id={t.id} title={t.title} subject={t.subject} done={t.status === "COMPLETED"} />
                 ))}

@@ -7,6 +7,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { PlannerTaskStatus, Priority } from "@prisma/client";
+import { todayWindow } from "@/lib/calendar/day";
 import type { ActionResult } from "./materials";
 
 const taskInputSchema = z.object({
@@ -76,18 +77,18 @@ export async function deletePlannerTask(taskId: string): Promise<ActionResult> {
 /** Everything the dashboard's "Today's Planner" widget needs in one call: manual tasks, today's learning-path item, worksheets due soon, and upcoming exams. */
 export async function getTodayOverview() {
   const student = await requireOwnStudent();
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const endOfToday = new Date(startOfToday);
-  endOfToday.setDate(endOfToday.getDate() + 1);
+  // "Today" is the Indian calendar day (lib/calendar/day.ts) - the same day the study plan and the next-exam countdown use.
+  const { start: startOfToday, end: endOfToday } = todayWindow(new Date());
 
-  const [tasks, planItem, dueWorksheets, upcomingExams] = await Promise.all([
+  const [tasks, planItems, dueWorksheets, upcomingExams] = await Promise.all([
     prisma.dailyPlannerTask.findMany({
       where: { studentId: student.id, date: { gte: startOfToday, lt: endOfToday } },
       orderBy: { time: "asc" },
     }),
-    prisma.studyPlanItem.findFirst({
+    // The study plan can schedule more than one task a day (a study task and a revision task), so all of today's are returned.
+    prisma.studyPlanItem.findMany({
       where: { studyPlan: { studentId: student.id }, date: { gte: startOfToday, lt: endOfToday } },
+      orderBy: [{ completed: "asc" }, { kind: "asc" }],
     }),
     // Worksheets and exam schedules are school-owned (see the note on
     // requireOwnedAssignment in exams.ts / exam-schedule.ts), so both need the
@@ -121,7 +122,7 @@ export async function getTodayOverview() {
       : Promise.resolve([]),
   ]);
 
-  return { tasks, planItem, dueWorksheets, upcomingExams };
+  return { tasks, planItem: planItems[0] ?? null, planItems, dueWorksheets, upcomingExams };
 }
 
 export interface PlannerAnalyticsBucket {
@@ -134,9 +135,9 @@ export interface PlannerAnalyticsBucket {
 
 /**
  * Real completion stats for the Daily Planner (Stage H). "Today" and "this
- * week" both use the same server-local date convention as
- * getTodayOverview() above (new Date() + setHours(0,0,0,0)) - see
- * docs/STEP_3_5.md's Stage H date-convention note. "This week" is a
+ * week" both use the same day as getTodayOverview() above - the Indian
+ * calendar day from todayWindow() (lib/calendar/day.ts); items are still
+ * stored as the start of their day in the server's zone. "This week" is a
  * rolling 7-day window ending today (today - 6 days .. today), not a
  * Monday-Sunday calendar week - simpler and avoids a week-boundary edge
  * case with no real benefit here.
@@ -144,12 +145,7 @@ export interface PlannerAnalyticsBucket {
 export async function getPlannerAnalytics(): Promise<{ today: PlannerAnalyticsBucket; week: PlannerAnalyticsBucket }> {
   const student = await requireOwnStudent();
 
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const endOfToday = new Date(startOfToday);
-  endOfToday.setDate(endOfToday.getDate() + 1);
-  const startOfWeek = new Date(startOfToday);
-  startOfWeek.setDate(startOfWeek.getDate() - 6);
+  const { start: startOfToday, end: endOfToday, weekStart: startOfWeek } = todayWindow(new Date());
 
   const [todayTasks, weekTasks] = await Promise.all([
     prisma.dailyPlannerTask.findMany({

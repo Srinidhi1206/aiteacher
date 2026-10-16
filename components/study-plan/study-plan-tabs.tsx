@@ -9,9 +9,11 @@ import type { getMyLearningPath, getMyWeakAreas } from "@/lib/actions/analytics"
 export function StudyPlanTabs({
   learningPath,
   weakAreas,
+  planNotes = [],
 }: {
   learningPath: Awaited<ReturnType<typeof getMyLearningPath>> | null;
   weakAreas: Awaited<ReturnType<typeof getMyWeakAreas>>;
+  planNotes?: string[];
 }) {
-  return <RealLearningPathView learningPath={learningPath} weakAreas={weakAreas} />;
+  return <RealLearningPathView learningPath={learningPath} weakAreas={weakAreas} planNotes={planNotes} />;
 }

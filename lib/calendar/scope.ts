@@ -55,3 +55,18 @@ export function teacherAcademicEventWhere(teacher: TeacherCalendarScope): Prisma
     ],
   };
 }
+
+/**
+ * Which published exam schedules (the older, per-subject ExamSchedule rows) a student sees. A schedule has no school column of its own: it
+ * belongs to the school of the administrator who created it, so a board + class match alone is never enough - that row is shared by every
+ * school on the board. Shared by the student calendar, the next-exam lookup and the study-plan generator, so they can never disagree.
+ */
+export function studentExamScheduleWhere(student: StudentCalendarScope): Prisma.ExamScheduleWhereInput | null {
+  if (!student.schoolId || !student.schoolClassId) return null;
+  return {
+    schoolClassId: student.schoolClassId,
+    boardId: student.boardId ?? undefined,
+    isPublished: true,
+    createdBy: { admin: { schoolId: student.schoolId } },
+  };
+}

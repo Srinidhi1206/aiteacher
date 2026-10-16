@@ -14,7 +14,8 @@
 import { prisma } from "@/lib/prisma";
 import { requireRole, ForbiddenError } from "@/lib/auth/current-session";
 import type { CalendarEvent, CalendarEventType } from "@/lib/types";
-import { studentAcademicEventWhere } from "@/lib/calendar/scope";
+import { studentAcademicEventWhere, studentExamScheduleWhere } from "@/lib/calendar/scope";
+import { findNextExamAt, type NextExam } from "@/lib/calendar/next-exam";
 
 // The planner and study plan store LOCAL midnight (setHours(0,0,0,0)), so they
 // are turned back into a date string with local getters; worksheet due dates
@@ -59,14 +60,7 @@ export async function getMyCalendarEvents(): Promise<CalendarEvent[]> {
 
   if (student.schoolId && student.schoolClassId) {
     const [schedules, worksheets] = await Promise.all([
-      prisma.examSchedule.findMany({
-        where: {
-          schoolClassId: student.schoolClassId,
-          boardId: student.boardId ?? undefined,
-          isPublished: true,
-          createdBy: { admin: { schoolId: student.schoolId } },
-        },
-      }),
+      prisma.examSchedule.findMany({ where: studentExamScheduleWhere(student) ?? { id: "__none__" } }),
       prisma.worksheet.findMany({
         where: {
           schoolClassId: student.schoolClassId,
@@ -155,4 +149,18 @@ export async function getMyCalendarEvents(): Promise<CalendarEvent[]> {
   }
 
   return events.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * The student's next exam - the nearest one that has not finished, however far away (the dashboard's "Coming up" list only looks 30 days ahead, which
+ * can hide it). Uses exactly the rules of the student Calendar (published only, own school + board + class); null when there is none.
+ */
+export async function getMyNextExam(): Promise<NextExam | null> {
+  const session = await requireRole("student");
+  const student = await prisma.student.findUnique({
+    where: { userId: session.id },
+    select: { schoolId: true, schoolClassId: true, boardId: true },
+  });
+  if (!student) throw new ForbiddenError("Student profile not found.");
+  return findNextExamAt(prisma, student, new Date());
 }

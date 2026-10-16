@@ -1,7 +1,7 @@
 import { Topbar } from "@/components/layout/topbar";
 import { StudyPlanTabs } from "@/components/study-plan/study-plan-tabs";
 import { DatabaseUnavailable } from "@/components/database-unavailable";
-import { getMyLearningPath, getMyWeakAreas } from "@/lib/actions/analytics";
+import { getMyLearningPath, getMyPlanCoverageNotes, getMyWeakAreas } from "@/lib/actions/analytics";
 
 // "My Plan" now reads the same real, database-backed Learning Path engine
 // (lib/analytics/learning-path.ts via lib/actions/analytics.ts) already
@@ -13,9 +13,10 @@ import { getMyLearningPath, getMyWeakAreas } from "@/lib/actions/analytics";
 export default async function StudyPlanPage() {
   let learningPath: Awaited<ReturnType<typeof getMyLearningPath>> | null = null;
   let weakAreas: Awaited<ReturnType<typeof getMyWeakAreas>> = [];
+  let planNotes: string[] = [];
   let dbUnavailable = false;
   try {
-    [learningPath, weakAreas] = await Promise.all([getMyLearningPath(), getMyWeakAreas()]);
+    [learningPath, weakAreas, planNotes] = await Promise.all([getMyLearningPath(), getMyWeakAreas(), getMyPlanCoverageNotes()]);
   } catch {
     dbUnavailable = true;
   }
@@ -24,7 +25,7 @@ export default async function StudyPlanPage() {
     <>
       <Topbar title="Study Plan" />
       <main className="flex-1 p-4 sm:p-6">
-        {dbUnavailable ? <DatabaseUnavailable what="Your study plan" /> : <StudyPlanTabs learningPath={learningPath} weakAreas={weakAreas} />}
+        {dbUnavailable ? <DatabaseUnavailable what="Your study plan" /> : <StudyPlanTabs learningPath={learningPath} weakAreas={weakAreas} planNotes={planNotes} />}
       </main>
     </>
   );

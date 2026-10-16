@@ -1,19 +1,28 @@
 "use client";
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { CheckCircle2, Circle } from "lucide-react";
 import { setPlannerTaskStatus } from "@/lib/actions/planner";
+import { completeLearningPathItem } from "@/lib/actions/analytics";
+import { toggleCompletion } from "@/lib/dashboard/toggle-completion";
 import { cn } from "@/lib/utils";
 
-export function RealPlannerTaskRow({ id, title, subject, done }: { id: string; title: string; subject?: string | null; done: boolean }) {
+/** `source` says which table the row belongs to: a to-do the student wrote ("planner") or a study-plan item ("plan"); each has its own action, so a plan item's tick is really saved. */
+export function RealPlannerTaskRow({ id, title, subject, done, source = "planner" }: { id: string; title: string; subject?: string | null; done: boolean; source?: "planner" | "plan" }) {
+  const router = useRouter();
   const [completed, setCompleted] = React.useState(done);
   const [pending, setPending] = React.useState(false);
 
   async function toggle() {
-    setPending(true);
-    const next = !completed;
-    setCompleted(next);
-    await setPlannerTaskStatus(id, next ? "COMPLETED" : "TODO");
-    setPending(false);
+    if (pending) return;
+    await toggleCompletion({
+      current: completed,
+      save: (next) => (source === "plan" ? completeLearningPathItem(id, next) : setPlannerTaskStatus(id, next ? "COMPLETED" : "TODO")),
+      setCompleted,
+      setPending,
+      // The counts around the tick (today's progress, the learning-path card) are read on the server, so they are refreshed after a successful save.
+      onSaved: () => router.refresh(),
+    });
   }
 
   return (

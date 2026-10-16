@@ -3,11 +3,11 @@
 // Thin, auth-checked entry points for the student-facing analytics pages -
 // the actual calculation lives in lib/analytics/* (Stage E1-E4).
 import { prisma } from "@/lib/prisma";
-import { requireRole, ForbiddenError } from "@/lib/auth/current-session";
+import { requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { getSubjectProgressForStudent, getTopicProgressForStudent } from "@/lib/analytics/progress";
 import { getWeakAreasForStudent } from "@/lib/analytics/weakness";
 import { getStrengthsForStudent } from "@/lib/analytics/strengths";
-import { generateLearningPath, getLearningPathForStudent, setLearningPathItemCompleted } from "@/lib/analytics/learning-path";
+import { generateLearningPath, getLearningPathForStudent, previewCoverageNotes, setLearningPathItemCompleted } from "@/lib/analytics/learning-path";
 import type { ActionResult } from "./materials";
 
 async function requireOwnStudentId(): Promise<string> {
@@ -38,10 +38,30 @@ export async function getMyLearningPath() {
   return getLearningPathForStudent(studentId);
 }
 
-export async function regenerateMyLearningPath(): Promise<ActionResult> {
-  const studentId = await requireOwnStudentId();
-  await generateLearningPath(studentId);
-  return { ok: true };
+/**
+ * Short notes for the Study Plan page about how far the plan can vouch for the student's exams (for example "based on the published papers for Mathematics").
+ * Informational and read only: if it cannot be worked out right now the page simply shows no note.
+ */
+export async function getMyPlanCoverageNotes(): Promise<string[]> {
+  try {
+    return await previewCoverageNotes(await requireOwnStudentId());
+  } catch {
+    return [];
+  }
+}
+
+export async function regenerateMyLearningPath(): Promise<ActionResult<{ mode: "exam-aware" | "general"; created: number; notes: string[] }>> {
+  try {
+    const studentId = await requireOwnStudentId();
+    const summary = await generateLearningPath(studentId);
+    if (!summary) return { ok: false, error: "You have not been placed in a class yet, so there is nothing to plan." };
+    return { ok: true, data: { mode: summary.mode, created: summary.created, notes: summary.notes } };
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    // The plan is only rewritten after everything it needs has been read, so a failure here leaves the existing plan exactly as it was.
+    console.error("[study-plan] regeneration failed", (e as Error)?.name);
+    return { ok: false, error: "Your study plan could not be updated just now. Your existing plan was not changed - please try again in a moment." };
+  }
 }
 
 export async function completeLearningPathItem(itemId: string, completed: boolean): Promise<ActionResult> {

@@ -11,6 +11,7 @@ import Link from "next/link";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { GenerateLearningPathButton } from "@/components/dashboard/generate-learning-path-button";
+import { PlanNotes } from "@/components/study-plan/plan-notes";
 import { completeLearningPathItem, getMyLearningPath, getMyWeakAreas } from "@/lib/actions/analytics";
 import { cn } from "@/lib/utils";
 
@@ -25,7 +26,7 @@ const KIND_LABEL: Record<string, string> = {
   BUFFER: "Buffer",
 };
 
-export function RealLearningPathView({ learningPath, weakAreas }: { learningPath: LearningPath | null; weakAreas: WeakAreas }) {
+export function RealLearningPathView({ learningPath, weakAreas, planNotes = [] }: { learningPath: LearningPath | null; weakAreas: WeakAreas; planNotes?: string[] }) {
   const router = useRouter();
   const [pendingId, setPendingId] = React.useState<string | null>(null);
 
@@ -71,6 +72,7 @@ export function RealLearningPathView({ learningPath, weakAreas }: { learningPath
         <GenerateLearningPathButton />
       </CardHeader>
       <CardContent className="space-y-4">
+        <PlanNotes notes={planNotes} />
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
           <span className="font-semibold text-gray-700 dark:text-gray-200">{completionPct}% complete</span>
           <span>
