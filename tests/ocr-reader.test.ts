@@ -245,3 +245,78 @@ test("the gap range the admin screen can really produce is covered: 20 s pause +
     }
   }
 });
+
+// ---------- regression: a fractional timeout made AbortSignal.timeout throw, so about half of all model attempts failed instantly ----------
+
+test("attemptTimeoutMs always returns a whole, positive number of ms that AbortSignal.timeout accepts - for fractional and odd remaining times too", async () => {
+  const { attemptTimeoutMs } = await loadReader();
+  // The old formula (half of the remaining time, unrounded) really did throw for an odd remaining time - this is the bug.
+  const oldFormula = (r: number) => Math.max(1000, Math.min(Math.min(28_000, Math.max(15_000, r / 2)), r - 1000));
+  assert.throws(() => AbortSignal.timeout(oldFormula(45_001)), RangeError);
+  // Fractional input, odd input, even input: the new value is an integer and the signal can be built.
+  for (const r of [45_001, 45_000.5, 44_999.75, 30_001, 49_321.3, 6_001, 6_000.5, 119_999]) {
+    const t = attemptTimeoutMs(r);
+    assert.ok(Number.isInteger(t) && t > 0, `remaining ${r} -> ${t}`);
+    assert.doesNotThrow(() => AbortSignal.timeout(t), `remaining ${r}`);
+  }
+  assert.equal(attemptTimeoutMs(45_001), 22_500, "rounded DOWN, so never past the deadline");
+  // Sweep every half millisecond of a realistic range: always valid, never past the deadline.
+  for (let r = 0; r <= 120_000; r += 0.5) {
+    const t = attemptTimeoutMs(r);
+    if (!(Number.isInteger(t) && t >= 1 && t <= 28_000)) assert.fail(`remaining ${r} -> ${t}`);
+    if (r >= 2_000 && t > r - 1_000) assert.fail(`remaining ${r} -> ${t} is past the 1 s safety margin`);
+    if (t > Math.max(1, Math.floor(r))) assert.fail(`remaining ${r} -> ${t} is past the deadline`);
+  }
+});
+
+test("attemptTimeoutMs at the boundaries: almost no time left, none left, past the deadline, and bad input", async () => {
+  const { attemptTimeoutMs } = await loadReader();
+  assert.equal(attemptTimeoutMs(6_000), 5_000, "the smallest call the reader starts (6 s left) keeps its 1 s margin");
+  assert.equal(attemptTimeoutMs(2_000), 1_000);
+  assert.equal(attemptTimeoutMs(1_500), 1_000, "under 2 s the 1 s floor applies...");
+  assert.equal(attemptTimeoutMs(500.7), 500, "...but never beyond the time that is left");
+  assert.equal(attemptTimeoutMs(1), 1);
+  for (const bad of [0, -1, -50_000, 0.4, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const t = attemptTimeoutMs(bad);
+    assert.ok(Number.isInteger(t) && t >= 1, `input ${bad} -> ${t}`);
+    assert.doesNotThrow(() => AbortSignal.timeout(t));
+  }
+  assert.equal(attemptTimeoutMs(1_000_000), 28_000, "never more than 28 s however much time there is");
+});
+
+test("end to end: with an ODD remaining time (the old failure) the first model is really asked and its answer used - no instant 'error'", async () => {
+  attempts.length = 0;
+  const { readPages } = await loadReader();
+  behaviour = async () => ({ text: "=====PAGE 5=====\n" + PAGE_ONE_TEXT });
+  const FIXED_NOW = 1_790_000_000_000;
+  const realNow = Date.now;
+  Date.now = () => FIXED_NOW; // remaining = deadline - now is exactly 45,001 ms
+  try {
+    const out = await captureErrors(() => readPages(images, FIXED_NOW + 45_001, 0));
+    assert.ok("value" in out, "the reader answered instead of failing");
+    assert.equal(out.value.pages[0], PAGE_ONE_TEXT);
+    assert.equal(attempts.length, 1, "the first model was used");
+    assert.equal(out.lines.length, 0, "no failure line logged");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("a fractional remaining time never produces an instant 'error' for any model: every model in the chain is really called", async () => {
+  attempts.length = 0;
+  const { readPages, ocrModelChain } = await loadReader();
+  behaviour = async () => Promise.reject(httpError(503)); // every model overloaded: the point is that each one is asked
+  const FIXED_NOW = 1_790_000_000_000;
+  const realNow = Date.now;
+  Date.now = () => FIXED_NOW;
+  try {
+    const out = await captureErrors(() => readPages(images, FIXED_NOW + 48_001, 0));
+    assert.ok("error" in out);
+    assert.equal(attempts.length, ocrModelChain().length, "all models were called (the old code skipped about half with a RangeError)");
+    const log = out.lines.join("\n");
+    assert.ok(!/status: 'error'|"status":"error"/.test(log), log);
+    assert.ok(log.includes("503"));
+  } finally {
+    Date.now = realNow;
+  }
+});

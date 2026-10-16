@@ -46,10 +46,14 @@ export function ocrReaderConfigured(): boolean {
 /**
  * How long one model may take, given the time left in the call. Up to 28 s, but never more than HALF of what is left (with a 15 s floor), so one
  * hung model cannot use up the whole call and keep every later model in the chain from being tried. Never past the deadline.
+ * Always a whole, positive number of milliseconds: AbortSignal.timeout() throws a RangeError for a fractional delay, and half of an odd remaining
+ * time is fractional. (Only the final value is rounded down, so it can never exceed the deadline.)
  */
 export function attemptTimeoutMs(remainingMs: number): number {
-  const share = Math.min(28_000, Math.max(15_000, remainingMs / 2));
-  return Math.max(1000, Math.min(share, remainingMs - 1000));
+  const remaining = Number.isFinite(remainingMs) ? Math.floor(remainingMs) : 0;
+  const share = Math.min(28_000, Math.max(15_000, remaining / 2));
+  const wanted = Math.max(1000, Math.min(share, remaining - 1000)); // at least 1 s, and 1 s before the deadline
+  return Math.max(1, Math.floor(Math.min(wanted, remaining))); // never beyond the time that is left; always a valid delay
 }
 
 /** Metadata only (enum names, never text): why a reply carried no text - a block, a stop reason, or nothing at all. */
