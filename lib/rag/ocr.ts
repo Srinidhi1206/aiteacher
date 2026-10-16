@@ -52,20 +52,38 @@ Rules - follow them exactly:
 1. Copy only what is printed. Do not translate, transliterate, summarise, explain, correct spelling or grammar, or add anything.
 2. Keep the reading order: headings, paragraphs, lists, questions and exercises. Keep numbers, punctuation, and mathematical or chemical notation as printed.
 3. Ignore the diagonal "SCERT TELANGANA" watermark, decorative borders and page ornaments, and leave out the running page number and the "free distribution" line at the top or bottom of the page. Do not describe pictures or diagrams; keep only text that is printed in them (captions, labels).
-4. If a page has no printed text, write nothing for that page.
-5. Output format: for each page, a line exactly like =====PAGE ${pageNumbers[0]}===== (using that page's number) followed by that page's text. Output nothing else - no introduction, no notes, no code fences.`;
+4. If a page has no printed text, still write that page's marker line (see 5) and then nothing after it - never leave a marker out.
+5. Output format: for EACH page, in order, one marker line on its own followed by that page's text. The marker lines are exactly: ${pageNumbers.map((p) => `=====PAGE ${p}=====`).join(" , ")} - one per page, each with its own page number, no page skipped, none repeated. Output nothing else - no introduction, no notes, no code fences.`;
 }
 
-/** Splits the reader's answer into one text per requested page; null unless every requested page is present, in order. */
-export function parseOcrResponse(text: string, startPage: number, count: number): string[] | null {
-  const cleaned = text.replace(/^\s*```[a-z]*\s*/i, "").replace(/\s*```\s*$/, "");
-  const marker = /^=====PAGE (\d+)=====[ \t]*$/gm;
+// A marker is a line that is only "=====PAGE n=====" (exactly five "=" each side). Harmless dressing is tolerated - surrounding spaces, bold / italic /
+// backtick wrapping, "Page" in any case, spaces inside the marker, Windows line endings - because it cannot change which page a marker names. A marker
+// that is not alone on its line, has a different number of "=", or has no number is NOT a marker.
+const MARKER_LINE = /^[ \t]*[*_`]*[ \t]*={5}[ \t]*page[ \t]+(\d+)[ \t]*={5}[ \t]*[*_`]*[ \t]*$/gim;
+
+function scanMarkers(text: string): { cleaned: string; marks: { page: number; at: number; end: number }[] } {
+  const cleaned = text.replace(/\r\n?/g, "\n").replace(/^\s*```[a-z]*\s*/i, "").replace(/\s*```\s*$/, "");
   const marks: { page: number; at: number; end: number }[] = [];
-  for (let m = marker.exec(cleaned); m; m = marker.exec(cleaned)) marks.push({ page: Number(m[1]), at: m.index, end: m.index + m[0].length });
-  if (marks.length !== count) return null;
+  MARKER_LINE.lastIndex = 0;
+  for (let m = MARKER_LINE.exec(cleaned); m; m = MARKER_LINE.exec(cleaned)) marks.push({ page: Number(m[1]), at: m.index, end: m.index + m[0].length });
+  return { cleaned, marks };
+}
+
+/** What is wrong with an answer's page markers, as numbers only (safe to log): fewer / more than requested, or the right number but the wrong pages / order. */
+export function inspectOcrResponse(text: string, startPage: number, count: number): { found: number; expected: number; problem: "none" | "missing" | "extra" | "order" } {
+  const { marks } = scanMarkers(text);
+  if (marks.length < count) return { found: marks.length, expected: count, problem: "missing" };
+  if (marks.length > count) return { found: marks.length, expected: count, problem: "extra" };
+  const inOrder = marks.every((m, i) => m.page === startPage + i);
+  return { found: marks.length, expected: count, problem: inOrder ? "none" : "order" };
+}
+
+/** Splits the reader's answer into one text per requested page; null unless every requested page has its marker exactly once, in order. A page with no text is "". */
+export function parseOcrResponse(text: string, startPage: number, count: number): string[] | null {
+  const { cleaned, marks } = scanMarkers(text);
+  if (inspectOcrResponse(text, startPage, count).problem !== "none") return null;
   const pages: string[] = [];
   for (let i = 0; i < marks.length; i++) {
-    if (marks[i].page !== startPage + i) return null;
     pages.push(cleaned.slice(marks[i].end, i + 1 < marks.length ? marks[i + 1].at : cleaned.length).normalize("NFC").trim());
   }
   return pages;
@@ -92,7 +110,18 @@ export function validateOcrWindow(pages: string[], script: Script | null): { ok:
   return { ok: true };
 }
 
-/** Puts the saved windows back together. `complete` only when every page 1..totalPages is covered exactly once. */
+const isBlankPage = (text: string) => text.trim() === "";
+
+/** Page numbers of a window whose text is empty (a blank page, or one the reader returned nothing for): numbers only, safe to log. */
+export function emptyPagesOf(window: Pick<OcrWindowFile, "startPage" | "pages">): number[] {
+  const out: number[] = [];
+  window.pages.forEach((text, i) => {
+    if (isBlankPage(text)) out.push(window.startPage + i);
+  });
+  return out;
+}
+
+/** Puts the saved windows back together. `complete` only when every page 1..totalPages is covered (a page with no text counts as covered). */
 export function assembleOcrPages(windows: OcrWindowFile[]): { pages: string[]; totalPages: number; complete: boolean; sourceSha256: string | null; missing: number } {
   if (windows.length === 0) return { pages: [], totalPages: 0, complete: false, sourceSha256: null, missing: 0 };
   const totalPages = windows[0].totalPages;
@@ -104,7 +133,11 @@ export function assembleOcrPages(windows: OcrWindowFile[]): { pages: string[]; t
     if (w.totalPages !== totalPages || w.sourceSha256 !== sha) continue; // a leftover from a different file is ignored
     for (let i = 0; i < w.pages.length; i++) {
       const at = w.startPage - 1 + i;
-      if (at >= 0 && at < totalPages && pages[at] === null) pages[at] = w.pages[i];
+      if (at < 0 || at >= totalPages) continue;
+      // Priority decides between two non-empty readings, but an empty page never shadows text: it only holds the place until a window with text for
+      // that page comes along, and text is never replaced by an empty page.
+      const have = pages[at];
+      if (have === null || (isBlankPage(have) && !isBlankPage(w.pages[i]))) pages[at] = w.pages[i];
     }
   }
   const missing = pages.filter((p) => p === null).length;

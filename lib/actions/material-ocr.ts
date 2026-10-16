@@ -18,9 +18,9 @@ import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 import { MAX_DIRECT_READ_MB } from "@/lib/rag/limits";
 import { assessTextLayer } from "@/lib/rag/text-quality";
 import { formatIndexStatus, mayWriteOcrStatus, parseIndexStatus } from "@/lib/rag/index-status";
-import { expectedScriptForSubject, validateOcrWindow, OCR_WINDOW_PAGES } from "@/lib/rag/ocr";
+import { emptyPagesOf, expectedScriptForSubject, validateOcrWindow, OCR_WINDOW_PAGES } from "@/lib/rag/ocr";
 import { openPageRenderer } from "@/lib/rag/ocr-render";
-import { ocrReaderConfigured, OcrReaderUnavailableError, readPages } from "@/lib/rag/ocr-reader";
+import { ocrReaderConfigured, OcrReaderUnavailableError, readPages, rotationSalt } from "@/lib/rag/ocr-reader";
 import { savedPages, saveWindow, verifySaved } from "@/lib/rag/ocr-store";
 import { extractPdfPages } from "@/lib/rag/pdf-text";
 import { fetchPdfCached } from "@/lib/rag/pdf-cache";
@@ -63,12 +63,21 @@ export async function ocrMaterial(materialId: string): Promise<ActionResult<OcrP
       knownTotalPages,
       getSavedPages: () => savedPages(material.id),
       verifySaved: () => verifySaved(material.id),
-      saveWindow: (w) => saveWindow(material.id, w),
+      saveWindow: async (w) => {
+        await saveWindow(material.id, w);
+        // Metadata only: which pages came back with no text (page numbers and a count - never the text itself).
+        const empty = emptyPagesOf(w);
+        // eslint-disable-next-line no-console
+        if (empty.length > 0) console.warn(`[ocr] saved window pages ${w.startPage}-${w.endPage} with ${empty.length} empty page(s): ${empty.join(",")}`);
+      },
       getPdf: () => fetchPdfCached(material.fileUrl, MAX_UPLOAD_BYTES, { materialId: material.id, expectedBytes: material.sizeKb * 1024 }),
       maxDirectBytes: MAX_DIRECT_READ_MB * 1024 * 1024,
       textLayerUsable,
       openRenderer: openPageRenderer,
-      readWindow: (images, firstModel) => readPages(images, startedAt + CALL_BUDGET_MS, firstModel),
+      // The model order depends on the window's first page, so without a change the same models would be tried first on every pass and the ones at the
+      // end of the chain never reached. Shifting the start by the call's time bucket (lib/rag/ocr-reader.ts) makes a retry start on a different model,
+      // while every window of this one call keeps the same shift (windows in one call stay apart).
+      readWindow: (images, firstModel) => readPages(images, startedAt + CALL_BUDGET_MS, firstModel + rotationSalt(startedAt)),
       validate: (pages) => validateOcrWindow(pages, script),
       isQuotaFailure: (reason) => reason instanceof OcrReaderUnavailableError && reason.quota,
       recordStatus: async (pagesDone, totalPages) => {

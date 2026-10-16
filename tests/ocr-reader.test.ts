@@ -9,10 +9,11 @@ const FAKE_KEY = "fake-test-key-never-real-0123456789";
 const PAGE_TEXT = "SECRET TEXTBOOK SENTENCE";
 
 const attempts: string[] = [];
-let behaviour: (model: string) => Promise<{ text?: string }> = async () => ({});
+let behaviour: (model: string) => Promise<Record<string, unknown>> = async () => ({});
 
 mock.module("server-only", { namedExports: {} });
-mock.module(here("lib/ai/provider.ts"), { namedExports: { geminiModelChain: () => MODELS } });
+let providerChain = MODELS;
+mock.module(here("lib/ai/provider.ts"), { namedExports: { geminiModelChain: () => providerChain } });
 mock.module("@google/genai", {
   namedExports: {
     GoogleGenAI: class {
@@ -86,4 +87,161 @@ test("a model that answers in the wrong shape is logged as 'unparseable' and the
   assert.ok("value" in out && out.value.model === second && out.value.pages.length === 1);
   assert.deepEqual(attempts, [first, second]);
   assert.equal(out.lines.length, 0, "a success logs no failure line");
+});
+
+// ---------- diagnostics for unusable replies (counts and enum names only) ----------
+
+const twoPages = [
+  { page: 5, png: new Uint8Array([1, 2, 3]) },
+  { page: 6, png: new Uint8Array([4, 5, 6]) },
+];
+const PAGE_ONE_TEXT = "यह पृष्ठ पांच का गुप्त पाठ है";
+
+test("an EMPTY reply is logged as such, with its finish / block reason and no text; the chain still tries every model once", async () => {
+  attempts.length = 0;
+  const { readPages, ocrModelChain } = await loadReader();
+  behaviour = async () => ({ text: undefined, candidates: [{ finishReason: "SAFETY" }], promptFeedback: { blockReason: "PROHIBITED_CONTENT" } });
+  const out = await captureErrors(() => readPages(twoPages, Date.now() + 120_000, 0));
+  assert.ok("error" in out);
+  assert.equal(attempts.length, ocrModelChain().length);
+  const log = out.lines.join("\n");
+  assert.ok(log.includes("unparseable") && log.includes("empty reply (1 candidates, finish=SAFETY, block=PROHIBITED_CONTENT)"), log);
+  assert.ok(!log.includes(FAKE_KEY) && !log.includes("inlineData"));
+});
+
+test("an empty reply with no candidates at all is described as such", async () => {
+  attempts.length = 0;
+  const { readPages } = await loadReader();
+  behaviour = async () => ({});
+  const out = await captureErrors(() => readPages(twoPages, Date.now() + 120_000, 0));
+  assert.ok(out.lines.join("\n").includes("empty reply (0 candidates)"));
+});
+
+test("a reply with the WRONG MARKERS is logged with counts only - never the reply's text", async () => {
+  attempts.length = 0;
+  const { readPages } = await loadReader();
+  behaviour = async () => ({ text: `=====PAGE 5=====\n${PAGE_ONE_TEXT}` }); // page 6's marker is missing
+  const missing = await captureErrors(() => readPages(twoPages, Date.now() + 120_000, 0));
+  const log = missing.lines.join("\n");
+  assert.ok(log.includes("page markers 1 of 2 (missing)"), log);
+  assert.ok(!log.includes(PAGE_ONE_TEXT), "the OCR text is never logged");
+
+  behaviour = async () => ({ text: `=====PAGE 6=====\nx\n=====PAGE 5=====\n${PAGE_ONE_TEXT}` });
+  const order = await captureErrors(() => readPages(twoPages, Date.now() + 120_000, 0));
+  assert.ok(order.lines.join("\n").includes("page markers 2 of 2 (order)"));
+});
+
+test("an answer with an EMPTY page is accepted: the marker is there, the page's text is empty", async () => {
+  attempts.length = 0;
+  const { readPages } = await loadReader();
+  behaviour = async () => ({ text: `=====PAGE 5=====\n=====PAGE 6=====\n${PAGE_ONE_TEXT}` });
+  const out = await captureErrors(() => readPages(twoPages, Date.now() + 120_000, 0));
+  assert.ok("value" in out);
+  assert.deepEqual(out.value.pages, ["", PAGE_ONE_TEXT]);
+  assert.equal(attempts.length, 1, "no fallback was needed");
+  assert.equal(out.lines.length, 0);
+});
+
+test("harmlessly formatted markers are accepted end to end", async () => {
+  attempts.length = 0;
+  const { readPages } = await loadReader();
+  behaviour = async () => ({ text: `**=====PAGE 5=====**\r\n${PAGE_ONE_TEXT}\r\n===== Page 6 =====\r\nदूसरा` });
+  const out = await captureErrors(() => readPages(twoPages, Date.now() + 120_000, 0));
+  assert.ok("value" in out && out.value.pages.length === 2 && out.value.pages[0] === PAGE_ONE_TEXT && out.value.pages[1] === "दूसरा");
+});
+
+// ---------- the time budget: one hung model must not starve the rest of the chain ----------
+
+test("attemptTimeoutMs: never past the deadline, never above 28 s, at least 15 s when there is time, and at most half of what is left", async () => {
+  const { attemptTimeoutMs } = await loadReader();
+  assert.equal(attemptTimeoutMs(100_000), 28_000);
+  assert.equal(attemptTimeoutMs(45_000), 22_500);
+  assert.equal(attemptTimeoutMs(30_000), 15_000);
+  assert.equal(attemptTimeoutMs(20_000), 15_000);
+  assert.equal(attemptTimeoutMs(7_000), 6_000, "never more than remaining - 1 s");
+  assert.ok(attemptTimeoutMs(6_000) >= 1000 && attemptTimeoutMs(6_000) <= 5_000);
+  for (const r of [6_000, 9_000, 15_000, 30_000, 49_000, 120_000]) {
+    const t = attemptTimeoutMs(r);
+    assert.ok(t <= 28_000 && t <= r - 1000 && t >= 1000, `remaining ${r} -> ${t}`);
+  }
+});
+
+test("when every model HANGS to its time limit, three models are still tried in a 45 s call (a single hang leaves 22 s for the rest, up from 17 s)", async () => {
+  const { attemptTimeoutMs } = await loadReader();
+  const simulate = (timeoutOf: (remaining: number) => number) => {
+    let remaining = 45_000;
+    let tried = 0;
+    while (remaining >= 6_000) {
+      remaining -= timeoutOf(remaining);
+      tried++;
+    }
+    return { tried, leftAfterFirst: 45_000 - timeoutOf(45_000) };
+  };
+  const old = simulate((r) => Math.min(28_000, r - 1000));
+  const now = simulate(attemptTimeoutMs);
+  assert.equal(old.tried, 2);
+  assert.ok(now.tried >= 3, `tried ${now.tried}`);
+  assert.ok(now.leftAfterFirst > old.leftAfterFirst);
+});
+
+// ---------- model rotation between passes: deterministic ----------
+
+// The two chain lengths that occur: the default setup (flash-latest + 4 extras + 3.6 + 2.5) and the local one (GEMINI_MODEL=gemini-3.6-flash).
+const DEFAULT_SETUP = ["gemini-flash-latest", "gemini-3.6-flash", "gemini-2.5-flash"];
+const LOCAL_SETUP = ["gemini-3.6-flash", "gemini-2.5-flash"];
+
+test("the real chain is 7 models in the default setup and 6 when GEMINI_MODEL is gemini-3.6-flash (the lengths the rotation is built for)", async () => {
+  const { ocrModelChain } = await loadReader();
+  providerChain = DEFAULT_SETUP;
+  assert.equal(ocrModelChain().length, 7);
+  providerChain = LOCAL_SETUP;
+  assert.equal(ocrModelChain().length, 6);
+  providerChain = MODELS;
+});
+
+test("rotationSalt is the same for one call and orderModels is stable for it: every window of a call keeps its order", async () => {
+  const { rotationSalt, orderModels } = await loadReader();
+  const t = 1_790_000_123_456;
+  assert.equal(rotationSalt(t), rotationSalt(t));
+  const chain = ["a", "b", "c", "d", "e", "f", "g"];
+  const first = orderModels(chain, 45 + rotationSalt(t));
+  for (let i = 0; i < 20; i++) assert.deepEqual(orderModels(chain, 45 + rotationSalt(t)), first);
+  assert.deepEqual([...first].sort(), [...chain].sort(), "a rotation, never a drop or a repeat");
+  // Windows of one call (different first pages) still start on different models.
+  const starts = new Set([45, 47, 49].map((w) => orderModels(chain, w + rotationSalt(t))[0]));
+  assert.equal(starts.size, 3);
+});
+
+test("a retry 18 s to 89 s after a pass ALWAYS starts on a different model, for chains of 6 and 7 (the real retry gap is 20 s + the pass's run time, up to 60 s)", async () => {
+  const { rotationSalt, orderModels, ROTATION_BUCKET_MS } = await loadReader();
+  assert.equal(ROTATION_BUCKET_MS, 18_000);
+  for (const n of [6, 7]) {
+    const chain = Array.from({ length: n }, (_, i) => `m${i}`);
+    for (const window of [1, 45, 46, 89]) {
+      // every phase of the clock within a bucket, every whole-second gap from 18 s to 89 s
+      for (let phase = 0; phase < ROTATION_BUCKET_MS; phase += 250) {
+        const t0 = 1_790_000_000_000 - (1_790_000_000_000 % ROTATION_BUCKET_MS) + phase;
+        const before = orderModels(chain, window + rotationSalt(t0))[0];
+        for (let gap = 18_000; gap <= 89_000; gap += 1000) {
+          const after = orderModels(chain, window + rotationSalt(t0 + gap))[0];
+          assert.notEqual(after, before, `chain ${n}, window ${window}, phase ${phase} ms, gap ${gap / 1000} s`);
+        }
+      }
+    }
+  }
+});
+
+test("the gap range the admin screen can really produce is covered: 20 s pause + a pass of 0 to 60 s", async () => {
+  const { rotationSalt } = await loadReader();
+  const worstLow = 20_000; // pause only (a pass that ended instantly)
+  const worstHigh = 20_000 + 60_000; // pause + a pass killed at the 60 s function limit
+  for (const n of [6, 7]) {
+    for (let phase = 0; phase < 18_000; phase += 100) {
+      const t0 = 1_790_000_000_000 - (1_790_000_000_000 % 18_000) + phase;
+      for (const gap of [worstLow, worstLow + 1, 45_000, worstHigh - 1, worstHigh]) {
+        const shift = rotationSalt(t0 + gap) - rotationSalt(t0);
+        assert.ok(shift % n !== 0, `chain ${n}: gap ${gap} ms shifts the start by ${shift}`);
+      }
+    }
+  }
 });

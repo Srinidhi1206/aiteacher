@@ -3,7 +3,7 @@
 // refuses the failures that can be detected, and the original PDF is never modified.
 import "server-only";
 import { geminiModelChain } from "@/lib/ai/provider";
-import { buildOcrPrompt, parseOcrResponse } from "@/lib/rag/ocr";
+import { buildOcrPrompt, inspectOcrResponse, parseOcrResponse } from "@/lib/rag/ocr";
 
 export class OcrReaderUnavailableError extends Error {
   constructor(message = "The AI reader is not available right now.", readonly quota = false) {
@@ -21,8 +21,43 @@ export function ocrModelChain(): string[] {
   return [...new Set([primary, ...OCR_EXTRA_MODELS, ...rest])];
 }
 
+/** The chain in the order one window tries it, starting `firstModel` places in (wrapping round). */
+export function orderModels(chain: string[], firstModel: number): string[] {
+  return chain.map((_, i) => chain[(firstModel + i) % chain.length]);
+}
+
+/**
+ * Width of the time bucket that shifts the starting model between OCR passes. A pass that fails is retried by the admin screen 20 s later (plus the
+ * failed pass's own run time, which is up to the function's 60 s limit), so two passes of one book start about 20-80 s apart. A bucket of B ms moves
+ * the start by floor(gap / B) or one more places; for the whole 20-80 s range that is 1 to 5 places, which is never a multiple of the 6- or 7-model
+ * chain, so a retry always starts on a different model. (15 s would fail for a 6-model chain at gaps of 76-80 s; 20 s would leave no margin below 20 s.)
+ */
+export const ROTATION_BUCKET_MS = 18_000;
+
+/** The same for every window of one call (it is computed once from the call's start time); different for a retry 18 s or more later. */
+export function rotationSalt(startedAtMs: number): number {
+  return Math.floor(startedAtMs / ROTATION_BUCKET_MS);
+}
+
 export function ocrReaderConfigured(): boolean {
   return process.env.AI_PROVIDER?.trim().toLowerCase() === "gemini" && Boolean(process.env.GEMINI_API_KEY);
+}
+
+/**
+ * How long one model may take, given the time left in the call. Up to 28 s, but never more than HALF of what is left (with a 15 s floor), so one
+ * hung model cannot use up the whole call and keep every later model in the chain from being tried. Never past the deadline.
+ */
+export function attemptTimeoutMs(remainingMs: number): number {
+  const share = Math.min(28_000, Math.max(15_000, remainingMs / 2));
+  return Math.max(1000, Math.min(share, remainingMs - 1000));
+}
+
+/** Metadata only (enum names, never text): why a reply carried no text - a block, a stop reason, or nothing at all. */
+function describeEmptyReply(res: { candidates?: { finishReason?: unknown }[]; promptFeedback?: { blockReason?: unknown } }): string {
+  const tag = (v: unknown) => (typeof v === "string" && /^[A-Z_]{1,40}$/.test(v) ? v : null);
+  const finish = tag(res.candidates?.[0]?.finishReason);
+  const block = tag(res.promptFeedback?.blockReason);
+  return `empty reply (${res.candidates?.length ?? 0} candidates${finish ? `, finish=${finish}` : ""}${block ? `, block=${block}` : ""})`;
 }
 
 /** `deadlineAt` (epoch ms) is the latest moment this call may still be waiting on the AI: the caller's function has a hard time limit. */
@@ -40,13 +75,14 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
   let sawOther = false; // a model that failed for some reason other than quota (overload, timeout, unreadable answer)
   // Start each window on a different model so parallel windows spread across the models' per-minute limits instead of all hitting one.
   const chain = ocrModelChain();
-  const ordered = chain.map((_, i) => chain[(firstModel + i) % chain.length]);
+  const ordered = orderModels(chain, firstModel);
   // Gemini answers 500/503/504 ("high demand") for a while at a time, per model, and each model has its own daily allowance. One attempt
   // per model (a hung or overloaded model must not eat the whole call), then the next model; the caller tries again on its next call.
   // Never wait past the deadline.
   const MIN_ATTEMPT_MS = 6000;
-  // What went wrong with each model, for the log: the model's name and the HTTP status (or a short label) - never the key, prompt or page text.
-  const failures: { model: string; status: number | string }[] = [];
+  // What went wrong with each model, for the log: the model's name, the HTTP status (or a short label) and, for an unusable reply, counts only
+  // (marker counts, or an empty-reply reason) - never the key, prompt, image or page text.
+  const failures: { model: string; status: number | string; why?: string }[] = [];
   for (const model of ordered) {
     let thinkingOff = true;
     for (let attempt = 0; attempt < 1; attempt++) {
@@ -59,15 +95,22 @@ export async function readPages(images: { page: number; png: Uint8Array }[], dea
           config: {
             temperature: 0,
             maxOutputTokens: 12_000,
-            abortSignal: AbortSignal.timeout(Math.min(28_000, remaining - 1000)),
+            abortSignal: AbortSignal.timeout(attemptTimeoutMs(remaining)),
             // Reading text needs no reasoning; switching it off is faster and cheaper. Some models refuse that, so retry once without.
             ...(thinkingOff ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
           },
         });
-        const pages = res.text ? parseOcrResponse(res.text, startPage, images.length) : null;
+        const text = res.text;
+        const pages = text ? parseOcrResponse(text, startPage, images.length) : null;
         if (pages) return { pages, model };
         sawOther = true;
-        failures.push({ model, status: "unparseable" });
+        let why: string;
+        if (!text) why = describeEmptyReply(res);
+        else {
+          const m = inspectOcrResponse(text, startPage, images.length);
+          why = `page markers ${m.found} of ${m.expected} (${m.problem})`;
+        }
+        failures.push({ model, status: "unparseable", why });
         break; // answered, but not in the requested shape: try the next model
       } catch (err) {
         const status = (err as { status?: number } | null)?.status;
