@@ -12,6 +12,7 @@ import { Modal } from "@/components/ui/modal";
 import { useToast } from "@/components/ui/toast";
 import { inputClass, labelClass } from "@/components/register/field-styles";
 import { formatDate } from "@/lib/utils";
+import { countDrafts, filterByView, type CalendarView } from "@/lib/calendar/view";
 import { listStates, listBoards, listSchoolClasses, listSchools } from "@/lib/actions/curriculum";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 import { CalendarImportDialog } from "@/components/admin/calendar-import-dialog";
@@ -64,6 +65,8 @@ export function AcademicCalendarPanel() {
   const [formError, setFormError] = React.useState<string | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [importOpen, setImportOpen] = React.useState(false);
+  // "Drafts" is where a saved import is found again: saved drafts are real events (not published), so they are here after a refresh too.
+  const [view, setView] = React.useState<CalendarView>("all");
 
   const isSuperAdmin = me?.isSuperAdmin === true;
   const schoolBoardId = me?.schoolBoardId ?? null;
@@ -173,6 +176,16 @@ export function AcademicCalendarPanel() {
         </div>
       </CardHeader>
       <CardContent className="overflow-x-auto">
+        {events && events.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Show events">
+            {(["all", "drafts", "published"] as const).map((v) => (
+              <Button key={v} type="button" size="sm" variant={view === v ? "secondary" : "outline"} aria-pressed={view === v} onClick={() => setView(v)}>
+                {v === "all" ? "All" : v === "drafts" ? `Drafts (${countDrafts(events)})` : "Published"}
+              </Button>
+            ))}
+            {countDrafts(events) > 0 && <span className="text-xs text-gray-500 dark:text-gray-400">Drafts are saved but not visible to students until you publish them.</span>}
+          </div>
+        )}
         {me && !isSuperAdmin && !me.schoolId && <p className="py-2 text-sm text-gray-500 dark:text-gray-400">Your account is not attached to a school, so there is no school calendar to manage.</p>}
         {unavailable ? (
           <p className="py-8 text-center text-sm text-gray-400">The calendar could not be loaded right now.</p>
@@ -180,6 +193,8 @@ export function AcademicCalendarPanel() {
           <p className="py-8 text-center text-sm text-gray-400">Loading...</p>
         ) : events.length === 0 ? (
           <p className="py-8 text-center text-sm text-gray-400">No calendar events yet.</p>
+        ) : filterByView(events, view).length === 0 ? (
+          <p className="py-8 text-center text-sm text-gray-400">{view === "drafts" ? "No draft events." : "No published events."}</p>
         ) : (
           <table className="w-full min-w-[820px] border-collapse text-sm">
             <thead>
@@ -193,7 +208,7 @@ export function AcademicCalendarPanel() {
               </tr>
             </thead>
             <tbody>
-              {events.map((ev) => (
+              {filterByView(events, view).map((ev) => (
                 <tr key={ev.id} className="border-b border-gray-50 last:border-0 dark:border-gray-800/60">
                   <td className="whitespace-nowrap py-2.5 pr-3 text-gray-600 dark:text-gray-300">{range(ev)}</td>
                   <td className="py-2.5 pr-3 font-medium text-gray-800 dark:text-gray-100">
@@ -249,7 +264,7 @@ export function AcademicCalendarPanel() {
         )}
       </CardContent>
 
-      {me && <CalendarImportDialog open={importOpen} onClose={() => setImportOpen(false)} admin={{ isSuperAdmin, schoolId: me.schoolId ?? null, schoolName: me.schoolName ?? null, schoolBoardId: me.schoolBoardId ?? null }} onImported={refresh} />}
+      {me && <CalendarImportDialog open={importOpen} onClose={() => setImportOpen(false)} admin={{ isSuperAdmin, schoolId: me.schoolId ?? null, schoolName: me.schoolName ?? null, schoolBoardId: me.schoolBoardId ?? null }} onImported={() => refresh()} onViewDrafts={() => { setView("drafts"); refresh(); }} />}
 
       <Modal
         open={!!form}

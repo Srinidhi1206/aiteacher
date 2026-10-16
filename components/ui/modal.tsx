@@ -10,10 +10,48 @@ export interface ModalProps {
   title?: string;
   description?: string;
   className?: string;
+  /** Pinned below the scrolling content, so a primary action is always visible however long the content is. */
+  footer?: React.ReactNode;
   children: React.ReactNode;
 }
 
-export function Modal({ open, onClose, title, description, className, children }: ModalProps) {
+/**
+ * The dialog panel itself (no portal, no effects - so it can be rendered and tested on its own). It is never taller than the viewport: the header
+ * and the optional footer stay put and ONLY the middle scrolls, so nothing a dialog needs - least of all its main button - can end up below the fold
+ * where it cannot be reached (the page behind is scroll-locked while a dialog is open).
+ */
+export function ModalFrame({ onClose, title, description, className, footer, children }: Omit<ModalProps, "open">) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      className={cn("relative z-10 flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col rounded-2xl bg-white shadow-card dark:bg-gray-900", className)}
+    >
+      <button
+        onClick={onClose}
+        aria-label="Close"
+        className="absolute right-4 top-4 rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800"
+      >
+        <X className="h-5 w-5" />
+      </button>
+      <div className="shrink-0 px-6 pt-6">
+        {title && <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">{title}</h2>}
+        {description && <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{description}</p>}
+      </div>
+      <div data-modal-body className={cn("min-h-0 flex-1 overflow-y-auto px-6 pt-4", footer ? "pb-4" : "pb-6")}>
+        {children}
+      </div>
+      {footer ? (
+        <div data-modal-footer className="shrink-0 rounded-b-2xl border-t border-gray-100 bg-white px-6 py-4 dark:border-gray-800 dark:bg-gray-900">
+          {footer}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function Modal({ open, onClose, title, description, className, footer, children }: ModalProps) {
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
 
@@ -34,30 +72,10 @@ export function Modal({ open, onClose, title, description, className, children }
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div
-        className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm animate-in fade-in"
-        onClick={onClose}
-        aria-hidden
-      />
-      <div
-        role="dialog"
-        aria-modal="true"
-        className={cn(
-          "relative z-10 w-full max-w-lg rounded-2xl bg-white p-6 shadow-card dark:bg-gray-900",
-          className
-        )}
-      >
-        <button
-          onClick={onClose}
-          aria-label="Close"
-          className="absolute right-4 top-4 rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800"
-        >
-          <X className="h-5 w-5" />
-        </button>
-        {title && <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-50">{title}</h2>}
-        {description && <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{description}</p>}
-        <div className="mt-4">{children}</div>
-      </div>
+      <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm animate-in fade-in" onClick={onClose} aria-hidden />
+      <ModalFrame onClose={onClose} title={title} description={description} className={className} footer={footer}>
+        {children}
+      </ModalFrame>
     </div>,
     document.body
   );
