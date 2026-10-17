@@ -11,6 +11,7 @@
 import type { prisma } from "@/lib/prisma";
 import { dayStart, daysBetween, localDateString, todayInIndia } from "@/lib/calendar/day";
 import { listUpcomingExams } from "@/lib/calendar/next-exam";
+import { planChapters } from "./plan-chapters";
 import { buildStudyPlan, placementNotes, planStaleReason, staleMessage, type PlanResult } from "./exam-plan";
 
 export type PathDb = Pick<typeof prisma, "student" | "weaknessProfile" | "academicEvent" | "examSchedule" | "schoolClassSubject" | "studyPlan" | "studyPlanItem" | "$transaction">;
@@ -37,9 +38,24 @@ async function loadPlanInputs(db: PathDb, studentId: string, now: Date) {
   // The class's enabled subjects and their chapters, in textbook order. Nothing else is ever scheduled.
   const links = await db.schoolClassSubject.findMany({
     where: { schoolClassId: student.schoolClassId, isEnabled: true },
-    include: { subject: { include: { chapters: { orderBy: { order: "asc" }, select: { id: true, name: true } } } } },
+    include: {
+      subject: {
+        include: {
+          // topic count and "has a textbook filed here" only decide whether a chapter is a lesson or just holds a book (plan-chapters.ts)
+          chapters: { orderBy: { order: "asc" }, select: { id: true, name: true, _count: { select: { topics: true } }, studyMaterials: { where: { materialType: "TEXTBOOK" }, select: { id: true }, take: 1 } } },
+        },
+      },
+    },
   });
-  const subjects = links.map((l) => ({ id: l.subject.id, name: l.subject.name, chapters: l.subject.chapters })).sort((a, b) => a.name.localeCompare(b.name));
+  const subjects = links
+    .map((l) => ({
+      id: l.subject.id,
+      name: l.subject.name,
+      chapters: planChapters(
+        l.subject.chapters.map((c) => ({ id: c.id, name: c.name, topicCount: c._count?.topics, hasTextbookMaterial: c.studyMaterials ? c.studyMaterials.length > 0 : undefined }))
+      ).map((c) => ({ id: c.id, name: c.name })),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const subjectIds = new Set(subjects.map((s) => s.id));
 
   const weakRows = await db.weaknessProfile.findMany({

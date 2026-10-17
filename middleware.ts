@@ -19,6 +19,7 @@ const STUDENT_PATHS = [
   "/strengths",
   "/achievements",
   "/calendar",
+  "/timetable", // student-only page; without this a teacher or admin who opened it was shown a misleading "database unavailable"
   "/ai-tutor",
   "/settings",
   "/materials", // Stage C5 - study materials / textbook

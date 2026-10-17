@@ -29,6 +29,7 @@ const KIND_LABEL: Record<string, string> = {
 export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], subjectLinks = {} }: { learningPath: LearningPath | null; weakAreas: WeakAreas; planNotes?: string[]; subjectLinks?: Record<string, string> }) {
   const router = useRouter();
   const [pendingId, setPendingId] = React.useState<string | null>(null);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
 
   const items = learningPath?.items ?? [];
   const completed = items.filter((i) => i.completed).length;
@@ -37,9 +38,19 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
 
   async function toggleItem(itemId: string, next: boolean) {
     setPendingId(itemId);
-    await completeLearningPathItem(itemId, next);
-    setPendingId(null);
-    router.refresh();
+    setSaveError(null);
+    try {
+      const res = await completeLearningPathItem(itemId, next);
+      if (!res.ok) {
+        setSaveError(res.error ?? "Your change could not be saved. Please try again.");
+        return;
+      }
+      router.refresh();
+    } catch {
+      setSaveError("Your change could not be saved - check your connection and try again.");
+    } finally {
+      setPendingId(null);
+    }
   }
 
   if (items.length === 0) {
@@ -73,6 +84,7 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
       </CardHeader>
       <CardContent className="space-y-4">
         <PlanNotes notes={planNotes} />
+        {saveError && (<p role="alert" className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-400">{saveError}</p>)}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
           <span className="font-semibold text-gray-700 dark:text-gray-200">{completionPct}% complete</span>
           <span>

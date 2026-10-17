@@ -18,6 +18,7 @@
 //     and mastery / weak areas / strengths are recalculated from exams AND
 //     practice together (lib/analytics/progress.ts).
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/current-session";
 import { getAIProvider, AIError } from "@/lib/ai";
@@ -297,21 +298,41 @@ export async function submitPractice(paperId: string, answers: Record<string, st
     const stored: Record<string, string> = {};
     for (const pq of paper.questions) if (typeof answers[pq.question.id] === "string") stored[pq.question.id] = answers[pq.question.id].slice(0, 300);
 
-    await prisma.attempt.create({
-      data: {
-        studentId: student.id,
-        paperId: paper.id,
-        answers: stored,
-        flagged: [],
-        startedAt: paper.createdAt,
-        timeTakenSeconds: Math.max(0, Math.round((Date.now() - paper.createdAt.getTime()) / 1000)),
-        scoreObtained: score,
-        totalMarks: total,
-        accuracy,
-        conceptUnderstanding: accuracy,
-        scores: { create: scoreRows },
-      },
-    });
+    // "No attempt yet" (checked above) and this write were two separate steps, so two submits arriving together could both pass the check and save two attempts
+    // (Attempt has no unique key on paper + student, and a schema change is not part of this fix). The check and the write now run in ONE serializable transaction:
+    // the database lets exactly one of two overlapping ones commit and aborts the other (P2034), which is reported as "already submitted".
+    const attemptData = {
+      studentId: student.id,
+      paperId: paper.id,
+      answers: stored,
+      flagged: [],
+      startedAt: paper.createdAt,
+      timeTakenSeconds: Math.max(0, Math.round((Date.now() - paper.createdAt.getTime()) / 1000)),
+      scoreObtained: score,
+      totalMarks: total,
+      accuracy,
+      conceptUnderstanding: accuracy,
+      scores: { create: scoreRows },
+    };
+    const alreadySubmitted = { ok: false as const, error: "You have already submitted this practice session." };
+    try {
+      const created = await prisma.$transaction(
+        async (tx) => {
+          if ((await tx.attempt.count({ where: { paperId: paper.id, studentId: student.id } })) > 0) return false;
+          await tx.attempt.create({ data: attemptData });
+          return true;
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+      );
+      if (!created) return alreadySubmitted;
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2034") {
+        // Aborted by the database. If the other submit did save, this one is a repeat; if nothing was saved (a spurious abort), the student is asked to press Submit again.
+        const saved = (await prisma.attempt.count({ where: { paperId: paper.id, studentId: student.id } })) > 0;
+        return saved ? alreadySubmitted : { ok: false, error: "Your answers could not be saved just now. Please press Submit again - they are still on the page." };
+      }
+      throw e;
+    }
 
     // Best-effort, like exam grading: a failure here must not lose the attempt.
     await (async () => {

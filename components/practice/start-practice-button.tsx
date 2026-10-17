@@ -17,13 +17,18 @@ export function StartPracticeButton({ topicId, label = "Practice this topic", cl
   async function handleStart() {
     setBusy(true);
     setError(null);
-    const res = await startPractice(topicId);
-    if (!res.ok || !res.data) {
+    try {
+      const res = await startPractice(topicId);
+      if (!res.ok || !res.data) {
+        setBusy(false);
+        setError(res.error ?? "Could not start practice.");
+        return;
+      }
+      router.push(`/practice-papers/${res.data.paperId}/attempt`);
+    } catch {
       setBusy(false);
-      setError(res.error ?? "Could not start practice.");
-      return;
+      setError("Could not start practice right now. Please try again in a moment.");
     }
-    router.push(`/practice-papers/${res.data.paperId}/attempt`);
   }
 
   return (

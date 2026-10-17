@@ -608,8 +608,10 @@ export async function submitExam(submissionId: string): Promise<ActionResult> {
 
     const timeTakenSeconds = submission.startedAt ? Math.max(0, Math.floor((Date.now() - submission.startedAt.getTime()) / 1000)) : null;
 
-    await prisma.examSubmission.update({
-      where: { id: submissionId },
+    // Claimed in ONE conditional write: if the same submission is submitted twice at once (two tabs, a double click), exactly one of them moves it from "in
+    // progress" to "submitted" and the other is told it already was - so it is never graded, counted or announced twice.
+    const claimed = await prisma.examSubmission.updateMany({
+      where: { id: submissionId, status: { in: ["IN_PROGRESS", "NOT_STARTED"] } },
       data: {
         status: "SUBMITTED",
         submittedAt: new Date(),
@@ -621,6 +623,7 @@ export async function submitExam(submissionId: string): Promise<ActionResult> {
         maxScore: submission.exam.maxMarks,
       },
     });
+    if (claimed.count === 0) return { ok: false, error: "Already submitted." };
 
     if (!hasSubjective) await refreshStudentAnalytics(student.id);
 
@@ -737,7 +740,14 @@ export async function getExamResultForStudent(examId: string) {
   });
   if (!submission || submission.status === "NOT_STARTED" || submission.status === "IN_PROGRESS") return null;
 
-  const pendingReview = submission.answers.some((a) => a.marksAwarded == null);
+  // Pending until the teacher has finalised it. A written question the student skipped has NO answer row, so "some answer is unmarked" alone said "not pending"
+  // for an exam whose only unmarked work was skipped - and the page then showed a blank score as 0. A submission with no final score yet is pending, whatever its rows say.
+  const pendingReview = submission.totalScore == null || submission.answers.some((a) => a.marksAwarded == null);
+  const answerOf = new Map(submission.answers.map((a) => [a.questionId, a]));
+  // Every question of the exam, in its order - including the ones left unanswered, which the student should see were not answered.
+  const reviewed = [...submission.exam.questions]
+    .sort((a, b) => a.order - b.order)
+    .map((q) => ({ question: q, answer: answerOf.get(q.id) ?? null }));
 
   return {
     examTitle: submission.exam.title,
@@ -748,14 +758,15 @@ export async function getExamResultForStudent(examId: string) {
     totalScore: submission.totalScore,
     maxScore: submission.maxScore ?? submission.exam.maxMarks,
     feedback: submission.grade?.feedback ?? null,
-    questions: submission.answers.map((a) => ({
-      prompt: a.question.prompt,
-      type: a.question.type,
-      studentAnswer: a.studentAnswer,
-      correctAnswer: a.question.type === "MCQ" || a.question.type === "TRUE_FALSE" ? a.question.correctAnswer : null,
-      isCorrect: a.isCorrect,
-      marksAwarded: a.marksAwarded,
-      marks: a.question.marks,
+    questions: reviewed.map(({ question, answer }) => ({
+      prompt: question.prompt,
+      type: question.type,
+      studentAnswer: answer?.studentAnswer ?? null,
+      correctAnswer: question.type === "MCQ" || question.type === "TRUE_FALSE" ? question.correctAnswer : null,
+      isCorrect: answer?.isCorrect ?? null,
+      // An unanswered auto-graded question is already 0. An unanswered written one is 0 once the teacher has finalised the exam, and still pending before.
+      marksAwarded: answer ? answer.marksAwarded : question.type === "MCQ" || question.type === "TRUE_FALSE" || submission.status === "GRADED" ? 0 : null,
+      marks: question.marks,
     })),
   };
 }

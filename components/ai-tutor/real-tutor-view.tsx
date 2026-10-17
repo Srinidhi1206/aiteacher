@@ -60,6 +60,9 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
   const [showHistory, setShowHistory] = React.useState(false);
   const [startingChat, setStartingChat] = React.useState(false);
   const startedFromTopic = React.useRef(false);
+  // Set synchronously when a question starts being sent. `sending` is React state and only turns true after a conversation has been created, so without this a
+  // second Enter pressed during that first round trip sent the same question twice.
+  const submitLock = React.useRef(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -75,18 +78,22 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
   const openConversation = React.useCallback(async (id: string) => {
     setMessagesLoading(true);
     setError(null);
-    const result = await getMyConversation(id);
-    if (!result) {
-      // Deleted or never belonged to this student - drop it from the list.
-      setConversations((prev) => prev.filter((c) => c.id !== id));
-      setActiveId(null);
-      setMessages([]);
+    try {
+      const result = await getMyConversation(id);
+      if (!result) {
+        // Deleted or never belonged to this student - drop it from the list.
+        setConversations((prev) => prev.filter((c) => c.id !== id));
+        setActiveId(null);
+        setMessages([]);
+        return;
+      }
+      setActiveId(id);
+      setMessages(result.messages);
+    } catch {
+      setError("Couldn't open that conversation. Please try again.");
+    } finally {
       setMessagesLoading(false);
-      return;
     }
-    setActiveId(id);
-    setMessages(result.messages);
-    setMessagesLoading(false);
   }, []);
 
   React.useEffect(() => {
@@ -107,7 +114,13 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
         } else if (initialPrefill && !startedFromTopic.current) {
           startedFromTopic.current = true;
           setInput(initialPrefill);
-          if (list.length > 0) await openConversation(list[0].id);
+          // The prefilled question is about one task (from the Study Plan, say): ask it in a fresh chat, not at the end of an older, unrelated one. An empty
+          // chat is reused by the server, so opening several such links never piles up conversations.
+          const fresh = await createConversation();
+          if (fresh.ok && fresh.data) {
+            await refreshConversations();
+            await openConversation(fresh.data.id);
+          } else if (list.length > 0) await openConversation(list[0].id);
         } else if (list.length > 0) {
           await openConversation(list[0].id);
         }
@@ -147,7 +160,11 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
   }
 
   async function handleDelete(id: string) {
-    const result = await deleteConversation(id);
+    const result = await deleteConversation(id).catch(() => null);
+    if (!result) {
+      setError("Couldn't delete that conversation. Please try again.");
+      return;
+    }
     if (!result.ok) {
       setError(result.error ?? "Couldn't delete that conversation.");
       return;
@@ -162,31 +179,35 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
 
   async function submit(text: string) {
     const trimmed = text.trim();
-    if (!trimmed || sending) return;
-
-    let conversationId = activeId;
-    if (!conversationId) {
-      const created = await createConversation();
-      if (!created.ok || !created.data) {
-        setError(created.error ?? "Couldn't start a new conversation.");
-        return;
+    if (!trimmed || sending || startingChat || submitLock.current) return;
+    submitLock.current = true;
+    try {
+      let conversationId = activeId;
+      if (!conversationId) {
+        const created = await createConversation().catch(() => null);
+        if (!created || !created.ok || !created.data) {
+          setError(created?.error ?? "Couldn't start a new conversation. Please try again.");
+          return;
+        }
+        conversationId = created.data.id;
+        setActiveId(conversationId);
+        await refreshConversations().catch(() => undefined);
       }
-      conversationId = created.data.id;
-      setActiveId(conversationId);
-      await refreshConversations();
+
+      setError(null);
+      setInput("");
+      setSending(true);
+      // Optimistic bubble - synced against the real server state below
+      // regardless of outcome, so it never lies about what was actually saved.
+      setMessages((prev) => [...prev, { id: `pending-${Date.now()}`, role: "STUDENT", content: trimmed, createdAt: new Date() }]);
+
+      // A server action that throws (database or network hiccup) must never leave
+      // the chat stuck in its "sending" state - treat it like any other failure.
+      const result = await withWatchdog(sendMessage(conversationId, trimmed));
+      await syncAfterSend(conversationId, result);
+    } finally {
+      submitLock.current = false;
     }
-
-    setError(null);
-    setInput("");
-    setSending(true);
-    // Optimistic bubble - synced against the real server state below
-    // regardless of outcome, so it never lies about what was actually saved.
-    setMessages((prev) => [...prev, { id: `pending-${Date.now()}`, role: "STUDENT", content: trimmed, createdAt: new Date() }]);
-
-    // A server action that throws (database or network hiccup) must never leave
-    // the chat stuck in its "sending" state - treat it like any other failure.
-    const result = await withWatchdog(sendMessage(conversationId, trimmed));
-    await syncAfterSend(conversationId, result);
   }
 
   async function handleRetry() {
@@ -308,11 +329,13 @@ export function RealTutorView({ initialTopicId, initialPrefill }: { initialTopic
         <CurriculumPicker
           disabled={aiConfigured === false}
           onPickTopic={async (topicId) => {
-            const created = await createConversation(topicId);
-            if (created.ok && created.data) {
-              await refreshConversations();
-              await openConversation(created.data.id);
+            const created = await createConversation(topicId).catch(() => null);
+            if (!created || !created.ok || !created.data) {
+              setError(created?.error ?? "Couldn't start a conversation for that topic. Please try again.");
+              return;
             }
+            await refreshConversations().catch(() => undefined);
+            await openConversation(created.data.id);
           }}
         />
 

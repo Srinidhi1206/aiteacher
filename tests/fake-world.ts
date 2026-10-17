@@ -44,7 +44,8 @@ export interface StudentRow {
 export interface SubjectRow {
   id: string;
   name: string;
-  chapters: { id: string; name: string }[];
+  // _count / studyMaterials are what the real query also returns for each chapter (lesson count; a textbook filed here); optional so older tests need not state them.
+  chapters: { id: string; name: string; _count?: { topics: number }; studyMaterials?: { id: string }[] }[];
 }
 export interface WeakRow {
   mastery: number;

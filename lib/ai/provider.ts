@@ -9,7 +9,8 @@ import "server-only";
 import { getSocraticResponse } from "@/lib/socratic-engine";
 import type { ChatMessage as MockChatMessage } from "@/lib/types";
 import { AIError } from "./errors";
-import type { AIChatMessage, AIGenerateRequest, AIGenerateResult, AIProvider, AIStudentContext } from "./types";
+import type { AIChatMessage, AIGenerateRequest, AIGenerateResult, AIProvider } from "./types";
+import { formatContextBlock } from "./context-block";
 
 const DEFAULT_TEMPERATURE = 0.6;
 // Thinking models count their reasoning tokens against this limit, so leave real headroom for the answer.
@@ -32,34 +33,6 @@ export function geminiModelChain(): string[] {
   const raw = process.env.GEMINI_FALLBACK_MODELS?.trim();
   const fallbacks = raw === "none" ? [] : raw ? raw.split(",").map((m) => m.trim()).filter(Boolean) : DEFAULT_FALLBACK_MODELS;
   return [primary, ...fallbacks.filter((m) => m !== primary)];
-}
-
-/**
- * Renders the assembled student context (lib/ai/context.ts) into plain
- * instruction text appended to the system prompt. Deliberately terse and
- * numeric/label-only - see lib/ai/context.ts for what is and isn't
- * included.
- */
-function formatContextBlock(context?: AIStudentContext): string {
-  if (!context) return "";
-  const lines: string[] = [];
-  const c = context.curriculum;
-  if (c && (c.state || c.board || c.className || c.subject || c.chapter || c.topic)) {
-    const parts = [c.state, c.board, c.className, c.subject, c.chapter, c.topic].filter(Boolean);
-    lines.push(`Student's curriculum context: ${parts.join(" > ")}.`);
-  }
-  const p = context.performance;
-  if (p?.masteryPct !== undefined) {
-    lines.push(`Mastery of the current topic: ${p.masteryPct}%.`);
-  }
-  if (p?.weakTopics?.length) {
-    lines.push(`Other known weak topics for this student: ${p.weakTopics.join(", ")}.`);
-  }
-  if (p?.strengths?.length) {
-    lines.push(`Other known strengths for this student: ${p.strengths.join(", ")}.`);
-  }
-  if (lines.length === 0) return "";
-  return `\n\n---\nContext (for your reference only - do not just recite this back):\n${lines.join("\n")}`;
 }
 
 function toGeminiContents(messages: AIChatMessage[], userMessage: string) {

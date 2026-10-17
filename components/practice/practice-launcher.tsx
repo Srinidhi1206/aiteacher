@@ -21,6 +21,8 @@ interface HistoryRow {
 
 export function PracticeLauncher({ subjects, history }: { subjects: MySubjectSummary[]; history: HistoryRow[] }) {
   const practicable = subjects.filter((s) => s.topicCount > 0);
+  // Practice works on a topic, so a subject whose chapters have no topics listed yet cannot be practised - say so rather than leaving it out without a word.
+  const notYet = subjects.filter((s) => s.topicCount === 0).map((s) => s.name);
   const [subjectId, setSubjectId] = React.useState("");
   const [detail, setDetail] = React.useState<MySubjectDetail | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -88,6 +90,7 @@ export function PracticeLauncher({ subjects, history }: { subjects: MySubjectSum
                 </div>
               </div>
               {topicId ? <StartPracticeButton topicId={topicId} label="Start practice" /> : <p className="text-xs text-gray-400">Choose a subject, chapter and topic to begin.</p>}
+              {notYet.length > 0 && <p className="text-xs text-gray-400">Not available yet (no topics are listed for them): {notYet.join(", ")}.</p>}
             </div>
           )}
         </CardContent>

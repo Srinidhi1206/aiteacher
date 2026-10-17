@@ -4,7 +4,7 @@
 // A subject/topic that is not in the student's own class is a 404.
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Sparkles } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -64,7 +64,16 @@ export default async function TopicDetailPage({ params }: { params: { subject: s
             ) : (
               <p className="text-xs text-gray-400">No mastery recorded yet. It appears here after you take a graded exam or a practice session on this topic.</p>
             )}
-            <StartPracticeButton topicId={data.topic.id} />
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <StartPracticeButton topicId={data.topic.id} />
+              {/* The tutor opens with this topic's subject, chapter and the student's mastery as its context, and the question typed in, ready to send. */}
+              <Link
+                href={`/ai-tutor?topicId=${data.topic.id}&prefill=${encodeURIComponent(`Explain "${data.topic.name}" (${data.subjectName}, ${data.chapterName}) to me.`)}`}
+                className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-600 hover:underline dark:text-primary-300"
+              >
+                <Sparkles className="h-4 w-4" /> Ask the AI Tutor about this topic
+              </Link>
+            </div>
           </CardContent>
         </Card>
 

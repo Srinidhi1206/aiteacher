@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/modal";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { getExamForAttempt, startExamAttempt, saveExamAnswer, submitExam } from "@/lib/actions/exams";
+import { createAnswerSaver } from "@/lib/exams/answer-saver";
 
 interface ExamQuestion {
   id: string;
@@ -44,42 +45,74 @@ export default function ExamAttemptPage() {
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  // Questions whose newest answer could not be saved yet (the server grades only what it has saved - see lib/exams/answer-saver.ts).
+  const [unsaved, setUnsaved] = React.useState<string[]>([]);
+  const saver = React.useRef<ReturnType<typeof createAnswerSaver> | null>(null);
+  // The time-up submit is tried ONCE; if it fails the student is told and can press Submit again, instead of the page re-sending it in a tight loop.
+  const autoSubmitTried = React.useRef(false);
 
   React.useEffect(() => {
     (async () => {
-      const startResult = await startExamAttempt(params.examId);
-      if (!startResult.ok || !startResult.data) {
-        setError(startResult.error ?? "Unable to start this exam.");
+      try {
+        const startResult = await startExamAttempt(params.examId);
+        if (!startResult.ok || !startResult.data) {
+          setError(startResult.error ?? "Unable to start this exam.");
+          setExam(null);
+          return;
+        }
+        const id = startResult.data.submissionId;
+        setSubmissionId(id);
+        saver.current = createAnswerSaver((questionId, value) => saveExamAnswer(id, questionId, value), setUnsaved);
+        const data = await getExamForAttempt(params.examId);
+        setExam(data as ExamData | null);
+        if (data) {
+          setSecondsLeft(data.remainingSeconds);
+          setAnswers(data.savedAnswers ?? {});
+        }
+      } catch {
+        // A thrown server action (connection or database trouble) must not leave the page on "Loading..." for ever.
+        setError("The exam could not be loaded. Check your connection and reload the page - your saved answers and the clock are kept.");
         setExam(null);
-        return;
-      }
-      setSubmissionId(startResult.data.submissionId);
-      const data = await getExamForAttempt(params.examId);
-      setExam(data as ExamData | null);
-      if (data) {
-        setSecondsLeft(data.remainingSeconds);
-        setAnswers(data.savedAnswers ?? {});
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.examId]);
 
-  const handleSubmit = React.useCallback(async () => {
-    if (!submissionId || submitting) return;
-    setSubmitting(true);
-    const result = await submitExam(submissionId);
-    if (result.ok) {
-      router.push(`/exams/${params.examId}/results`);
-    } else {
-      setError(result.error ?? "Submission failed.");
-      setSubmitting(false);
-    }
-  }, [submissionId, submitting, params.examId, router]);
+  const handleSubmit = React.useCallback(
+    async (timeIsUp = false) => {
+      if (!submissionId || submitting) return;
+      setSubmitting(true);
+      setError(null);
+      try {
+        // Send again anything that did not reach the server: it grades from what it has saved, not from what is on the screen.
+        const stillUnsaved = (await saver.current?.flush()) ?? [];
+        if (stillUnsaved.length > 0 && !timeIsUp) {
+          setError(`${stillUnsaved.length} answer${stillUnsaved.length === 1 ? "" : "s"} could not be saved. Check your connection and press Submit again - nothing has been submitted.`);
+          setSubmitting(false);
+          return;
+        }
+        const result = await submitExam(submissionId);
+        if (result.ok) {
+          router.push(`/exams/${params.examId}/results`);
+        } else {
+          setError(result.error ?? "Submission failed.");
+          setSubmitting(false);
+        }
+      } catch {
+        setError("Your exam could not be submitted - check your connection and press Submit again.");
+        setSubmitting(false);
+      }
+    },
+    [submissionId, submitting, params.examId, router]
+  );
 
   React.useEffect(() => {
     if (secondsLeft === null || submitting) return;
     if (secondsLeft <= 0) {
-      handleSubmit();
+      if (!autoSubmitTried.current) {
+        autoSubmitTried.current = true;
+        handleSubmit(true);
+      }
       return;
     }
     const timer = setTimeout(() => setSecondsLeft((s) => (s !== null ? s - 1 : s)), 1000);
@@ -88,7 +121,7 @@ export default function ExamAttemptPage() {
 
   function handleAnswer(questionId: string, value: string) {
     setAnswers((prev) => ({ ...prev, [questionId]: value }));
-    if (submissionId) saveExamAnswer(submissionId, questionId, value);
+    void saver.current?.set(questionId, value);
   }
 
   function toggleFlag(questionId: string) {
@@ -153,6 +186,22 @@ export default function ExamAttemptPage() {
           </CardContent>
         </Card>
 
+        {unsaved.length > 0 && !error && (
+          <p role="alert" className="rounded-xl bg-warning-50 px-3 py-2 text-xs text-warning-800 dark:bg-warning-900/20 dark:text-warning-300">
+            {unsaved.length} answer{unsaved.length === 1 ? " has" : "s have"} not been saved yet - check your connection. {unsaved.length === 1 ? "It is" : "They are"} sent again when you submit.
+          </p>
+        )}
+        {error && (
+          <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-400">
+            <span>{error}</span>
+            {secondsLeft !== null && secondsLeft <= 0 && (
+              <Button size="sm" onClick={() => handleSubmit(true)} disabled={submitting}>
+                {submitting ? "Submitting..." : "Submit now"}
+              </Button>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-1.5">
           {exam.questions.map((q, i) => (
             <button
@@ -199,6 +248,7 @@ export default function ExamAttemptPage() {
                     <button
                       key={opt}
                       onClick={() => handleAnswer(question.id, opt)}
+                      disabled={submitting}
                       className={cn(
                         "flex w-full items-center gap-2 rounded-xl border px-4 py-2.5 text-left text-sm transition-colors",
                         answers[question.id] === opt
@@ -218,6 +268,7 @@ export default function ExamAttemptPage() {
                     <button
                       key={opt}
                       onClick={() => handleAnswer(question.id, opt)}
+                      disabled={submitting}
                       className={cn(
                         "flex-1 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors",
                         answers[question.id] === opt
@@ -235,6 +286,7 @@ export default function ExamAttemptPage() {
                 <textarea
                   value={answers[question.id] ?? ""}
                   onChange={(e) => handleAnswer(question.id, e.target.value)}
+                  disabled={submitting}
                   rows={question.type === "LONG_ANSWER" ? 8 : 3}
                   placeholder="Type your answer..."
                   className="w-full rounded-xl border border-gray-200 bg-transparent px-3.5 py-2.5 text-sm text-gray-900 outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-100 dark:border-gray-700 dark:text-gray-100"
@@ -270,7 +322,7 @@ export default function ExamAttemptPage() {
           <Button variant="ghost" onClick={() => setConfirmOpen(false)}>
             Keep reviewing
           </Button>
-          <Button onClick={handleSubmit} disabled={submitting}>
+          <Button onClick={() => handleSubmit()} disabled={submitting}>
             {submitting ? "Submitting..." : "Submit"}
           </Button>
         </div>

@@ -57,14 +57,20 @@ export function RealAssignmentsView({ assignments }: { assignments: Row[] }) {
 
   async function handleSubmit(w: Row) {
     setBusyId(w.id);
-    const res = await submitWorksheet(w.id);
-    setBusyId(null);
-    if (!res.ok) {
-      showToast("Could not submit", res.error ?? "Please try again.");
-      return;
+    try {
+      const res = await submitWorksheet(w.id);
+      if (!res.ok) {
+        showToast("Could not submit", res.error ?? "Please try again.");
+        return;
+      }
+      showToast("Submitted", `"${w.title}" was handed in to your teacher.`);
+      router.refresh();
+    } catch {
+      // A thrown server action (connection or database trouble) is reported like any other failure; nothing was handed in.
+      showToast("Could not submit", "Something went wrong, so it was not handed in. Please try again.");
+    } finally {
+      setBusyId(null);
     }
-    showToast("Submitted", `"${w.title}" was handed in to your teacher.`);
-    router.refresh();
   }
 
   if (assignments.length === 0) {

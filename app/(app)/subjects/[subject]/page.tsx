@@ -5,7 +5,7 @@
 // missing one.
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, ChevronRight } from "lucide-react";
+import { ArrowLeft, ChevronRight, Sparkles } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +47,12 @@ export default async function SubjectDetailPage({ params }: { params: { subject:
               {subject.classLabel ? `${subject.classLabel} - ` : ""}
               {subject.chapters.length} chapter{subject.chapters.length === 1 ? "" : "s"}
             </p>
+            <Link
+              href={`/ai-tutor?prefill=${encodeURIComponent(`Help me with ${subject.name}${subject.classLabel ? ` (${subject.classLabel})` : ""}.`)}`}
+              className="mt-3 inline-flex items-center gap-1.5 text-sm font-medium text-primary-600 hover:underline dark:text-primary-300"
+            >
+              <Sparkles className="h-4 w-4" /> Ask the AI Tutor about {subject.name}
+            </Link>
           </CardContent>
         </Card>
 

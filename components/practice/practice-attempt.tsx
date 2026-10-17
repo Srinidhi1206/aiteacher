@@ -21,13 +21,18 @@ export function PracticeAttempt({ paperId, title, questions }: { paperId: string
     if (answered < questions.length && !window.confirm(`You have answered ${answered} of ${questions.length}. Submit anyway?`)) return;
     setBusy(true);
     setError(null);
-    const res = await submitPractice(paperId, answers);
-    if (!res.ok) {
+    try {
+      const res = await submitPractice(paperId, answers);
+      if (!res.ok) {
+        setBusy(false);
+        setError(res.error ?? "Could not submit your answers.");
+        return;
+      }
+      router.push(`/practice-papers/${paperId}/results`);
+    } catch {
       setBusy(false);
-      setError(res.error ?? "Could not submit your answers.");
-      return;
+      setError("Your answers could not be submitted - check your connection and press Submit again. They are still on this page.");
     }
-    router.push(`/practice-papers/${paperId}/results`);
   }
 
   return (
