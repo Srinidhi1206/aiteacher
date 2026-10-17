@@ -4,6 +4,7 @@ import Link from "next/link";
 import { GraduationCap, Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { GET_STARTED_HREF, SIGN_IN_HREF } from "@/lib/marketing/auth-links";
 
 const links = [
   { label: "Features", href: "#features" },
@@ -40,10 +41,10 @@ export function Navbar() {
 
         <div className="hidden items-center gap-3 md:flex">
           <ThemeToggle />
-          <Link href="/onboarding" className="text-sm font-medium text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white">
+          <Link href={SIGN_IN_HREF} className="text-sm font-medium text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white">
             Sign in
           </Link>
-          <Link href="/onboarding">
+          <Link href={GET_STARTED_HREF}>
             <Button>Get Started</Button>
           </Link>
         </div>
@@ -71,10 +72,10 @@ export function Navbar() {
               </a>
             ))}
             <div className="mt-2 flex items-center gap-3">
-              <Link href="/onboarding" className="text-sm font-medium text-gray-600 dark:text-gray-300">
+              <Link href={SIGN_IN_HREF} className="text-sm font-medium text-gray-600 dark:text-gray-300">
                 Sign in
               </Link>
-              <Link href="/onboarding" className="flex-1">
+              <Link href={GET_STARTED_HREF} className="flex-1">
                 <Button className="w-full">Get Started</Button>
               </Link>
               <ThemeToggle />

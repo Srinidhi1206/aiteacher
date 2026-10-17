@@ -3,6 +3,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowRight, PlayCircle, Sparkles, TrendingUp, Flame } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { GET_STARTED_HREF } from "@/lib/marketing/auth-links";
 
 export function Hero() {
   return (
@@ -32,7 +33,7 @@ export function Hero() {
             <span className="font-semibold text-gray-800 dark:text-gray-100"> Analyze</span>, using Bloom&apos;s taxonomy so mastery actually sticks.
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-            <Link href="/onboarding">
+            <Link href={GET_STARTED_HREF}>
               <Button size="lg" className="w-full sm:w-auto">
                 Start Learning Free
                 <ArrowRight className="h-4 w-4" />

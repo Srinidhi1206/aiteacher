@@ -4,6 +4,7 @@ import { Reveal } from "@/components/marketing/reveal";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { GET_STARTED_HREF } from "@/lib/marketing/auth-links";
 
 const tiers = [
   {
@@ -89,7 +90,7 @@ export function Pricing() {
                     </li>
                   ))}
                 </ul>
-                <Link href="/onboarding" className="mt-7">
+                <Link href={GET_STARTED_HREF} className="mt-7">
                   <Button variant={tier.highlighted ? "primary" : "outline"} className="w-full">
                     {tier.cta}
                   </Button>
