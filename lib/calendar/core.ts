@@ -13,6 +13,7 @@
 import { z } from "zod";
 import { AcademicEventType } from "@prisma/client";
 import type { prisma } from "@/lib/prisma";
+import type { NotificationType } from "@prisma/client";
 
 export type CalendarDb = Pick<typeof prisma, "academicEvent" | "school" | "board" | "schoolClass" | "auditLog">;
 export type CoreResult<T = void> = { ok: boolean; error?: string; data?: T };
@@ -191,4 +192,64 @@ export async function listAcademicEventsCore(db: CalendarDb, actor: CalendarActo
     orderBy: [{ startDate: "asc" }, { title: "asc" }],
   });
   return rows.map((r) => ({ ...r, editable: actor.isSuperAdmin || (actor.schoolId !== null && r.schoolId === actor.schoolId), audience: describeScope(r) }));
+}
+
+export interface PublishedEventInfo {
+  id: string;
+  title: string;
+  type: AcademicEventType;
+  /** YYYY-MM-DD */
+  startDate: string;
+  schoolId: string | null;
+  boardId: string | null;
+  schoolClassId: string | null;
+}
+
+const publishIdsSchema = z.array(z.string().trim().min(1)).min(1, "Choose at least one event.").max(200, "At most 200 events can be published at once.");
+
+/**
+ * Publishes several DRAFT events in one step (the "Publish all drafts" button), with exactly the rules of publishing one at a time: only events the actor may manage are
+ * touched (anything else is silently skipped, so ids cannot be probed), only drafts are changed, nothing is created or deleted, and ONE audit entry records it. The
+ * caller sends one notification per audience from `calendarPublishDigests` - not one per event, which would flood students when a whole calendar goes live.
+ */
+export async function publishManyAcademicEventsCore(db: CalendarDb, actor: CalendarActor, ids: unknown): Promise<CoreResult<{ published: number; skipped: number; events: PublishedEventInfo[] }>> {
+  const parsed = publishIdsSchema.safeParse(ids);
+  if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+  const unique = [...new Set(parsed.data)];
+  const rows = await db.academicEvent.findMany({ where: { id: { in: unique } } });
+  const drafts = rows.filter((r) => (actor.isSuperAdmin || (actor.schoolId !== null && r.schoolId === actor.schoolId)) && !r.isPublished);
+  if (drafts.length === 0) return { ok: true, data: { published: 0, skipped: unique.length, events: [] } };
+  await db.academicEvent.updateMany({ where: { id: { in: drafts.map((d) => d.id) }, isPublished: false }, data: { isPublished: true } });
+  const titles = drafts.slice(0, 8).map((d) => `"${d.title}"`).join(", ");
+  await db.auditLog.create({
+    data: { userId: actor.userId, action: "USER_UPDATE", resource: "AcademicEventPublish", message: `Calendar events published together: ${drafts.length} (${titles}${drafts.length > 8 ? ", ..." : ""})` },
+  });
+  return {
+    ok: true,
+    data: {
+      published: drafts.length,
+      skipped: unique.length - drafts.length,
+      events: drafts.map((d) => ({ id: d.id, title: d.title, type: d.type, startDate: d.startDate.toISOString().slice(0, 10), schoolId: d.schoolId, boardId: d.boardId, schoolClassId: d.schoolClassId })),
+    },
+  };
+}
+
+/** One notification per audience for a batch of published events: who it is for, and a short summary (the first few titles and the earliest date). */
+export function calendarPublishDigests(events: PublishedEventInfo[]): { scope: { schoolId: string | null; boardId: string | null; schoolClassId: string | null }; type: NotificationType; title: string; message: string }[] {
+  const groups = new Map<string, PublishedEventInfo[]>();
+  for (const e of events) {
+    const key = `${e.schoolId ?? "-"}|${e.boardId ?? "-"}|${e.schoolClassId ?? "-"}`;
+    groups.set(key, [...(groups.get(key) ?? []), e]);
+  }
+  return [...groups.values()].map((list) => {
+    const sorted = [...list].sort((a, b) => a.startDate.localeCompare(b.startDate) || a.title.localeCompare(b.title));
+    const shown = sorted.slice(0, 3).map((e) => e.title).join("; ");
+    const more = sorted.length > 3 ? `; and ${sorted.length - 3} more` : "";
+    return {
+      scope: { schoolId: list[0].schoolId, boardId: list[0].boardId, schoolClassId: list[0].schoolClassId },
+      type: sorted.some((e) => e.type === "EXAM") ? ("EXAM" as const) : ("SYSTEM" as const),
+      title: "New on the school calendar",
+      message: `${sorted.length} event${sorted.length === 1 ? " was" : "s were"} added, from ${sorted[0].startDate}: ${shown}${more}.`,
+    };
+  });
 }

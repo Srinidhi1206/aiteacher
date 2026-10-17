@@ -2,6 +2,8 @@ import { Topbar } from "@/components/layout/topbar";
 import { StudyPlanTabs } from "@/components/study-plan/study-plan-tabs";
 import { DatabaseUnavailable } from "@/components/database-unavailable";
 import { getMyLearningPath, getMyPlanCoverageNotes, getMyWeakAreas } from "@/lib/actions/analytics";
+import { getMySubjects } from "@/lib/actions/student-curriculum";
+import { buildPlanPageNotes, subjectLinkMap } from "@/lib/study-plan/page-notes";
 
 // "My Plan" now reads the same real, database-backed Learning Path engine
 // (lib/analytics/learning-path.ts via lib/actions/analytics.ts) already
@@ -15,6 +17,8 @@ export default async function StudyPlanPage() {
   let weakAreas: Awaited<ReturnType<typeof getMyWeakAreas>> = [];
   let planNotes: string[] = [];
   let dbUnavailable = false;
+  // Each task links to its subject's page (chapters, materials, practice). If the subjects cannot be read the page simply has no links.
+  const subjectLinks = await getMySubjects().then((r) => subjectLinkMap(r.subjects), () => ({}));
   try {
     [learningPath, weakAreas, planNotes] = await Promise.all([getMyLearningPath(), getMyWeakAreas(), getMyPlanCoverageNotes()]);
   } catch {
@@ -25,7 +29,12 @@ export default async function StudyPlanPage() {
     <>
       <Topbar title="Study Plan" />
       <main className="flex-1 p-4 sm:p-6">
-        {dbUnavailable ? <DatabaseUnavailable what="Your study plan" /> : <StudyPlanTabs learningPath={learningPath} weakAreas={weakAreas} planNotes={planNotes} />}
+        {dbUnavailable ? <DatabaseUnavailable what="Your study plan" /> : <StudyPlanTabs
+            learningPath={learningPath}
+            weakAreas={weakAreas}
+            planNotes={buildPlanPageNotes({ advice: planNotes, hasPlanItems: (learningPath?.items.length ?? 0) > 0, hasWeakAreas: weakAreas.length > 0 })}
+            subjectLinks={subjectLinks}
+          />}
       </main>
     </>
   );

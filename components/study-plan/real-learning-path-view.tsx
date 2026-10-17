@@ -26,7 +26,7 @@ const KIND_LABEL: Record<string, string> = {
   BUFFER: "Buffer",
 };
 
-export function RealLearningPathView({ learningPath, weakAreas, planNotes = [] }: { learningPath: LearningPath | null; weakAreas: WeakAreas; planNotes?: string[] }) {
+export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], subjectLinks = {} }: { learningPath: LearningPath | null; weakAreas: WeakAreas; planNotes?: string[]; subjectLinks?: Record<string, string> }) {
   const router = useRouter();
   const [pendingId, setPendingId] = React.useState<string | null>(null);
 
@@ -129,12 +129,19 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [] }
                           </div>
                         </div>
                       </div>
-                      <Link
-                        href={`/ai-tutor?prefill=${encodeURIComponent(`Help me with: ${item.title} (${item.subject}).`)}`}
-                        className="flex shrink-0 items-center gap-1 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400"
-                      >
-                        <Sparkles className="h-3 w-3" /> Ask Tutor
-                      </Link>
+                      <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-3">
+                        {subjectLinks[item.subject] && (
+                          <Link href={`/subjects/${subjectLinks[item.subject]}`} className="shrink-0 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400">
+                            Chapters &amp; materials
+                          </Link>
+                        )}
+                        <Link
+                          href={`/ai-tutor?prefill=${encodeURIComponent(`Help me with: ${item.title} (${item.subject}).`)}`}
+                          className="flex shrink-0 items-center gap-1 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400"
+                        >
+                          <Sparkles className="h-3 w-3" /> Ask Tutor
+                        </Link>
+                      </div>
                     </div>
                   ))}
                 </div>

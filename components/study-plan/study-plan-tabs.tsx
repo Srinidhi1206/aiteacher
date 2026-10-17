@@ -10,10 +10,12 @@ export function StudyPlanTabs({
   learningPath,
   weakAreas,
   planNotes = [],
+  subjectLinks = {},
 }: {
   learningPath: Awaited<ReturnType<typeof getMyLearningPath>> | null;
   weakAreas: Awaited<ReturnType<typeof getMyWeakAreas>>;
   planNotes?: string[];
+  subjectLinks?: Record<string, string>;
 }) {
-  return <RealLearningPathView learningPath={learningPath} weakAreas={weakAreas} planNotes={planNotes} />;
+  return <RealLearningPathView learningPath={learningPath} weakAreas={weakAreas} planNotes={planNotes} subjectLinks={subjectLinks} />;
 }

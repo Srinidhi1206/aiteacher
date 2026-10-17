@@ -7,7 +7,7 @@ import { requireRole, ForbiddenError, UnauthorizedError } from "@/lib/auth/curre
 import { getSubjectProgressForStudent, getTopicProgressForStudent } from "@/lib/analytics/progress";
 import { getWeakAreasForStudent } from "@/lib/analytics/weakness";
 import { getStrengthsForStudent } from "@/lib/analytics/strengths";
-import { generateLearningPath, getLearningPathForStudent, previewCoverageNotes, setLearningPathItemCompleted } from "@/lib/analytics/learning-path";
+import { generateLearningPath, getLearningPathForStudent, previewPlanAdvice, setLearningPathItemCompleted } from "@/lib/analytics/learning-path";
 import type { ActionResult } from "./materials";
 
 async function requireOwnStudentId(): Promise<string> {
@@ -44,7 +44,7 @@ export async function getMyLearningPath() {
  */
 export async function getMyPlanCoverageNotes(): Promise<string[]> {
   try {
-    return await previewCoverageNotes(await requireOwnStudentId());
+    return (await previewPlanAdvice(await requireOwnStudentId())).notes;
   } catch {
     return [];
   }

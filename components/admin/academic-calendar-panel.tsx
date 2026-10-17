@@ -16,7 +16,7 @@ import { countDrafts, filterByView, type CalendarView } from "@/lib/calendar/vie
 import { listStates, listBoards, listSchoolClasses, listSchools } from "@/lib/actions/curriculum";
 import { getMyAdminStatus } from "@/lib/actions/user-management";
 import { CalendarImportDialog } from "@/components/admin/calendar-import-dialog";
-import { listAcademicEventsForAdmin, createAcademicEvent, updateAcademicEvent, setAcademicEventPublished, deleteAcademicEvent } from "@/lib/actions/academic-calendar";
+import { listAcademicEventsForAdmin, createAcademicEvent, updateAcademicEvent, setAcademicEventPublished, deleteAcademicEvent, publishAcademicEvents } from "@/lib/actions/academic-calendar";
 
 type EventRow = Awaited<ReturnType<typeof listAcademicEventsForAdmin>>[number];
 type State = Awaited<ReturnType<typeof listStates>>[number];
@@ -67,6 +67,9 @@ export function AcademicCalendarPanel() {
   const [importOpen, setImportOpen] = React.useState(false);
   // "Drafts" is where a saved import is found again: saved drafts are real events (not published), so they are here after a refresh too.
   const [view, setView] = React.useState<CalendarView>("all");
+  // "Publish all drafts": a two-step button (ask, then confirm) so a whole calendar never goes live by one stray click.
+  const [confirmBulk, setConfirmBulk] = React.useState(false);
+  const [bulkBusy, setBulkBusy] = React.useState(false);
 
   const isSuperAdmin = me?.isSuperAdmin === true;
   const schoolBoardId = me?.schoolBoardId ?? null;
@@ -134,6 +137,19 @@ export function AcademicCalendarPanel() {
     refresh();
   }
 
+  const publishableIds = (events ?? []).filter((e) => e.editable && !e.isPublished).map((e) => e.id);
+
+  async function publishAllDrafts() {
+    if (bulkBusy || publishableIds.length === 0) return;
+    setBulkBusy(true);
+    const res = await publishAcademicEvents(publishableIds);
+    setBulkBusy(false);
+    setConfirmBulk(false);
+    if (!res.ok || !res.data) return showToast("Could not publish the drafts", res.error ?? "");
+    showToast(`${res.data.published} event${res.data.published === 1 ? "" : "s"} published`, "Students in each audience get one notification.");
+    refresh();
+  }
+
   async function remove(ev: EventRow) {
     setBusyId(ev.id);
     const res = await deleteAcademicEvent(ev.id);
@@ -184,6 +200,22 @@ export function AcademicCalendarPanel() {
               </Button>
             ))}
             {countDrafts(events) > 0 && <span className="text-xs text-gray-500 dark:text-gray-400">Drafts are saved but not visible to students until you publish them.</span>}
+            {publishableIds.length > 0 &&
+              (confirmBulk ? (
+                <span className="flex flex-wrap items-center gap-2 text-xs text-gray-700 dark:text-gray-200" role="alert">
+                  Publish {publishableIds.length} draft{publishableIds.length === 1 ? "" : "s"} to students now?
+                  <Button type="button" size="sm" onClick={publishAllDrafts} disabled={bulkBusy} className="gap-1.5">
+                    {bulkBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />} Yes, publish
+                  </Button>
+                  <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmBulk(false)} disabled={bulkBusy}>
+                    Cancel
+                  </Button>
+                </span>
+              ) : (
+                <Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => setConfirmBulk(true)}>
+                  <Eye className="h-3.5 w-3.5" /> Publish all {publishableIds.length} draft{publishableIds.length === 1 ? "" : "s"}
+                </Button>
+              ))}
           </div>
         )}
         {me && !isSuperAdmin && !me.schoolId && <p className="py-2 text-sm text-gray-500 dark:text-gray-400">Your account is not attached to a school, so there is no school calendar to manage.</p>}

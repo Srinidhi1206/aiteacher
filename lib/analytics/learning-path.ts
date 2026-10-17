@@ -6,10 +6,15 @@
 // school, board and class; chapters come from the class's curriculum; weak topics come from real graded results.
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { generateLearningPathCore, previewCoverageNotesCore } from "./learning-path-core";
+import { generateLearningPathCore, previewCoverageNotesCore, previewPlanAdviceCore } from "./learning-path-core";
 
 export async function generateLearningPath(studentId: string) {
   return generateLearningPathCore(prisma, studentId);
+}
+
+/** Everything to tell the student about their plan: placement gaps, how far the exams' scope is known, and whether the plan is out of date (read only). */
+export async function previewPlanAdvice(studentId: string) {
+  return previewPlanAdviceCore(prisma, studentId);
 }
 
 /** What the plan can and cannot vouch for about the student's exams (read only - nothing is written). */

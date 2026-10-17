@@ -11,7 +11,7 @@
 import type { prisma } from "@/lib/prisma";
 import { dayStart, daysBetween, localDateString, todayInIndia } from "@/lib/calendar/day";
 import { listUpcomingExams } from "@/lib/calendar/next-exam";
-import { buildStudyPlan, type PlanResult } from "./exam-plan";
+import { buildStudyPlan, placementNotes, planStaleReason, staleMessage, type PlanResult } from "./exam-plan";
 
 export type PathDb = Pick<typeof prisma, "student" | "weaknessProfile" | "academicEvent" | "examSchedule" | "schoolClassSubject" | "studyPlan" | "studyPlanItem" | "$transaction">;
 
@@ -65,6 +65,7 @@ async function loadPlanInputs(db: PathDb, studentId: string, now: Date) {
   }
 
   return {
+    student,
     today,
     plan,
     todayStart,
@@ -84,8 +85,12 @@ async function loadPlanInputs(db: PathDb, studentId: string, now: Date) {
 export async function generateLearningPathCore(db: PathDb, studentId: string, now: Date = new Date()): Promise<PathSummary | null> {
   const loaded = await loadPlanInputs(db, studentId, now);
   if (!loaded) return null;
-  const { plan, todayStart, kept, input } = loaded;
+  const { student, plan, todayStart, kept, input } = loaded;
   const result = buildStudyPlan(input);
+  // Whatever stops the school's exam dates reaching this student is part of what the plan can and cannot vouch for.
+  const placement = placementNotes(student);
+  result.notes = [...new Set([...placement, ...result.notes])];
+  result.coverageNotes = [...new Set([...placement, ...result.coverageNotes])];
 
   if (!plan && result.items.length === 0) {
     return { planId: null, mode: result.mode, created: 0, kept: 0, notes: result.notes, exams: result.exams, unscheduled: result.unscheduled, coverageNotes: result.coverageNotes };
@@ -118,4 +123,18 @@ export async function previewCoverageNotesCore(db: PathDb, studentId: string, no
   const loaded = await loadPlanInputs(db, studentId, now);
   if (!loaded) return [];
   return buildStudyPlan(loaded.input).coverageNotes;
+}
+
+/**
+ * Everything the Study Plan page should tell the student about their plan, worked out READ-ONLY from the same inputs a regeneration would use: what stops their school's
+ * exam dates reaching them, how far the exams' subjects and chapters are known, and whether the plan they have no longer matches the exams that are published now.
+ * Nothing is written. A failed read throws.
+ */
+export async function previewPlanAdviceCore(db: PathDb, studentId: string, now: Date = new Date()): Promise<{ notes: string[]; stale: boolean }> {
+  const loaded = await loadPlanInputs(db, studentId, now);
+  if (!loaded) return { notes: placementNotes({ schoolId: null, boardId: null, schoolClassId: null }), stale: false };
+  const result = buildStudyPlan(loaded.input);
+  const futureTitles = (loaded.plan?.items ?? []).filter((i) => !i.completed && i.date >= loaded.todayStart).map((i) => i.title);
+  const reason = planStaleReason(futureTitles, Boolean(loaded.plan), result);
+  return { notes: [...new Set([...placementNotes(loaded.student), ...result.coverageNotes, ...(reason ? [staleMessage(reason)] : [])])], stale: reason !== null };
 }

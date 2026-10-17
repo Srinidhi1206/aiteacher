@@ -214,6 +214,8 @@ function planForExam(input: PlanInput, exam: ExamItem, winStart: string, notes: 
   const weakHere = input.weak.filter((w) => subjectIds.has(w.subjectId)).sort((a, b) => a.mastery - b.mastery || a.topicName.localeCompare(b.topicName));
   const weakChapters = new Set(weakHere.map((w) => `${w.subjectId}|${norm(w.chapterName)}`));
   const units: Unit[] = weakHere.map((w) => ({ subject: w.subjectName, title: weakTitle(w.topicName, w.chapterName, exam.label), priority: "HIGH" as const }));
+  const chapterless = subjects.filter((s) => s.chapters.length === 0 && !s.id.startsWith("named:")).map((s) => s.name);
+  if (chapterless.length > 0) cover(`${exam.label}: no chapter list is set up yet for ${nameList(chapterless)}, so ${chapterless.length === 1 ? "it appears" : "each appears"} as one general task.`);
   const perSubject = subjects.map((s) => {
     if (s.chapters.length === 0) return [{ subject: s.name, title: subjectStudyTitle(s.name, exam.label), priority: "MEDIUM" as PlanPriority }];
     const scope = scopeById.get(s.id) ?? null;
@@ -299,6 +301,42 @@ function generalPlan(input: PlanInput, blockedUntil: string | null): PlannedItem
   return items;
 }
 
+/** What the student's own record says about whether their school's exam dates can reach them at all. Nothing is guessed: each note names what is missing. */
+export function placementNotes(student: { schoolId: string | null; boardId: string | null; schoolClassId: string | null }): string[] {
+  if (!student.schoolClassId) return ["Your class has not been set up yet, so no study plan can be built. Ask your school administrator to place you in a class."];
+  if (!student.schoolId) {
+    return ["You haven't been placed in a school yet, so your school's exam dates, assignments and materials can't reach you. This plan follows your class chapters; it becomes exam-aware once you are placed and your school publishes exam dates."];
+  }
+  if (!student.boardId) return ["Your account has no board set, so your school's calendar can't be matched to you. Ask your school administrator to fix your profile."];
+  return [];
+}
+
+const EXAM_SUFFIX = / · for (.+)$/;
+const examLabelsIn = (titles: string[]) => new Set(titles.map((t) => EXAM_SUFFIX.exec(t)?.[1]).filter((x): x is string => Boolean(x)));
+
+/**
+ * Whether the plan the student already has no longer matches what a fresh plan would be built around - and why, in words. Only the things that matter are compared
+ * (which exams the tasks are for, whether tasks are left, whether the plan still has the old generic placeholders): a plan is never called out of date just because a
+ * day has passed. `existingFutureTitles` are the unfinished tasks dated today or later; `hasPlan` is whether the student has any plan at all (no plan: the page already
+ * offers to create one). Returns null when the plan is fine.
+ */
+export function planStaleReason(existingFutureTitles: string[], hasPlan: boolean, result: PlanResult): string | null {
+  if (!hasPlan) return null;
+  const have = examLabelsIn(existingFutureTitles);
+  const wanted = examLabelsIn(result.items.map((i) => i.title));
+  const missing = [...wanted].filter((l) => !have.has(l));
+  if (missing.length > 0) return `it does not include ${nameList(missing)} yet.`;
+  const gone = [...have].filter((l) => !wanted.has(l));
+  if (gone.length > 0) return `it still plans for ${nameList(gone)}, which is no longer an upcoming published exam.`;
+  if (existingFutureTitles.some((t) => /: continue current chapter$/.test(t)) && result.items.some((i) => /^Study: /.test(i.title))) {
+    return "it was made before chapter-level planning, so it still has general placeholder tasks.";
+  }
+  if (existingFutureTitles.length === 0 && result.items.length > 0) return "it has no tasks left for the coming days.";
+  return null;
+}
+
+export const staleMessage = (reason: string) => `Your study plan is out of date: ${reason} Press "Generate my learning path" to update it - completed and past tasks are kept.`;
+
 export function buildStudyPlan(input: PlanInput): PlanResult {
   const notes: string[] = [];
   const coverage: string[] = [];
@@ -318,6 +356,12 @@ export function buildStudyPlan(input: PlanInput): PlanResult {
   if (upcoming.length === 0) {
     mode = "general";
     items = generalPlan(input, blockedUntil);
+    const chapterless = input.subjects.filter((s) => s.chapters.length === 0).map((s) => s.name);
+    if (chapterless.length > 0) {
+      const text = `No chapter list is set up yet for ${nameList(chapterless)}, so ${chapterless.length === 1 ? "it appears" : "each appears"} as one general task.`;
+      notes.push(text);
+      coverage.push(text);
+    }
     notes.push("No upcoming exam dates are published for your class yet, so this is a general plan from your chapters. It becomes exam-aware once your school publishes exam dates.");
   } else {
     mode = "exam-aware";

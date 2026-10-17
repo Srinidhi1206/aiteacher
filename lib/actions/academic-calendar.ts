@@ -10,6 +10,8 @@ import {
   createAcademicEventCore,
   updateAcademicEventCore,
   setAcademicEventPublishedCore,
+  publishManyAcademicEventsCore,
+  calendarPublishDigests,
   deleteAcademicEventCore,
   listAcademicEventsCore,
 } from "@/lib/calendar/core";
@@ -75,6 +77,25 @@ export async function setAcademicEventPublished(eventId: string, isPublished: bo
 export async function deleteAcademicEvent(eventId: string): Promise<ActionResult> {
   try {
     return await deleteAcademicEventCore(prisma, await calendarActor(), eventId);
+  } catch (e) {
+    if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
+    throw e;
+  }
+}
+
+/**
+ * Publishes several drafts at once (the "Publish all drafts" button). Same permissions as publishing one event, and the same audience rule for who is told - but each
+ * audience gets ONE summary notification instead of one per event.
+ */
+export async function publishAcademicEvents(ids: string[]): Promise<ActionResult<{ published: number; skipped: number }>> {
+  try {
+    const actor = await calendarActor();
+    const res = await publishManyAcademicEventsCore(prisma, actor, ids);
+    if (!res.ok || !res.data) return { ok: false, error: res.error };
+    for (const d of calendarPublishDigests(res.data.events)) {
+      await notifyQuietly(audienceForCalendarEvent(d.scope), { type: d.type, title: d.title, message: d.message });
+    }
+    return { ok: true, data: { published: res.data.published, skipped: res.data.skipped } };
   } catch (e) {
     if (e instanceof UnauthorizedError || e instanceof ForbiddenError) return { ok: false, error: e.message };
     throw e;

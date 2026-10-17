@@ -11,6 +11,7 @@
 import { classifyEventType } from "@/lib/calendar-import/classify";
 import { academicYearOf, findDates, type DateContext } from "@/lib/calendar-import/dates";
 import { EVENT_TYPES, type PreviewEvent, type PreviewSummary, type RawCandidate } from "@/lib/calendar-import/types";
+import { examLabel, isExamEnd } from "@/lib/calendar/next-exam";
 import type { AcademicEventType } from "@prisma/client";
 
 /** A key that identifies "the same event": same type-insensitive title words and same start day. */
@@ -121,7 +122,63 @@ export function normalizeCandidates(raw: RawCandidate[], ctx: { academicYear: st
     }
     seen.set(key, event);
   }
-  return [...seen.values()].sort((a, b) => (a.startDate || "9999").localeCompare(b.startDate || "9999") || a.title.localeCompare(b.title));
+  const events = [...seen.values()].sort((a, b) => (a.startDate || "9999").localeCompare(b.startDate || "9999") || a.title.localeCompare(b.title));
+  flagIncompleteExamPairs(events);
+  flagProbableDuplicates(events);
+  return events;
+}
+
+// ---- cross-row checks: what a row cannot show on its own --------------------------------------------------------------------------------------------
+
+/** An exam longer than this is not paired with an "Ends" row (same bound the student side uses). */
+const MAX_EXAM_SPAN_DAYS = 31;
+const BEGIN_WORD = /\b(begins?|starts?|commences?)\b/i;
+const daysApart = (from: string, to: string) => Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+const words = (t: string) => examLabel(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean);
+const stemKey = (t: string) => words(t).join(" ");
+
+function addWarning(e: PreviewEvent, text: string) {
+  if (!e.warnings.includes(text)) e.warnings.push(text);
+  e.confidence = "review";
+}
+
+/**
+ * An exam written as "X Begins" should have an "X Ends" row (and the other way round). When the partner is missing the exam would silently become a single
+ * day, so the row is flagged for the administrator - no end date is ever made up. An exam that already has its own end date is left alone.
+ */
+export function flagIncompleteExamPairs(events: PreviewEvent[]): void {
+  const exams = events.filter((e) => e.type === "EXAM" && e.startDate);
+  const used = new Set<string>();
+  for (const b of exams.filter((e) => BEGIN_WORD.test(e.title) && !isExamEnd(e.title))) {
+    if (b.endDate) continue;
+    const partner = exams.find((x) => !used.has(x.id) && isExamEnd(x.title) && stemKey(x.title) === stemKey(b.title) && x.startDate >= b.startDate && daysApart(b.startDate, x.startDate) <= MAX_EXAM_SPAN_DAYS);
+    if (partner) used.add(partner.id);
+    else addWarning(b, `No matching "${examLabel(b.title)} Ends" row was found, so this exam is treated as a single day. Add its last day if it has one.`);
+  }
+  for (const end of exams.filter((e) => isExamEnd(e.title) && !used.has(e.id))) {
+    const hasBegin = exams.some((x) => BEGIN_WORD.test(x.title) && !isExamEnd(x.title) && stemKey(x.title) === stemKey(end.title) && x.startDate <= end.startDate && daysApart(x.startDate, end.startDate) <= MAX_EXAM_SPAN_DAYS);
+    if (!hasBegin) addWarning(end, `No matching "${examLabel(end.title)} Begins" row was found for this end date. Check that the start of the exam is in the list.`);
+  }
+}
+
+/**
+ * Two rows of the same kind on the same day whose titles say much the same thing (every word of the shorter one is in the longer, at least two words) are
+ * probably one event written twice - for example "Half-Yearly Results" and "Results Declaration (Half-Yearly)". Both are flagged so the administrator keeps one;
+ * nothing is removed automatically, because two different events can share a day.
+ */
+export function flagProbableDuplicates(events: PreviewEvent[]): void {
+  for (let i = 0; i < events.length; i++) {
+    for (let j = i + 1; j < events.length; j++) {
+      const a = events[i];
+      const b = events[j];
+      if (!a.startDate || a.startDate !== b.startDate || a.type !== b.type) continue;
+      const [x, y] = [words(a.title), words(b.title)];
+      const [small, big] = x.length <= y.length ? [x, y] : [y, x];
+      if (small.length < 2 || !small.every((w) => big.includes(w))) continue;
+      addWarning(a, `Looks like the same event as "${b.title}" on the same day - keep one of them.`);
+      addWarning(b, `Looks like the same event as "${a.title}" on the same day - keep one of them.`);
+    }
+  }
 }
 
 export function summarize(events: PreviewEvent[]): PreviewSummary {
