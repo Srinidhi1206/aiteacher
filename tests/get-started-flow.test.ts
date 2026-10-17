@@ -141,8 +141,8 @@ const call = async (path: string, session?: "student" | "teacher" | "admin") => 
   return { passes: res.headers.get("x-middleware-next") === "1", status: res.status, to: location ? new URL(location).pathname + new URL(location).search : null };
 };
 
-test("public pages stay public for visitors: /, /login, /register and its role pages, the old /onboarding redirect, the login API", async () => {
-  for (const p of ["/", "/login", "/register", "/register/student", "/register/teacher", "/register/admin", "/onboarding", "/api/auth/login"]) {
+test("public pages stay public for visitors: /, /login, /register and its role pages, the login API", async () => {
+  for (const p of ["/", "/login", "/register", "/register/student", "/register/teacher", "/register/admin", "/api/auth/login"]) {
     assert.equal((await call(p)).passes, true, `${p} is reachable without signing in`);
   }
 });
@@ -180,6 +180,55 @@ test("an invalid or missing session never passes as a signed-in user", async () 
   const res = await middleware(new NextRequest("https://app.test/admin", { headers: { cookie: "maiteacher_session=forged" } }));
   assert.equal(res.headers.get("x-middleware-next"), null);
   assert.match(res.headers.get("location") ?? "", /\/login\?next=%2Fadmin$/);
+});
+
+// ---- /onboarding is a genuine HTTP redirect --------------------------------------------------------------------------------------------------------
+
+test("/onboarding answers with a real HTTP redirect: 307 and Location /register - no JavaScript needed", async () => {
+  const { middleware } = await import("@/middleware");
+  const { NextRequest } = await import("next/server");
+  const res = await middleware(new NextRequest("https://app.test/onboarding"));
+  assert.equal(res.status, 307);
+  assert.equal(res.headers.get("location"), "https://app.test/register");
+  assert.equal(res.headers.get("x-middleware-next"), null, "the request is not passed on to the page");
+});
+
+test("the redirect is the same for everyone: signed out, or signed in as student, teacher or admin (it is not an authentication step)", async () => {
+  for (const who of [undefined, "student", "teacher", "admin"] as const) {
+    const r = await call("/onboarding", who);
+    assert.equal(r.status, 307, String(who));
+    assert.equal(r.to, "/register", String(who));
+  }
+});
+
+test("a trailing slash, a sub-path and a query string all end up on Register", async () => {
+  const { middleware } = await import("@/middleware");
+  const { NextRequest } = await import("next/server");
+  for (const path of ["/onboarding/", "/onboarding/anything", "/onboarding?ref=ad"]) {
+    const res = await middleware(new NextRequest(`https://app.test${path}`));
+    assert.equal(res.status, 307, path);
+    assert.equal(new URL(res.headers.get("location")!).pathname, "/register", path);
+  }
+});
+
+test("paths that merely start with the same letters are not redirected", async () => {
+  const { middleware } = await import("@/middleware");
+  const { NextRequest } = await import("next/server");
+  const res = await middleware(new NextRequest("https://app.test/onboardingx"));
+  assert.notEqual(new URL(res.headers.get("location") ?? "https://app.test/x").pathname, "/register", "/onboardingx is not /onboarding");
+  assert.equal(res.headers.get("location"), "https://app.test/login?next=%2Fonboardingx", "it is treated like any other unknown protected path: sign in first");
+});
+
+test("the redirect does not weaken anything else: protected pages still send a signed-out visitor to /login", async () => {
+  assert.equal((await call("/admin")).to, "/login?next=%2Fadmin");
+  assert.equal((await call("/dashboard")).to, "/login?next=%2Fdashboard");
+});
+
+test("the middleware matcher covers /onboarding, so the redirect runs for it", async () => {
+  const { config } = await import("@/middleware");
+  const re = new RegExp(`^${config.matcher[0]}$`);
+  assert.ok(re.test("/onboarding"));
+  assert.ok(re.test("/register"));
 });
 
 // ---- the destinations are defined once ---------------------------------------------------------------------------------------------------------------------

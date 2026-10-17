@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySession, SESSION_COOKIE } from "@/lib/auth/session";
 import type { Role } from "@/lib/auth/users";
+import { GET_STARTED_HREF } from "@/lib/marketing/auth-links";
 
 // Student-facing pages don't share a single "/student" prefix (they're
 // top-level routes like /dashboard, /subjects, etc.) - list them explicitly
@@ -45,6 +46,12 @@ const PUBLIC_PATHS = ["/login", "/register", "/api/auth/login", "/api/auth/logou
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
+  // The old public "State / Board / Class / Subjects" questionnaire has gone: /onboarding is a real HTTP redirect (307 with a Location header) straight to
+  // the Register screen, so it also works for clients that do not run JavaScript. No session is needed, and nothing else about the request is used.
+  if (pathname === "/onboarding" || pathname.startsWith("/onboarding/")) {
+    return NextResponse.redirect(new URL(GET_STARTED_HREF, req.url));
+  }
+
   const isPublic =
     PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/")) ||
     pathname.startsWith("/_next") ||
@@ -59,8 +66,8 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(new URL(ROLE_HOME[session.role], req.url));
   }
 
-  // Marketing landing page ("/") and onboarding stay public too.
-  if (pathname === "/" || pathname.startsWith("/onboarding") || isPublic) {
+  // The marketing landing page ("/") stays public too.
+  if (pathname === "/" || isPublic) {
     return NextResponse.next();
   }
 
