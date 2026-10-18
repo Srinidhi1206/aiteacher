@@ -32,6 +32,11 @@ export function matches(row: Row, where: unknown): boolean {
     } else {
       const c = cond as Row;
       const keys = Object.keys(c);
+      if (keys.length === 1 && keys[0] === "some") {
+        // a to-many relation filter: at least one related row matches
+        if (!Array.isArray(value) || !value.some((v) => matches(v as Row, c.some))) return false;
+        continue;
+      }
       if (keys.some((k) => OPS.includes(k))) {
         for (const k of keys) {
           if (!OPS.includes(k)) throw new Error(`fake-where: unknown operator ${k}`);

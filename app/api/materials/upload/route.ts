@@ -17,7 +17,9 @@ import { STORAGE_BLOCKED_MESSAGE } from "@/lib/storage/stop-messages";
 export async function POST(request: NextRequest): Promise<NextResponse> {
   // Storage is already known to be blocked on this instance: say so now instead of letting the browser start a large upload that cannot succeed.
   if (isStorageBreakerOpen()) return NextResponse.json({ error: STORAGE_BLOCKED_MESSAGE }, { status: 503 });
-  const body = (await request.json()) as HandleUploadBody;
+  // A body that is not JSON is a bad request, not a server error.
+  const body = (await request.json().catch(() => null)) as HandleUploadBody | null;
+  if (!body || typeof body !== "object") return NextResponse.json({ error: "That upload request could not be read." }, { status: 400 });
 
   try {
     const jsonResponse = await handleUpload({

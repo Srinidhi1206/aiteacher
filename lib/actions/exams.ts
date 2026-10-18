@@ -24,11 +24,15 @@ async function refreshStudentAnalytics(studentId: string) {
   // Runs after any event that changes a student's graded results, so
   // progress/weak-area/strength pages never go stale. Best-effort: a
   // failure here shouldn't fail the grading action itself.
-  await Promise.all([
-    recalculateProgressForStudent(studentId),
-    recalculateWeakAreas(studentId),
-    recalculateStrengths(studentId),
-  ]).catch((err) => console.error("Analytics recalculation failed:", err));
+  // One after the other, not in parallel: all three read and write the same per-topic progress rows, and overlapping writers to the same new row can collide. Each step
+  // is tried even if an earlier one fails, so a problem in one never leaves the other pages stale.
+  for (const step of [recalculateProgressForStudent, recalculateWeakAreas, recalculateStrengths]) {
+    try {
+      await step(studentId);
+    } catch (err) {
+      console.error("Analytics recalculation failed:", err);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

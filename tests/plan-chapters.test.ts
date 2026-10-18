@@ -128,3 +128,63 @@ test("the read-only preview and the generator agree on the chapters (no 'out of 
   const advice = await previewPlanAdviceCore(w.db as PathDb, "s", NOW);
   assert.equal(advice.stale, false);
 });
+
+// ---- a plan made before the placeholder was filtered (or before a chapter was deleted or renamed) is reported out of date -------------------------------------------------
+import { planStaleReason, removedChapterNames, staleMessage, type PlanResult } from "@/lib/analytics/exam-plan";
+
+const emptyResult = (titles: string[]): PlanResult => ({ mode: "general", items: titles.map((title) => ({ date: "2026-10-21", kind: "TOPIC" as const, subject: "X", title, durationMinutes: 40, priority: "MEDIUM" as const })), notes: [], exams: [], unscheduled: 0, coverageNotes: [] });
+
+test("tasks for chapters the class no longer has are found by name - and nothing else is reported", () => {
+  const titles = [
+    "Study: Real Numbers",
+    "Study: Real Numbers · for Unit Test 1",
+    "Study: SCERT Textbook (test)",
+    "Study: SCERT Textbook (test) · for Unit Test 1",
+    "Study: Mathematics textbook · for Unit Test 1", // a subject-level task, for a subject that exists
+    "Revise: Mathematics · for Unit Test 1",
+    "Review weak topic: Sets (Real Numbers) · for Unit Test 1",
+    "Revision - recap this week's topics",
+    "Mock test - mixed topics",
+  ];
+  assert.deepEqual(removedChapterNames(titles, { chapters: ["Real Numbers"], subjects: ["Mathematics"] }), ["SCERT Textbook (test)"]);
+  assert.deepEqual(removedChapterNames(titles, { chapters: ["Real Numbers", "SCERT Textbook (test)"], subjects: ["Mathematics"] }), [], "nothing to report while the chapter still exists");
+  assert.deepEqual(removedChapterNames(["Study: Hindi textbook · for X"], { chapters: [], subjects: ["Mathematics"] }), ["Hindi textbook"], "a subject-level task for a subject the class no longer has");
+});
+
+test("names are compared the way chapters are everywhere else: case and punctuation do not matter", () => {
+  assert.deepEqual(removedChapterNames(["Study: real  numbers!"], { chapters: ["Real Numbers"], subjects: [] }), []);
+});
+
+test("the stale message names the removed chapters, says whether it is one or several, and an exam change still comes first", () => {
+  const known = { chapters: ["Real Numbers"], subjects: ["Mathematics"] };
+  const one = planStaleReason(["Study: SCERT Textbook (test)"], true, emptyResult(["Study: Real Numbers"]), known);
+  assert.equal(one, "it still has tasks for SCERT Textbook (test), which is no longer in your syllabus.");
+  assert.match(staleMessage(one!), /^Your study plan is out of date: it still has tasks for SCERT Textbook \(test\), which is no longer in your syllabus\. Press "Generate my learning path"/);
+  assert.match(planStaleReason(["Study: Old A", "Study: Old B"], true, emptyResult(["Study: Real Numbers"]), known) ?? "", /Old A and Old B, which are no longer in your syllabus/);
+  assert.match(planStaleReason(["Study: SCERT Textbook (test)"], true, emptyResult(["Study: Real Numbers · for Unit Test 1"]), known) ?? "", /does not include Unit Test 1/, "a missing exam is reported first");
+  assert.equal(planStaleReason(["Study: Real Numbers"], true, emptyResult(["Study: Real Numbers"]), known), null, "an up-to-date plan is not flagged");
+  assert.equal(planStaleReason(["Study: SCERT Textbook (test)"], false, emptyResult([]), known), null, "no plan yet: nothing to flag");
+  assert.ok(!/no longer in your syllabus/.test(planStaleReason(["Study: SCERT Textbook (test)"], true, emptyResult(["Study: Real Numbers"])) ?? ""), "without the curriculum the check is simply not made");
+});
+
+test("the real case end to end: a student's existing plan has a future 'SCERT Textbook (test)' task; the page says the plan is out of date, regenerating removes it and keeps completed work, and then it is up to date", async () => {
+  const w = worldWith([english()]);
+  const day = (d: string) => new Date(`${d}T00:00:00`);
+  const item = (id: string, date: string, title: string, completed = false) => ({ id, studyPlanId: "p1", day: 1, date: day(date), kind: "TOPIC", subject: "English", title, durationMinutes: 40, priority: "MEDIUM", completed });
+  w.plans.push({
+    id: "p1",
+    studentId: "s",
+    createdAt: new Date("2026-10-10T03:30:00Z"),
+    items: [item("done", "2026-10-12", "Study: SCERT Textbook (test)", true), item("future", "2026-10-21", "Study: SCERT Textbook (test)"), item("good", "2026-10-22", "Study: Unit 1: Personality Development")],
+  });
+  const before = await previewPlanAdviceCore(w.db as PathDb, "s", NOW);
+  assert.equal(before.stale, true);
+  assert.ok(before.notes.some((n) => /still has tasks for SCERT Textbook \(test\), which is no longer in your syllabus/.test(n)), before.notes.join(" | "));
+  assert.equal(w.planOf("s")!.items.length, 3, "checking changes nothing");
+
+  await generateLearningPathCore(w.db as PathDb, "s", NOW);
+  const titlesAfter = w.planOf("s")!.items.filter((i) => !i.completed && i.date >= day("2026-10-20")).map((i) => i.title);
+  assert.ok(!titlesAfter.some((t) => t.includes(PLACEHOLDER)), titlesAfter.join(" | "));
+  assert.ok(w.planOf("s")!.items.some((i) => i.id === "done"), "the completed task (a past record) is kept");
+  assert.equal((await previewPlanAdviceCore(w.db as PathDb, "s", NOW)).stale, false, "up to date once regenerated");
+});

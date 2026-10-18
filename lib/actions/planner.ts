@@ -50,6 +50,8 @@ export async function createPlannerTask(input: unknown): Promise<ActionResult<{ 
 
 export async function setPlannerTaskStatus(taskId: string, status: PlannerTaskStatus): Promise<ActionResult> {
   try {
+    // The type only exists at build time: a request from the browser can carry any text, which the database would reject with an unhelpful server error.
+    if (!(Object.values(PlannerTaskStatus) as string[]).includes(status)) return { ok: false, error: "That is not a valid status." };
     const student = await requireOwnStudent();
     const task = await prisma.dailyPlannerTask.findUnique({ where: { id: taskId } });
     if (!task || task.studentId !== student.id) return { ok: false, error: "Task not found." };

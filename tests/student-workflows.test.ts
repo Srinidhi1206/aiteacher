@@ -31,6 +31,9 @@ const T = {
   notifications: [] as { userId: string; title: string; message: string }[],
   analyticsCalls: 0,
   analyticsFail: false,
+  analyticsSteps: [] as string[],
+  inflight: 0,
+  maxInflight: 0,
   txOptions: [] as unknown[],
   beforeTx: null as null | (() => void),
   txError: null as null | Error,
@@ -167,13 +170,19 @@ mock.module(here("lib/academics/acting.ts"), { namedExports: { resolveAuthor: as
 mock.module(here("lib/storage/index.ts"), { namedExports: { storage: {}, validateUploadFile: () => null, safeFilename: (n: string) => n, StorageNotConfiguredError: class extends Error {} } });
 mock.module(here("lib/storage/errors.ts"), { namedExports: { isStorageBlocked: () => false } });
 mock.module(here("lib/storage/stop-messages.ts"), { namedExports: { STORAGE_BLOCKED_MESSAGE: "blocked" } });
-const analytics = async () => {
+// The three recalculations are stand-ins that record how many ran at once (the real ones share the same per-topic rows, so they must not overlap).
+const analyticsStep = (name: string, fails = () => false) => async () => {
   T.analyticsCalls++;
-  if (T.analyticsFail) throw new Error("analytics down");
+  T.analyticsSteps.push(name);
+  T.inflight++;
+  T.maxInflight = Math.max(T.maxInflight, T.inflight);
+  await new Promise((r) => setTimeout(r, 2));
+  T.inflight--;
+  if (fails()) throw new Error(`${name} down`);
 };
-mock.module(here("lib/analytics/progress.ts"), { namedExports: { recalculateProgressForStudent: analytics } });
-mock.module(here("lib/analytics/weakness.ts"), { namedExports: { recalculateWeakAreas: async () => undefined } });
-mock.module(here("lib/analytics/strengths.ts"), { namedExports: { recalculateStrengths: async () => undefined } });
+mock.module(here("lib/analytics/progress.ts"), { namedExports: { recalculateProgressForStudent: analyticsStep("progress", () => T.analyticsFail) } });
+mock.module(here("lib/analytics/weakness.ts"), { namedExports: { recalculateWeakAreas: analyticsStep("weak") } });
+mock.module(here("lib/analytics/strengths.ts"), { namedExports: { recalculateStrengths: analyticsStep("strengths") } });
 mock.module(here("lib/ai/index.ts"), { namedExports: { getAIProvider: () => null, AIError: class extends Error { code = "x"; } } });
 
 let exams: typeof import("@/lib/actions/exams");
@@ -318,7 +327,7 @@ test("C: submitting the SAME exam twice at once (two tabs, a double click) grade
   assert.deepEqual(results.map((r) => r.ok).sort(), [false, false, true], JSON.stringify(results));
   assert.equal(results.filter((r) => !r.ok).every((r) => r.error === "Already submitted."), true);
   assert.equal(T.notifications.length, 1, "one notification");
-  assert.equal(T.analyticsCalls, 1, "performance refreshed once");
+  assert.equal(T.analyticsCalls, 3, "performance refreshed once (its three steps ran once each, not three times over)");
   assert.deepEqual([T.submissions.find((s) => s.id === sub)!.status, T.submissions.find((s) => s.id === sub)!.totalScore], ["SUBMITTED", 2]);
 });
 
@@ -494,4 +503,23 @@ test("F: any OTHER database failure while saving is not disguised as 'already su
     T.txError = null;
   }
   assert.equal(T.attempts.filter((x) => x.paperId === paper.id).length, 0);
+});
+
+test("C: after an exam is graded the three performance recalculations run ONE AFTER THE OTHER, and a failing one does not stop the rest", async () => {
+  as("uA");
+  const { e, qs } = exam([MCQ(2)], { maxMarks: 2 });
+  const sub = (await exams.startExamAttempt(e.id)).data!.submissionId;
+  await exams.saveExamAnswer(sub, qs[0].id, "4");
+  T.analyticsSteps.length = 0;
+  T.maxInflight = 0;
+  T.analyticsFail = true; // the first step fails
+  const quiet = mock.method(console, "error", () => undefined);
+  try {
+    assert.deepEqual(await exams.submitExam(sub), { ok: true }, "the submission itself is not affected");
+  } finally {
+    quiet.mock.restore();
+    T.analyticsFail = false;
+  }
+  assert.deepEqual(T.analyticsSteps, ["progress", "weak", "strengths"], "all three were tried, in order");
+  assert.equal(T.maxInflight, 1, "never two at once");
 });

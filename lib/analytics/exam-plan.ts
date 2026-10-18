@@ -311,6 +311,42 @@ export function placementNotes(student: { schoolId: string | null; boardId: stri
   return [];
 }
 
+/** The chapter and subject names the class has NOW, as the plan was just built from them. */
+export interface KnownCurriculum {
+  chapters: Iterable<string>;
+  subjects: Iterable<string>;
+}
+
+const STUDY_TASK = /^Study: (.+?)(?: · for .+)?$/;
+
+/** Labels of the exams (as the plan now sees them) that have unfinished tasks "for" them dated on or after the exam's first day. Dates are "yyyy-mm-dd". */
+export function examsWithLateTasks(tasks: { title: string; date: string }[], exams: { label: string; startDate: string }[]): string[] {
+  const out: string[] = [];
+  for (const exam of exams) {
+    if (tasks.some((t) => EXAM_SUFFIX.exec(t.title)?.[1] === exam.label && t.date >= exam.startDate)) out.push(exam.label);
+  }
+  return out;
+}
+
+/**
+ * Names that "Study: <name>" tasks of an existing plan point at but the curriculum no longer has. Task titles are all a plan stores about a chapter (there is no link to the
+ * chapter row), so a chapter that was deleted or renamed leaves its old task in every plan made before. Subject-level tasks ("Study: <subject> textbook") are matched against
+ * the subjects, and tasks that are not chapter tasks at all (revision, mock tests, weak-topic reviews) are never reported.
+ */
+export function removedChapterNames(existingFutureTitles: string[], known: KnownCurriculum): string[] {
+  const chapters = new Set([...known.chapters].map(norm));
+  const subjects = new Set([...known.subjects].map(norm));
+  const gone = new Map<string, string>();
+  for (const title of existingFutureTitles) {
+    const name = STUDY_TASK.exec(title)?.[1];
+    if (!name || chapters.has(norm(name))) continue;
+    const asSubject = name.replace(/ textbook$/i, "");
+    if (asSubject !== name && subjects.has(norm(asSubject))) continue;
+    gone.set(norm(name), name);
+  }
+  return [...gone.values()];
+}
+
 const EXAM_SUFFIX = / · for (.+)$/;
 const examLabelsIn = (titles: string[]) => new Set(titles.map((t) => EXAM_SUFFIX.exec(t)?.[1]).filter((x): x is string => Boolean(x)));
 
@@ -320,7 +356,7 @@ const examLabelsIn = (titles: string[]) => new Set(titles.map((t) => EXAM_SUFFIX
  * day has passed. `existingFutureTitles` are the unfinished tasks dated today or later; `hasPlan` is whether the student has any plan at all (no plan: the page already
  * offers to create one). Returns null when the plan is fine.
  */
-export function planStaleReason(existingFutureTitles: string[], hasPlan: boolean, result: PlanResult): string | null {
+export function planStaleReason(existingFutureTitles: string[], hasPlan: boolean, result: PlanResult, known?: KnownCurriculum, datedTasks?: { title: string; date: string }[]): string | null {
   if (!hasPlan) return null;
   const have = examLabelsIn(existingFutureTitles);
   const wanted = examLabelsIn(result.items.map((i) => i.title));
@@ -328,6 +364,13 @@ export function planStaleReason(existingFutureTitles: string[], hasPlan: boolean
   if (missing.length > 0) return `it does not include ${nameList(missing)} yet.`;
   const gone = [...have].filter((l) => !wanted.has(l));
   if (gone.length > 0) return `it still plans for ${nameList(gone)}, which is no longer an upcoming published exam.`;
+  // An exam whose date moved EARLIER leaves tasks "for" it on or after the day it now starts - plainly wrong, whatever the label. (An exam moved later is not reported: the
+  // plan still prepares for it, only earlier than needed.) Only checked when the caller passes the tasks with their dates.
+  const late = datedTasks ? examsWithLateTasks(datedTasks, result.exams) : [];
+  if (late.length > 0) return `the date of ${nameList(late)} has changed, and some of ${late.length === 1 ? "its" : "their"} tasks are now planned on or after ${late.length === 1 ? "it" : "them"}.`;
+  // A task for a chapter the class no longer has (deleted, renamed, or a placeholder removed): only checked when the caller says what the curriculum is now.
+  const removed = known ? removedChapterNames(existingFutureTitles, known) : [];
+  if (removed.length > 0) return `it still has tasks for ${nameList(removed)}, which ${removed.length === 1 ? "is" : "are"} no longer in your syllabus.`;
   if (existingFutureTitles.some((t) => /: continue current chapter$/.test(t)) && result.items.some((i) => /^Study: /.test(i.title))) {
     return "it was made before chapter-level planning, so it still has general placeholder tasks.";
   }

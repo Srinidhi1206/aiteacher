@@ -151,6 +151,8 @@ export async function previewPlanAdviceCore(db: PathDb, studentId: string, now: 
   if (!loaded) return { notes: placementNotes({ schoolId: null, boardId: null, schoolClassId: null }), stale: false };
   const result = buildStudyPlan(loaded.input);
   const futureTitles = (loaded.plan?.items ?? []).filter((i) => !i.completed && i.date >= loaded.todayStart).map((i) => i.title);
-  const reason = planStaleReason(futureTitles, Boolean(loaded.plan), result);
+  const known = { chapters: loaded.input.subjects.flatMap((s) => s.chapters.map((c) => c.name)), subjects: loaded.input.subjects.map((s) => s.name) };
+  const dated = (loaded.plan?.items ?? []).filter((i) => !i.completed && i.date >= loaded.todayStart).map((i) => ({ title: i.title, date: localDateString(i.date) }));
+  const reason = planStaleReason(futureTitles, Boolean(loaded.plan), result, known, dated);
   return { notes: [...new Set([...placementNotes(loaded.student), ...result.coverageNotes, ...(reason ? [staleMessage(reason)] : [])])], stale: reason !== null };
 }
