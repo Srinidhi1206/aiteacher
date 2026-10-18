@@ -14,6 +14,8 @@ import { GenerateLearningPathButton } from "@/components/dashboard/generate-lear
 import { PlanNotes } from "@/components/study-plan/plan-notes";
 import { completeLearningPathItem, getMyLearningPath, getMyWeakAreas } from "@/lib/actions/analytics";
 import { cn } from "@/lib/utils";
+import { todayInIndia } from "@/lib/calendar/day";
+import { formatDayKey, planProgress, taskState } from "@/lib/study-plan/item-status";
 
 type LearningPath = Awaited<ReturnType<typeof getMyLearningPath>>;
 type WeakAreas = Awaited<ReturnType<typeof getMyWeakAreas>>;
@@ -32,6 +34,8 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
   const [saveError, setSaveError] = React.useState<string | null>(null);
 
   const items = learningPath?.items ?? [];
+  const today = todayInIndia();
+  const progress = planProgress(items, today);
   const completed = items.filter((i) => i.completed).length;
   const completionPct = items.length > 0 ? Math.round((completed / items.length) * 100) : null;
   const weakTopicsCovered = weakAreas.filter((w) => items.some((i) => i.title.includes(w.topic.name))).length;
@@ -90,6 +94,7 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
           <span>
             {completed}/{items.length} items done
           </span>
+          {progress.missed > 0 && <span className="font-medium text-warning-700 dark:text-warning-400">{progress.missed} missed</span>}
           {weakAreas.length > 0 && (
             <span>
               {weakTopicsCovered}/{weakAreas.length} weak topics covered
@@ -97,13 +102,26 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
           )}
         </div>
 
+        {progress.missed > 0 && (
+          <p className="rounded-xl bg-warning-50 px-3 py-2 text-xs text-warning-800 dark:bg-warning-900/20 dark:text-warning-300">
+            {progress.missed} task{progress.missed === 1 ? " was" : "s were"} planned for days that have passed and {progress.missed === 1 ? "is" : "are"} not done. You can still tick {progress.missed === 1 ? "it" : "them"} off here, or press
+            &quot;Generate my learning path&quot; to plan the days ahead again - what you have already finished is kept.
+          </p>
+        )}
+        {progress.ahead === 0 && progress.total > 0 && (
+          <p className="rounded-xl bg-primary-50 px-3 py-2 text-xs text-primary-800 dark:bg-primary-950/30 dark:text-primary-300">
+            There is nothing left to do in this plan. Press &quot;Generate my learning path&quot; to plan the days ahead.
+          </p>
+        )}
+
         <div className="space-y-5">
           {days.map((day) => {
             const dayItems = items.filter((i) => i.day === day);
             return (
               <div key={day}>
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
-                  Day {day} - {new Date(dayItems[0].date).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                  Day {day} - {formatDayKey(dayItems[0].dateKey)}
+                  {dayItems[0].dateKey === today && " - Today"}
                 </p>
                 <div className="space-y-2">
                   {dayItems.map((item) => (
@@ -111,7 +129,11 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
                       key={item.id}
                       className={cn(
                         "flex items-center justify-between gap-3 rounded-xl border p-3 text-sm",
-                        item.completed ? "border-success-100 bg-success-50 dark:border-success-900/40 dark:bg-success-900/10" : "border-gray-100 dark:border-gray-800"
+                        item.completed
+                          ? "border-success-100 bg-success-50 dark:border-success-900/40 dark:bg-success-900/10"
+                          : taskState(item, today) === "missed"
+                            ? "border-warning-200 bg-warning-50/60 dark:border-warning-900/40 dark:bg-warning-900/10"
+                            : "border-gray-100 dark:border-gray-800"
                       )}
                     >
                       <div className="flex min-w-0 items-start gap-3">
@@ -136,6 +158,11 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
                             <Badge variant="default" className="text-[10px]">
                               {KIND_LABEL[item.kind] ?? item.kind}
                             </Badge>
+                            {taskState(item, today) === "missed" && (
+                              <Badge variant="warning" className="text-[10px]">
+                                Missed
+                              </Badge>
+                            )}
                             <span className="text-xs text-gray-400">{item.subject}</span>
                             <span className="text-xs text-gray-400">- {item.durationMinutes} min</span>
                           </div>

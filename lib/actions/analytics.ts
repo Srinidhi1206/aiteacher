@@ -8,6 +8,7 @@ import { getSubjectProgressForStudent, getTopicProgressForStudent } from "@/lib/
 import { getWeakAreasForStudent } from "@/lib/analytics/weakness";
 import { getStrengthsForStudent } from "@/lib/analytics/strengths";
 import { generateLearningPath, getLearningPathForStudent, previewPlanAdvice, setLearningPathItemCompleted } from "@/lib/analytics/learning-path";
+import { localDateString } from "@/lib/calendar/day";
 import type { ActionResult } from "./materials";
 
 async function requireOwnStudentId(): Promise<string> {
@@ -35,7 +36,10 @@ export async function getMyStrengths() {
 
 export async function getMyLearningPath() {
   const studentId = await requireOwnStudentId();
-  return getLearningPathForStudent(studentId);
+  const plan = await getLearningPathForStudent(studentId);
+  if (!plan) return null;
+  // `dateKey` is the day a task is planned for as "yyyy-mm-dd", read the same way it was stored (lib/calendar/day.ts), so "missed" and "today" never depend on the browser's time zone.
+  return { ...plan, items: plan.items.map((i) => ({ ...i, dateKey: localDateString(i.date) })) };
 }
 
 /**
@@ -202,8 +206,8 @@ function localDayLabel(timestamp: number): string {
 }
 
 /**
- * Real activity heatmap derived from three already-persisted, timestamped
- * signals - no dedicated activity-log model exists or was added for this
+ * Real activity heatmap derived from four already-persisted, timestamped
+ * signals (submitted exams, handed-in assignments, completed planner tasks, finished practice sessions) - no dedicated activity-log model exists or was added for this
  * (see docs/STEP_3_5.md "Stage H detail" for why that schema change was
  * judged unnecessary). Every day in the window is returned, including
  * zero-activity days - a real 0 is honest data, not fabrication.
@@ -215,7 +219,7 @@ export async function getMyActivityHeatmap(): Promise<{ days: HeatmapDayData[]; 
   windowStart.setHours(0, 0, 0, 0);
   windowStart.setDate(windowStart.getDate() - (HEATMAP_WINDOW_DAYS - 1));
 
-  const [examSubmissions, worksheetSubmissions, completedTasks] = await Promise.all([
+  const [examSubmissions, worksheetSubmissions, completedTasks, practiceAttempts] = await Promise.all([
     prisma.examSubmission.findMany({
       where: { studentId, submittedAt: { gte: windowStart, not: null } },
       select: { submittedAt: true },
@@ -228,6 +232,12 @@ export async function getMyActivityHeatmap(): Promise<{ days: HeatmapDayData[]; 
       where: { studentId, status: "COMPLETED", date: { gte: windowStart } },
       select: { date: true },
     }),
+    // A finished practice session is activity on the day it was submitted. (Study-plan ticks are NOT counted: the plan stores no time of completion, only the day a task was
+    // planned for, so a task ticked late would be credited to the wrong day - that needs a completion time in the schema.)
+    prisma.attempt.findMany({
+      where: { studentId, createdAt: { gte: windowStart } },
+      select: { createdAt: true },
+    }),
   ]);
 
   const counts = new Map<number, number>();
@@ -239,6 +249,7 @@ export async function getMyActivityHeatmap(): Promise<{ days: HeatmapDayData[]; 
   examSubmissions.forEach((s) => bump(s.submittedAt));
   worksheetSubmissions.forEach((s) => bump(s.submittedAt));
   completedTasks.forEach((t) => bump(t.date));
+  practiceAttempts.forEach((a) => bump(a.createdAt));
 
   const days: HeatmapDayData[] = [];
   let hasAnyActivity = false;

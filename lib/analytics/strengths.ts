@@ -1,5 +1,5 @@
 // Mirror of weakness.ts for topics a student is strong in (Stage E3).
-// Same recency-weighted, explainable approach - never labels a strength
+// Same explainable approach (mastery weighs every graded result equally; the trend uses the latest two) - never labels a strength
 // off a single question (MIN_ATTEMPTS_FOR_STRENGTH below).
 import "server-only";
 import { prisma } from "@/lib/prisma";

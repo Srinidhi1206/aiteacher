@@ -371,6 +371,11 @@ export function planStaleReason(existingFutureTitles: string[], hasPlan: boolean
   // A task for a chapter the class no longer has (deleted, renamed, or a placeholder removed): only checked when the caller says what the curriculum is now.
   const removed = known ? removedChapterNames(existingFutureTitles, known) : [];
   if (removed.length > 0) return `it still has tasks for ${nameList(removed)}, which ${removed.length === 1 ? "is" : "are"} no longer in your syllabus.`;
+  // A plan made long before an exam only wrote its first days; the revision days at the very end were beyond what it could write then. Once those days are within reach, a fresh plan
+  // has revision tasks "for" the exam that this plan lacks - the student would otherwise reach the exam with no revision planned, and nothing would say so.
+  const haveTitles = new Set(existingFutureTitles);
+  const needRevision = [...new Set(result.items.filter((i) => i.kind === "REVISION" && /^Revise: /.test(i.title) && !haveTitles.has(i.title)).map((i) => EXAM_SUFFIX.exec(i.title)?.[1]).filter((x): x is string => Boolean(x)))];
+  if (needRevision.length > 0) return `it does not include the revision days for ${nameList(needRevision)} yet.`;
   if (existingFutureTitles.some((t) => /: continue current chapter$/.test(t)) && result.items.some((i) => /^Study: /.test(i.title))) {
     return "it was made before chapter-level planning, so it still has general placeholder tasks.";
   }

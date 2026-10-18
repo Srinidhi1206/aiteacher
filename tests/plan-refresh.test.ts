@@ -108,3 +108,58 @@ test("the late-task check on its own: only unfinished tasks FOR that exam, on or
   assert.deepEqual(examsWithLateTasks([{ title: "Study: A · for Unit Test 1", date: "2026-11-03" }], exams), ["Unit Test 1"], "on the exam's first day counts");
   assert.deepEqual(examsWithLateTasks([{ title: "Revision - recap this week's topics", date: "2026-12-30" }, { title: "Study: A", date: "2026-12-30" }], exams), [], "tasks that are not for an exam are never reported");
 });
+
+// ---- plans that run out, plans that end before the exam, and tasks that were missed ------------------------------------------------------------------------------------------------
+
+test("a plan made long before an exam has no revision days yet; once those days are in reach the student is told the plan lacks them, and regenerating adds them", async () => {
+  const { w, event, db } = setup();
+  event("a", "Unit Test 1 Begins", "2026-11-20");
+  await generateLearningPathCore(db, "s", NOW); // 20 Oct: the 28-day window ends before the exam's last days
+  const revise = () => w.planOf("s")!.items.filter((i) => i.title.startsWith("Revise: "));
+  assert.equal(revise().length, 0, "no revision days could be written yet");
+  assert.equal((await previewPlanAdviceCore(w.db as PathDb, "s", NOW)).stale, false, "and nothing is wrong yet");
+  const later = new Date("2026-10-22T05:00:00Z"); // now the exam's last days are inside the window
+  const note = staleNote(await previewPlanAdviceCore(w.db as PathDb, "s", later)) ?? "";
+  assert.match(note, /it does not include the revision days for Unit Test 1 yet/);
+  await generateLearningPathCore(db, "s", later);
+  assert.ok(revise().length > 0, "regenerating wrote the revision days");
+  assert.equal((await previewPlanAdviceCore(w.db as PathDb, "s", later)).stale, false);
+});
+
+test("a plan whose every task is in the past is reported out of date (it has run out), with or without an exam, and regenerating gives it days ahead", async () => {
+  for (const withExam of [false, true]) {
+    const { w, event, db } = setup();
+    if (withExam) event("a", "Unit Test 1 Begins", "2026-12-20");
+    await generateLearningPathCore(db, "s", NOW);
+    const much = new Date("2026-12-10T05:00:00Z"); // far enough on that every task of the plan is behind
+    const note = staleNote(await previewPlanAdviceCore(w.db as PathDb, "s", much)) ?? "";
+    assert.ok(/no tasks left for the coming days|does not include/.test(note), `${withExam}: ${note}`);
+    await generateLearningPathCore(db, "s", much);
+    assert.equal((await previewPlanAdviceCore(w.db as PathDb, "s", much)).stale, false, `${withExam}: current again`);
+  }
+});
+
+test("a task missed yesterday is kept as a past record AND its chapter is planned again for the days ahead when the student regenerates (the exam still needs it)", async () => {
+  const { w, event, db } = setup();
+  event("a", "Unit Test 1 Begins", "2026-11-05");
+  await generateLearningPathCore(db, "s", NOW);
+  const first = w.planOf("s")!.items.filter((i) => i.title.endsWith("· for Unit Test 1") && i.title.startsWith("Study: ")).sort((a, b) => a.date.getTime() - b.date.getTime())[0];
+  const missedTitle = first.title;
+  const later = new Date("2026-10-22T05:00:00Z"); // two days on: the first task's day has passed and it was never ticked
+  await generateLearningPathCore(db, "s", later);
+  const rows = w.planOf("s")!.items.filter((i) => i.title === missedTitle);
+  assert.ok(rows.some((i) => i.id === first.id && !i.completed), "the missed task is still there as a past record");
+  assert.ok(rows.some((i) => i.id !== first.id && i.date.getTime() > first.date.getTime()), "and the same chapter is planned again on a later day");
+});
+
+test("nothing is invented without evidence: with no published exam the plan is general and names no exam; with no chapters it makes subject-level tasks only", async () => {
+  const { w, db } = setup();
+  const res = await generateLearningPathCore(db, "s", NOW);
+  assert.equal(res?.mode, "general");
+  assert.ok(!w.planOf("s")!.items.some((i) => / · for /.test(i.title)), "no exam is named");
+  w.classSubjects.c10 = [{ id: "x", name: "Drawing", chapters: [] }];
+  w.plans.length = 0;
+  await generateLearningPathCore(db, "s", NOW);
+  const titles = w.planOf("s")!.items.map((i) => i.title);
+  assert.ok(titles.length > 0 && titles.every((t) => /Drawing/.test(t) || /^Revision|^Mock/.test(t)), titles.join(" | "));
+});

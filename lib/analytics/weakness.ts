@@ -1,5 +1,6 @@
 // Deterministic weak-area detection (Stage E2). No LLM involved - this is
-// arithmetic over real graded answers, matching the existing mocked
+// arithmetic over real graded answers (mastery = marks earned / marks possible across ALL of a topic's graded results, every result weighing the same; only the trend
+// and the "last N attempts" wording look at recency), matching the existing mocked
 // algorithm's rules (see docs/ARCHITECTURE.md's "Weakness Detection"
 // section) now run for real instead of hand-authored.
 import "server-only";

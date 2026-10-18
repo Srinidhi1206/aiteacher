@@ -28,6 +28,10 @@ const D = {
   subjectProgress: [] as Row[],
   weak: [] as Row[],
   strong: [] as Row[],
+  plans: [] as Row[],
+  planItems: [] as Row[],
+  worksheetSubs: [] as Row[],
+  plannerTasks: [] as Row[],
   seq: 0,
 };
 const nid = (p: string) => `${p}${++D.seq}`;
@@ -37,6 +41,22 @@ const pick = <T,>(rows: T[], take?: number) => (take ? rows.slice(0, take) : row
 const byDateDesc = (a: Date | null, b: Date | null) => (b?.getTime() ?? 0) - (a?.getTime() ?? 0);
 
 const prisma = {
+  worksheetSubmission: { findMany: async ({ where }: Row) => D.worksheetSubs.filter((w) => w.studentId === where.studentId && w.submittedAt >= where.submittedAt.gte) },
+  dailyPlannerTask: { findMany: async ({ where }: Row) => D.plannerTasks.filter((t) => t.studentId === where.studentId && t.status === where.status && t.date >= where.date.gte) },
+  attempt: { findMany: async ({ where }: Row) => D.attempts.filter((a) => a.studentId === where.studentId && a.createdAt >= where.createdAt.gte) },
+  studyPlan: {
+    findFirst: async ({ where }: Row) => {
+      const p = D.plans.filter((x) => x.studentId === where.studentId).sort((a, b) => b.createdAt - a.createdAt)[0];
+      return p ? { ...p, items: D.planItems.filter((i) => i.studyPlanId === p.id).sort((a, b) => a.day - b.day) } : null;
+    },
+  },
+  studyPlanItem: {
+    findUnique: async ({ where }: Row) => {
+      const i = D.planItems.find((x) => x.id === where.id);
+      return i ? { ...i, studyPlan: D.plans.find((p) => p.id === i.studyPlanId) } : null;
+    },
+    update: async ({ where, data }: Row) => Object.assign(D.planItems.find((x) => x.id === where.id)!, data),
+  },
   student: { findUnique: async ({ where }: Row) => (where.userId ? Object.values(D.students).find((s) => s.userId === where.userId) : D.students[where.id]) ?? null },
   topic: {
     findMany: async ({ where }: Row) => D.topics.filter((t) => where.id.in.includes(t.id)).map((t) => ({ id: t.id })),
@@ -91,7 +111,8 @@ const prisma = {
   weaknessProfile: profileTable(() => D.weak),
   strengthProfile: profileTable(() => D.strong),
   examSubmission: {
-    findMany: async ({ where }: Row) => D.submissions.filter((s) => s.studentId === where.studentId && where.status.in.includes(s.status)),
+    findMany: async ({ where }: Row) =>
+      D.submissions.filter((s) => s.studentId === where.studentId && (where.status ? where.status.in.includes(s.status) : s.submittedAt && s.submittedAt >= where.submittedAt.gte)),
     count: async ({ where }: Row) => D.submissions.filter((s) => s.studentId === where.studentId && s.status !== where.status.not).length,
   },
 };
@@ -310,4 +331,63 @@ test("performance by Bloom level groups graded answers by their topic's level, w
   assert.deepEqual([byLevel.REMEMBER.answerCount, byLevel.REMEMBER.percentage], [2, 75]);
   assert.deepEqual([byLevel.APPLY.answerCount, byLevel.APPLY.percentage], [1, 25]);
   assert.deepEqual([byLevel.UNDERSTAND.percentage, byLevel.ANALYZE.percentage], [null, null]);
+});
+
+// ---- the study plan the student sees: day keys and progress ownership -------------------------------------------------------------------------------------------------------
+
+test("every plan task the page receives carries its day as a plain yyyy-mm-dd, read the way it was stored (server-local midnight), in any server zone", async () => {
+  reset();
+  D.plans.push({ id: "p1", studentId: "A", createdAt: 1 });
+  D.planItems.push({ id: "i1", studyPlanId: "p1", day: 1, date: new Date("2026-10-16T00:00:00"), completed: false, title: "Study: A" }, { id: "i2", studyPlanId: "p1", day: 2, date: new Date("2026-10-17T00:00:00"), completed: true, title: "Study: B" });
+  const plan = await actions.getMyLearningPath();
+  assert.deepEqual(plan!.items.map((i) => i.dateKey), ["2026-10-16", "2026-10-17"]);
+  who = "uB";
+  assert.equal(await actions.getMyLearningPath(), null, "another student has no plan of their own, and never sees A's");
+  who = "uA";
+});
+
+test("a student can tick only their OWN plan tasks: someone else's task, or one that does not exist, is 'not found' and unchanged", async () => {
+  reset();
+  D.plans.push({ id: "p1", studentId: "A", createdAt: 1 });
+  D.planItems.push({ id: "i1", studyPlanId: "p1", day: 1, date: new Date("2026-10-16T00:00:00"), completed: false, title: "Study: A" });
+  who = "uB";
+  assert.deepEqual(await actions.completeLearningPathItem("i1", true), { ok: false, error: "Item not found." });
+  assert.deepEqual(await actions.completeLearningPathItem("ghost", true), { ok: false, error: "Item not found." });
+  assert.equal(D.planItems[0].completed, false);
+  who = "uA";
+  assert.deepEqual(await actions.completeLearningPathItem("i1", true), { ok: true });
+  assert.equal(D.planItems[0].completed, true);
+  assert.deepEqual(await actions.completeLearningPathItem("i1", false), { ok: true });
+  assert.equal(D.planItems[0].completed, false, "and it can be un-ticked");
+});
+
+// ---- the activity heatmap ---------------------------------------------------------------------------------------------------------------------------------------------------
+
+test("the heatmap counts submitted exams, handed-in assignments, completed planner tasks AND finished practice sessions, day by day, capped at 4, with real zeros between", async () => {
+  reset();
+  D.worksheetSubs.length = 0;
+  D.plannerTasks.length = 0;
+  const now = new Date();
+  const daysAgo = (n: number) => new Date(now.getTime() - n * 86_400_000);
+  D.submissions.push({ id: "e1", studentId: "A", status: "SUBMITTED", submittedAt: daysAgo(1) });
+  D.worksheetSubs.push({ studentId: "A", submittedAt: daysAgo(1) });
+  D.plannerTasks.push({ studentId: "A", status: "COMPLETED", date: daysAgo(1) });
+  practice("A", "t1", true, daysAgo(1).toISOString()); // a practice session yesterday
+  for (let i = 0; i < 6; i++) practice("A", "t1", true, daysAgo(3).toISOString()); // six sessions three days ago: capped at 4
+  practice("B", "t1", true, daysAgo(2).toISOString()); // someone else's
+  const { days, hasAnyActivity } = await actions.getMyActivityHeatmap();
+  assert.equal(days.length, 84);
+  assert.equal(hasAnyActivity, true);
+  const nonZero = days.filter((d) => d.count > 0).map((d) => d.count);
+  assert.deepEqual(nonZero.sort(), [4, 4], "yesterday: exam + assignment + task + practice = 4; three days ago: six sessions capped at 4");
+  assert.ok(days.filter((d) => d.count === 0).length >= 80, "the other days are honest zeros - and B's session is not here");
+});
+
+test("a student with no activity gets an empty heatmap and says so, not made-up days", async () => {
+  reset();
+  D.worksheetSubs.length = 0;
+  D.plannerTasks.length = 0;
+  const { days, hasAnyActivity } = await actions.getMyActivityHeatmap();
+  assert.equal(hasAnyActivity, false);
+  assert.ok(days.every((d) => d.count === 0));
 });

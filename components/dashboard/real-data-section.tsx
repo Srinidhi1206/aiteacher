@@ -22,6 +22,8 @@ import { getMyWeakAreas, getMyStrengths, getMyLearningPath } from "@/lib/actions
 import { listExamsForStudent, listResultsForStudent } from "@/lib/actions/exams";
 import { RealPlannerTaskRow } from "./real-planner-task";
 import { GenerateLearningPathButton } from "./generate-learning-path-button";
+import { todayInIndia } from "@/lib/calendar/day";
+import { nextUpTask, planProgress } from "@/lib/study-plan/item-status";
 
 async function loadData() {
   const [overview, plannerStats, weakAreas, strengths, learningPath, exams, results] = await Promise.all([
@@ -63,12 +65,16 @@ export async function RealDataSection() {
   // Learning-path analytics (H11): presentation-only aggregation over data
   // already fetched above - no recomputation of the plan-generation logic
   // itself (that stays entirely in lib/analytics/learning-path.ts).
+  const today = todayInIndia();
   const pathItems = learningPath?.items ?? [];
+  const pathProgress = planProgress(pathItems, today);
   const pathCompleted = pathItems.filter((i) => i.completed).length;
   const pathCompletionPct = pathItems.length > 0 ? Math.round((pathCompleted / pathItems.length) * 100) : null;
-  const pathRemaining = pathItems.length - pathCompleted;
   const weakTopicsCovered = weakAreas.filter((w) => pathItems.some((i) => i.title.includes(w.topic.name))).length;
-  const nextItem = pathItems.find((i) => !i.completed) ?? null;
+  // "Next up" is the first task still to do from TODAY on - a task for a day that has already passed is not next, it is missed.
+  const nextItem = nextUpTask(pathItems, today);
+  // The short list starts from today too (missed tasks are counted, and live on the Study Plan page); if nothing is ahead it shows the plan from the start.
+  const listedItems = (pathProgress.ahead > 0 ? pathItems.filter((i) => i.dateKey >= today) : pathItems).slice(0, 6);
 
   return (
     <div className="space-y-6">
@@ -193,7 +199,8 @@ export async function RealDataSection() {
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                   <span className="font-semibold text-gray-700 dark:text-gray-200">{pathCompletionPct}% complete</span>
                   <span>{pathCompleted}/{pathItems.length} items done</span>
-                  <span>{pathRemaining} remaining</span>
+                  <span>{pathProgress.ahead} to do</span>
+                  {pathProgress.missed > 0 && <span className="font-medium text-warning-700 dark:text-warning-400">{pathProgress.missed} missed</span>}
                   {weakAreas.length > 0 && (
                     <span>
                       {weakTopicsCovered}/{weakAreas.length} weak topics covered
@@ -208,7 +215,7 @@ export async function RealDataSection() {
                   </div>
                 )}
                 <div className="space-y-2">
-                {learningPath.items.slice(0, 6).map((item) => (
+                {listedItems.map((item) => (
                   <div key={item.id} className="flex items-center justify-between gap-2 rounded-xl border border-gray-100 p-2.5 text-sm dark:border-gray-800">
                     <div className="min-w-0">
                       <span className="text-xs font-semibold text-gray-400">Day {item.day}</span>{" "}
