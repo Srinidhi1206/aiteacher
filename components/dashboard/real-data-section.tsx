@@ -25,6 +25,8 @@ import { GenerateLearningPathButton } from "./generate-learning-path-button";
 import { todayInIndia } from "@/lib/calendar/day";
 import { nextUpTask, planProgress } from "@/lib/study-plan/item-status";
 import { MARKED_DONE_BADGE, markedDoneCount } from "@/lib/study-plan/wording";
+import { pendingOnlineExams } from "@/lib/dashboard/online-exams";
+import { OnlineExamsList } from "./online-exams-list";
 
 async function loadData() {
   const [overview, plannerStats, weakAreas, strengths, learningPath, exams, results] = await Promise.all([
@@ -61,7 +63,8 @@ export async function RealDataSection() {
   }
   const { overview, plannerStats, weakAreas, strengths, learningPath, exams, results } = data;
 
-  const upcomingExams = exams.filter((e) => e.submissions.length === 0).slice(0, 3);
+  // The teacher-built online exams still to take - not the calendar's exam dates (those are the Next exam card and Coming up list). See lib/dashboard/online-exams.ts.
+  const upcomingExams = pendingOnlineExams(exams);
 
   // Learning-path analytics (H11): presentation-only aggregation over data
   // already fetched above - no recomputation of the plan-generation logic
@@ -247,19 +250,7 @@ export async function RealDataSection() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div>
-              <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-400">Upcoming</p>
-              {upcomingExams.length === 0 ? (
-                <p className="text-sm text-gray-400">No pending exams.</p>
-              ) : (
-                upcomingExams.map((e) => (
-                  <Link key={e.id} href={`/exams/${e.id}/attempt`} className="flex items-center justify-between rounded-xl px-2 py-1.5 text-sm hover:bg-gray-50 dark:hover:bg-gray-800">
-                    <span className="text-gray-800 dark:text-gray-100">{e.title}</span>
-                    <span className="text-xs text-gray-400">{e.subject.name}</span>
-                  </Link>
-                ))
-              )}
-            </div>
+            <OnlineExamsList exams={upcomingExams} />
             <div>
               <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-400">Recent results</p>
               {results.length === 0 ? (
