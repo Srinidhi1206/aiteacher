@@ -12,7 +12,7 @@
 //   - Chapters come only from the curriculum tables; nothing is invented. An exam that names no subject or chapters covers the class's subjects in
 //     textbook order, and the notes tell the student to check with their teacher which portion the exam covers.
 //   - With no upcoming exam it falls back to a general plan (weak topics, then chapters in turn, a revision day every fourth day), and says so.
-import { addDays, daysBetween, type ExamItem } from "@/lib/calendar/next-exam";
+import { addDays, daysBetween, examLabel, MAX_EXAM_SPAN_DAYS, type ExamItem } from "@/lib/calendar/next-exam";
 
 export const STUDY_MINUTES = 40;
 export const REVISION_MINUTES = 30;
@@ -89,6 +89,12 @@ export const generalStudyTitle = (chapter: string) => `Study: ${chapter}`;
  * the plan is exam-aware. This title is the task's whole identity (a plan item has no link to a chapter row), so it must stay stable.
  */
 export const reviseChapterTitle = (chapter: string, examLabel?: string) => (examLabel ? `Revise chapter: ${chapter} · for ${examLabel}` : `Revise chapter: ${chapter}`);
+
+/** An exam the plan is built from: one of the school's exams as it is, or several subject papers of one test planned together (see groupSubjectPapers). */
+type PlanExam = ExamItem & {
+  /** For papers planned together: the label each subject's own row had (normalised subject name -> label), so a chapter ticked under that label still counts as done. */
+  paperLabels?: Record<string, string>;
+};
 
 interface Unit {
   subject: string;
@@ -181,7 +187,7 @@ function nameList(names: string[]): string {
   return `${uniq[0]}, ${uniq[1]}, ${uniq[2]} and ${uniq.length - 3} more`;
 }
 
-function planForExam(input: PlanInput, exam: ExamItem, winStart: string, notes: string[], coverage: string[]): { items: PlannedItem[]; unscheduled: number } {
+function planForExam(input: PlanInput, exam: PlanExam, winStart: string, notes: string[], coverage: string[]): { items: PlannedItem[]; unscheduled: number } {
   const cover = (text: string) => {
     notes.push(text);
     coverage.push(text);
@@ -233,14 +239,21 @@ function planForExam(input: PlanInput, exam: ExamItem, winStart: string, notes: 
   // A chapter the student marked done is done, whether the tick was made for THIS exam ("Study: X · for Exam") or in the general plan, before any exam was published ("Study: X").
   // Either way it is not new work for the exam: it keeps its ticked row as the record, is not studied again, and gets a revision task instead. A tick made for ANOTHER exam says nothing
   // about this one. (The plan stores no time of completion, so which of these happened first is not known - only that the student ticked it.)
-  const chapterDone = (name: string) => input.completedTitles.has(studyTitle(name, exam.label)) || input.completedTitles.has(generalStudyTitle(name));
-  const doneStudyTitles = new Set(subjects.flatMap((s) => s.chapters).filter((c) => chapterDone(c.name)).map((c) => studyTitle(c.name, exam.label)));
+  // Papers planned together were planned (and may have been ticked) under each subject's own label first, so those ticks count too - for that subject's chapters only.
+  const labelsFor = (s: PlanSubject) => {
+    const own = exam.paperLabels?.[norm(s.name)];
+    return own && own !== exam.label ? [exam.label, own] : [exam.label];
+  };
+  const studyDone = (s: PlanSubject, chapter: string) => labelsFor(s).some((l) => input.completedTitles.has(studyTitle(chapter, l)));
+  const reviseDone = (s: PlanSubject, chapter: string) => labelsFor(s).some((l) => input.completedTitles.has(reviseChapterTitle(chapter, l)));
+  const chapterDone = (s: PlanSubject, chapter: string) => studyDone(s, chapter) || input.completedTitles.has(generalStudyTitle(chapter));
+  const doneStudyTitles = new Set(subjects.flatMap((s) => s.chapters.filter((c) => chapterDone(s, c.name)).map((c) => studyTitle(c.name, exam.label))));
   const todo = [...units, ...interleave(perSubject)].filter((u) => !input.completedTitles.has(u.title) && !doneStudyTitles.has(u.title));
   // Chapters the student has marked done get ONE later revision task each for this exam - unless that revision is itself done.
   // Textbook order, subject by subject. Revision here is the student's own marking: it says nothing about mastery.
   const revisionUnits: Unit[] = subjects
     .flatMap((s) => (s.chapters.length === 0 ? [] : scopedChapters(s, scopeById.get(s.id) ?? null).chapters.map((c) => ({ s, c }))))
-    .filter(({ c }) => chapterDone(c.name) && !input.completedTitles.has(reviseChapterTitle(c.name, exam.label)))
+    .filter(({ s, c }) => chapterDone(s, c.name) && !reviseDone(s, c.name))
     .map(({ s, c }) => ({ subject: s.name, title: reviseChapterTitle(c.name, exam.label), priority: (weakChapters.has(`${s.id}|${norm(c.name)}`) ? "HIGH" : "MEDIUM") as PlanPriority }));
 
   const revDays = revisionDaysFor(available);
@@ -413,6 +426,9 @@ export function planStaleReason(existingFutureTitles: string[], hasPlan: boolean
   const have = examLabelsIn(existingFutureTitles);
   const wanted = examLabelsIn(result.items.map((i) => i.title));
   const missing = [...wanted].filter((l) => !have.has(l));
+  // A plan made when the papers of one test were planned one by one holds tasks "for Unit Test 2 - Mathematics"; they are now planned together as "Unit Test 2".
+  const split = missing.filter((l) => [...have].some((h) => h !== l && norm(h).startsWith(`${norm(l)} `)));
+  if (split.length > 0) return `it plans the papers of ${nameList(split)} one at a time; they are now planned together as one exam.`;
   if (missing.length > 0) return `it does not include ${nameList(missing)} yet.`;
   const gone = [...have].filter((l) => !wanted.has(l));
   if (gone.length > 0) return `it still plans for ${nameList(gone)}, which is no longer an upcoming published exam.`;
@@ -440,10 +456,79 @@ export function planStaleReason(existingFutureTitles: string[], hasPlan: boolean
 
 export const staleMessage = (reason: string) => `Your study plan is out of date: ${reason} Press "Generate my learning path" to update it - completed and past tasks are kept.`;
 
+/** Most days between one paper's last day and the next paper's first day for them still to be one sitting (a date sheet with a Sunday or a day off in it). */
+export const MAX_SERIES_GAP_DAYS = 7;
+
+/**
+ * A school's date sheet is published as one calendar row per subject ("Unit Test 2 - Mathematics" on 26 Oct, "Unit Test 2 - Physical Science" on 27 Oct, ...), and the older exam schedules
+ * hold one row per subject paper too. Planned one by one, each exam's preparation starts only after the one before it was written, so every paper but the first finds "no days left".
+ * The papers of one test are therefore planned together, as ONE exam: the title without the subject, from the first paper's day to the last, carrying the papers.
+ *
+ * Only rows that are plainly the same test for different subjects of the class are joined: the rest of the title is the same, each names exactly one class subject (a calendar title that
+ * names it, or a schedule row's one paper), no subject appears twice, each paper starts within MAX_SERIES_GAP_DAYS of the previous one, and all lie within one exam span. Anything else - a
+ * single paper, an exam that names no subject or several, a repeated subject, another test, papers far apart - is returned exactly as it was. Each paper keeps the chapter scope it had.
+ */
+export function groupSubjectPapers(exams: ExamItem[], subjects: PlanSubject[]): PlanExam[] {
+  type Paper = { stem: string; subject: string; scope: string | null };
+  const names = subjects.map((s) => s.name).filter((n) => norm(n).length >= 3);
+  const paperOf = (e: ExamItem): Paper | null => {
+    // An exam of the older exam schedules is already one paper: its name is the stem and its paper names the subject.
+    if (e.papers.length === 1) {
+      const subject = names.find((n) => norm(n) === norm(e.papers[0].subjectName));
+      return subject ? { stem: e.label, subject, scope: e.papers[0].chapterScope } : null;
+    }
+    if (e.source !== "calendar" || e.papers.length > 0) return null;
+    const hit = names.filter((n) => ` ${norm(e.title)} `.includes(` ${norm(n)} `));
+    if (hit.length !== 1) return null;
+    const label = examLabel(e.title);
+    const at = label.toLowerCase().indexOf(hit[0].toLowerCase());
+    if (at < 0) return null;
+    const stem = `${label.slice(0, at)} ${label.slice(at + hit[0].length)}`.replace(/\s+/g, " ").replace(/^[\s\-–—:,()]+|[\s\-–—:,()]+$/g, "").trim();
+    return norm(stem).length >= 2 ? { stem, subject: hit[0], scope: null } : null;
+  };
+  const endOf = (e: ExamItem) => e.endDate ?? e.startDate;
+  const sorted = [...exams].sort((a, b) => a.startDate.localeCompare(b.startDate) || a.label.localeCompare(b.label));
+  const joined = new Set<ExamItem>();
+  const out: PlanExam[] = [];
+  for (const e of sorted) {
+    if (joined.has(e)) continue;
+    const first = paperOf(e);
+    const members: { exam: ExamItem; paper: Paper }[] = first ? [{ exam: e, paper: first }] : [];
+    if (first) {
+      const seen = new Set([norm(first.subject)]);
+      let lastEnd = endOf(e);
+      for (const x of sorted) {
+        if (x === e || joined.has(x) || x.startDate < e.startDate) continue;
+        const p = paperOf(x);
+        if (!p || norm(p.stem) !== norm(first.stem) || seen.has(norm(p.subject))) continue;
+        if (daysBetween(lastEnd, x.startDate) > MAX_SERIES_GAP_DAYS || daysBetween(e.startDate, endOf(x)) > MAX_EXAM_SPAN_DAYS) continue;
+        seen.add(norm(p.subject));
+        members.push({ exam: x, paper: p });
+        if (endOf(x) > lastEnd) lastEnd = endOf(x);
+      }
+    }
+    if (members.length < 2) {
+      out.push(e);
+      continue;
+    }
+    members.forEach((m) => joined.add(m.exam));
+    const last = members.reduce((mx, m) => (endOf(m.exam) > mx ? endOf(m.exam) : mx), e.startDate);
+    out.push({
+      ...e,
+      title: first!.stem,
+      label: first!.stem,
+      endDate: last > e.startDate ? last : null,
+      papers: members.map((m) => ({ subjectName: m.paper.subject, chapterScope: m.paper.scope })),
+      paperLabels: Object.fromEntries(members.map((m) => [norm(m.paper.subject), m.exam.label])),
+    });
+  }
+  return out.sort((a, b) => a.startDate.localeCompare(b.startDate) || a.label.localeCompare(b.label));
+}
+
 export function buildStudyPlan(input: PlanInput): PlanResult {
   const notes: string[] = [];
   const coverage: string[] = [];
-  const upcoming = input.exams.filter((e) => e.startDate > input.today).sort((a, b) => a.startDate.localeCompare(b.startDate) || a.label.localeCompare(b.label));
+  const upcoming = groupSubjectPapers(input.exams.filter((e) => e.startDate > input.today), input.subjects).sort((a, b) => a.startDate.localeCompare(b.startDate) || a.label.localeCompare(b.label));
   const examSummary = upcoming.slice(0, 3).map((e) => ({ label: e.label, startDate: e.startDate, daysLeft: daysBetween(input.today, e.startDate) }));
 
   // Days on which an exam is being written (it started on or before today and has not finished) are not study days: preparation resumes the day after.
