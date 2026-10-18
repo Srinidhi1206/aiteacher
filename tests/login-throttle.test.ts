@@ -2,7 +2,7 @@
 // audit log shared by every "instance" in the test - which is the point: the count does not live in one process's memory. Operations on it can be given delays so that simultaneous
 // requests genuinely interleave (a count sees only the rows that existed when it STARTED, like a database statement). The password check is a scripted stand-in.
 // No real database, network or password is involved. Needs Node's module mocking (--experimental-test-module-mocks, as in `npm run test:storage`).
-import { test, mock, before, after } from "node:test";
+import { test, mock, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
@@ -358,8 +358,15 @@ const attemptLogin = async (password: string, over: { username?: string; xff?: s
   const res = await POST(new NextRequest("https://app.test/api/auth/login", { method: "POST", headers, body: JSON.stringify({ role: "student", username: over.username ?? "asha", password }) }));
   return { status: res.status, body: (await res.json()) as { error?: string }, retryAfter: res.headers.get("retry-after"), cookie: res.headers.get("set-cookie") };
 };
+// The route asks the REAL clock for its 15-minute window (reserveLoginAttempt's default `now`), while the fake audit log stamps every row with `log.now`. Left alone, these tests only passed
+// while the real time happened to be within 15 minutes of that fixed stamp. So each route test pins Date to the log's time (only Date - the interleaving delays still use real timers), and
+// afterEach puts the real clock back whether the test passed or failed.
+const realClockAtLoad = Date.now();
+afterEach(() => mock.timers.reset());
 const routeReset = () => {
   reset();
+  mock.timers.reset();
+  mock.timers.enable({ apis: ["Date"], now: log.now });
   users.calls = 0;
   users.mode = "normal";
   delete process.env.VERCEL;
@@ -465,4 +472,9 @@ test("route: failures recorded by another 'instance' count here, because the cou
   routeReset();
   for (let i = 0; i < 5; i++) await wrong("asha", null);
   assert.equal((await attemptLogin("correct-horse")).status, 429);
+});
+
+test("the pinned clock of the route tests is put back afterwards: Date is the real clock again, and nothing stays mocked", () => {
+  assert.ok(Math.abs(Date.now() - realClockAtLoad) < 5 * 60_000, "Date.now() is still pinned to the fake log's time");
+  assert.ok(new Date().getTime() !== log.now.getTime(), "new Date() is still pinned to the fake log's time");
 });
