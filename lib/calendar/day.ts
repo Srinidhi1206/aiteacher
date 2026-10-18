@@ -34,6 +34,10 @@ export function daysBetween(from: string, to: string): number {
 export function addDays(date: string, n: number): string {
   return utcDateString(new Date(toUtcMs(date) + n * 86_400_000));
 }
+/** The instant an Indian calendar day begins (00:00 IST) - the lower bound for a query on timestamps (submissions, attempts) that belong to that day or later. */
+export function indiaDayStartInstant(date: string): Date {
+  return new Date(toUtcMs(date) - IST_OFFSET_MS);
+}
 /** A date string as the value stored for study-plan items and planner tasks: midnight of that day in the server's local zone. */
 export function dayStart(date: string): Date {
   return new Date(`${date}T00:00:00`);

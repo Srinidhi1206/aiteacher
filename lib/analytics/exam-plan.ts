@@ -82,6 +82,13 @@ export const studyTitle = (chapter: string, examLabel: string) => `Study: ${chap
 export const subjectStudyTitle = (subject: string, examLabel: string) => `Study: ${subject} textbook · for ${examLabel}`;
 export const weakTitle = (topic: string, chapter: string, examLabel: string) => `Review weak topic: ${topic} (${chapter}) · for ${examLabel}`;
 export const reviseTitle = (subject: string, examLabel: string) => `Revise: ${subject} · for ${examLabel}`;
+/** The study task of a chapter in a general plan (no exam published): the title a tick made there is stored under. */
+export const generalStudyTitle = (chapter: string) => `Study: ${chapter}`;
+/**
+ * The revision task for ONE chapter the student has marked done. It is told apart from the subject-level "Revise: <subject>" task by its own prefix, and carries the exam when
+ * the plan is exam-aware. This title is the task's whole identity (a plan item has no link to a chapter row), so it must stay stable.
+ */
+export const reviseChapterTitle = (chapter: string, examLabel?: string) => (examLabel ? `Revise chapter: ${chapter} · for ${examLabel}` : `Revise chapter: ${chapter}`);
 
 interface Unit {
   subject: string;
@@ -223,7 +230,18 @@ function planForExam(input: PlanInput, exam: ExamItem, winStart: string, notes: 
     if (!understood) cover(`${exam.label}: the chapter list "${scope}" could not be matched to your ${s.name} chapters, so all of them are planned.`);
     return chapters.map((c) => ({ subject: s.name, title: studyTitle(c.name, exam.label), priority: (weakChapters.has(`${s.id}|${norm(c.name)}`) ? "HIGH" : "MEDIUM") as PlanPriority }));
   });
-  const todo = [...units, ...interleave(perSubject)].filter((u) => !input.completedTitles.has(u.title));
+  // A chapter the student marked done is done, whether the tick was made for THIS exam ("Study: X · for Exam") or in the general plan, before any exam was published ("Study: X").
+  // Either way it is not new work for the exam: it keeps its ticked row as the record, is not studied again, and gets a revision task instead. A tick made for ANOTHER exam says nothing
+  // about this one. (The plan stores no time of completion, so which of these happened first is not known - only that the student ticked it.)
+  const chapterDone = (name: string) => input.completedTitles.has(studyTitle(name, exam.label)) || input.completedTitles.has(generalStudyTitle(name));
+  const doneStudyTitles = new Set(subjects.flatMap((s) => s.chapters).filter((c) => chapterDone(c.name)).map((c) => studyTitle(c.name, exam.label)));
+  const todo = [...units, ...interleave(perSubject)].filter((u) => !input.completedTitles.has(u.title) && !doneStudyTitles.has(u.title));
+  // Chapters the student has marked done get ONE later revision task each for this exam - unless that revision is itself done.
+  // Textbook order, subject by subject. Revision here is the student's own marking: it says nothing about mastery.
+  const revisionUnits: Unit[] = subjects
+    .flatMap((s) => (s.chapters.length === 0 ? [] : scopedChapters(s, scopeById.get(s.id) ?? null).chapters.map((c) => ({ s, c }))))
+    .filter(({ c }) => chapterDone(c.name) && !input.completedTitles.has(reviseChapterTitle(c.name, exam.label)))
+    .map(({ s, c }) => ({ subject: s.name, title: reviseChapterTitle(c.name, exam.label), priority: (weakChapters.has(`${s.id}|${norm(c.name)}`) ? "HIGH" : "MEDIUM") as PlanPriority }));
 
   const revDays = revisionDaysFor(available);
   const studyDayCount = available - revDays;
@@ -254,6 +272,25 @@ function planForExam(input: PlanInput, exam: ExamItem, winStart: string, notes: 
   }
   if (revDays > 0 && r < subjects.length) notes.push(`${exam.label}: there is only time to revise ${r} of your ${subjects.length} subjects.`);
 
+  // Chapter revisions: first the revision days that still have room (earliest first), then the study days nearest the exam (latest first), never above a day's limit and never on
+  // today (a chapter ticked today is revised LATER) - unless today is the only day there is. What does not fit is said, not dropped silently.
+  // Same-day rule: a tick has no time of completion, so the plan cannot know WHEN a chapter was finished. It only knows the chapter is ticked as of the moment the plan is generated, and
+  // plans its revision for a day after that moment - never today, never on or after the exam day. Regenerating the same day again therefore gives the same days again, and nothing is
+  // added: a revision task is identified by its title, and one that is already planned (or done) is not planned twice.
+  if (revisionUnits.length > 0) {
+    const load = (date: string) => (input.takenByDate[date] ?? 0) + placed.filter((p) => p.date === date).length;
+    const eligible = (date: string) => date > input.today || available <= 1;
+    const slots = [...days(revStart, revDays).map((date) => ({ date, cap: MAX_REVISION_TASKS_PER_DAY })), ...days(0, studyDayCount).reverse().map((date) => ({ date, cap: MAX_TASKS_PER_DAY }))].filter((s) => eligible(s.date));
+    const queue = [...revisionUnits];
+    for (const slot of slots) {
+      for (let free = slot.cap - load(slot.date); free > 0 && queue.length > 0; free--) {
+        placed.push({ date: slot.date, unit: queue.shift() as Unit, kind: "REVISION", minutes: REVISION_MINUTES });
+      }
+      if (queue.length === 0) break;
+    }
+    if (queue.length > 0) notes.push(`${exam.label}: ${plural(queue.length, "chapter")} you marked done could not get a revision day before it.`);
+  }
+
   return {
     items: placed.map((p) => ({
       date: p.date,
@@ -267,7 +304,7 @@ function planForExam(input: PlanInput, exam: ExamItem, winStart: string, notes: 
   };
 }
 
-function generalPlan(input: PlanInput, blockedUntil: string | null): PlannedItem[] {
+function generalPlan(input: PlanInput, blockedUntil: string | null, notes: string[]): PlannedItem[] {
   const subjects = orderSubjects(input.subjects, input.weak);
   const subjectIds = new Set(subjects.map((s) => s.id));
   const queue: Unit[] = input.weak
@@ -275,12 +312,17 @@ function generalPlan(input: PlanInput, blockedUntil: string | null): PlannedItem
     .sort((a, b) => a.mastery - b.mastery)
     .map((w) => ({ subject: w.subjectName, title: `Review: ${w.topicName}`, priority: "HIGH" as const }));
   const perSubject = subjects.map((s) =>
-    s.chapters.length === 0 ? [{ subject: s.name, title: `${s.name}: continue current chapter`, priority: "MEDIUM" as PlanPriority }] : s.chapters.map((c) => ({ subject: s.name, title: `Study: ${c.name}`, priority: "MEDIUM" as PlanPriority }))
+    s.chapters.length === 0 ? [{ subject: s.name, title: `${s.name}: continue current chapter`, priority: "MEDIUM" as PlanPriority }] : s.chapters.map((c) => ({ subject: s.name, title: generalStudyTitle(c.name), priority: "MEDIUM" as PlanPriority }))
   );
   queue.push(...interleave(perSubject));
   // No subjects and no weak topics: there is nothing real to plan, so no revision days are made up either.
   if (queue.length === 0) return [];
   const todo = queue.filter((u) => !input.completedTitles.has(u.title));
+  // Chapters the student has marked done (and not yet revised) take the revision days, up to a revision day's limit; the rest wait for the next time the plan is generated.
+  const revisionQueue: Unit[] = subjects
+    .flatMap((s) => s.chapters.map((c) => ({ s, c })))
+    .filter(({ c }) => input.completedTitles.has(generalStudyTitle(c.name)) && !input.completedTitles.has(reviseChapterTitle(c.name)))
+    .map(({ s, c }) => ({ subject: s.name, title: reviseChapterTitle(c.name), priority: "MEDIUM" as PlanPriority }));
 
   const items: PlannedItem[] = [];
   let at = 0;
@@ -290,6 +332,13 @@ function generalPlan(input: PlanInput, blockedUntil: string | null): PlannedItem
     if ((input.takenByDate[date] ?? 0) >= MAX_TASKS_PER_DAY) continue;
     if (day % 4 === 0) {
       const mock = day % 8 === 0;
+      if (!mock && revisionQueue.length > 0) {
+        for (let free = MAX_REVISION_TASKS_PER_DAY - (input.takenByDate[date] ?? 0); free > 0 && revisionQueue.length > 0; free--) {
+          const u = revisionQueue.shift() as Unit;
+          items.push({ date, kind: "REVISION", subject: u.subject, title: u.title, durationMinutes: REVISION_MINUTES, priority: u.priority });
+        }
+        continue;
+      }
       items.push({ date, kind: mock ? "MOCK_TEST" : "REVISION", subject: "All subjects", title: mock ? "Mock test - mixed topics" : "Revision - recap this week's topics", durationMinutes: REVISION_MINUTES, priority: "MEDIUM" });
       continue;
     }
@@ -297,6 +346,9 @@ function generalPlan(input: PlanInput, blockedUntil: string | null): PlannedItem
     const u = todo[at % todo.length];
     at++;
     items.push({ date, kind: "TOPIC", subject: u.subject, title: u.title, durationMinutes: STUDY_MINUTES, priority: u.priority });
+  }
+  if (revisionQueue.length > 0) {
+    notes.push(`${plural(revisionQueue.length, "chapter")} you marked done ${revisionQueue.length === 1 ? "is" : "are"} waiting for a revision day; ${revisionQueue.length === 1 ? "it is" : "they are"} planned the next time you generate your plan.`);
   }
   return items;
 }
@@ -317,7 +369,7 @@ export interface KnownCurriculum {
   subjects: Iterable<string>;
 }
 
-const STUDY_TASK = /^Study: (.+?)(?: · for .+)?$/;
+const STUDY_TASK = /^(?:Study|Revise chapter): (.+?)(?: · for .+)?$/;
 
 /** Labels of the exams (as the plan now sees them) that have unfinished tasks "for" them dated on or after the exam's first day. Dates are "yyyy-mm-dd". */
 export function examsWithLateTasks(tasks: { title: string; date: string }[], exams: { label: string; startDate: string }[]): string[] {
@@ -374,8 +426,11 @@ export function planStaleReason(existingFutureTitles: string[], hasPlan: boolean
   // A plan made long before an exam only wrote its first days; the revision days at the very end were beyond what it could write then. Once those days are within reach, a fresh plan
   // has revision tasks "for" the exam that this plan lacks - the student would otherwise reach the exam with no revision planned, and nothing would say so.
   const haveTitles = new Set(existingFutureTitles);
-  const needRevision = [...new Set(result.items.filter((i) => i.kind === "REVISION" && /^Revise: /.test(i.title) && !haveTitles.has(i.title)).map((i) => EXAM_SUFFIX.exec(i.title)?.[1]).filter((x): x is string => Boolean(x)))];
+  const missingRevision = result.items.filter((i) => i.kind === "REVISION" && /^Revise( chapter)?: /.test(i.title) && !haveTitles.has(i.title));
+  const needRevision = [...new Set(missingRevision.filter((i) => /^Revise: /.test(i.title)).map((i) => EXAM_SUFFIX.exec(i.title)?.[1]).filter((x): x is string => Boolean(x)))];
   if (needRevision.length > 0) return `it does not include the revision days for ${nameList(needRevision)} yet.`;
+  // Chapters the student has marked done get their own revision task; a plan made before they were ticked does not have it yet.
+  if (missingRevision.some((i) => /^Revise chapter: /.test(i.title))) return "it does not include revision for the chapters you have marked done yet.";
   if (existingFutureTitles.some((t) => /: continue current chapter$/.test(t)) && result.items.some((i) => /^Study: /.test(i.title))) {
     return "it was made before chapter-level planning, so it still has general placeholder tasks.";
   }
@@ -403,7 +458,7 @@ export function buildStudyPlan(input: PlanInput): PlanResult {
   let mode: PlanResult["mode"];
   if (upcoming.length === 0) {
     mode = "general";
-    items = generalPlan(input, blockedUntil);
+    items = generalPlan(input, blockedUntil, notes);
     const chapterless = input.subjects.filter((s) => s.chapters.length === 0).map((s) => s.name);
     if (chapterless.length > 0) {
       const text = `No chapter list is set up yet for ${nameList(chapterless)}, so ${chapterless.length === 1 ? "it appears" : "each appears"} as one general task.`;

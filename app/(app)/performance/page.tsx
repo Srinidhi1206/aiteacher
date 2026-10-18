@@ -194,7 +194,7 @@ export default async function PerformancePage() {
         <Card>
           <CardHeader>
             <CardTitle>Activity Heatmap</CardTitle>
-            <CardDescription className="hidden sm:block">12 weeks of exam submissions, worksheet submissions, and completed planner tasks</CardDescription>
+            <CardDescription>12 weeks of exams submitted, assignments handed in, practice sessions finished and planner tasks completed. Study Plan ticks are not counted.</CardDescription>
           </CardHeader>
           <CardContent>
             <Heatmap data={heatmap.days} />

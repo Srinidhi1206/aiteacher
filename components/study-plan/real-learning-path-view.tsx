@@ -16,6 +16,7 @@ import { completeLearningPathItem, getMyLearningPath, getMyWeakAreas } from "@/l
 import { cn } from "@/lib/utils";
 import { todayInIndia } from "@/lib/calendar/day";
 import { formatDayKey, planProgress, taskState } from "@/lib/study-plan/item-status";
+import { TICK_HELPER_TEXT, markedDoneCount, tickLabel } from "@/lib/study-plan/wording";
 
 type LearningPath = Awaited<ReturnType<typeof getMyLearningPath>>;
 type WeakAreas = Awaited<ReturnType<typeof getMyWeakAreas>>;
@@ -88,12 +89,11 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
       </CardHeader>
       <CardContent className="space-y-4">
         <PlanNotes notes={planNotes} />
+        <p className="text-xs text-gray-500 dark:text-gray-400">{TICK_HELPER_TEXT}</p>
         {saveError && (<p role="alert" className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-400">{saveError}</p>)}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-          <span className="font-semibold text-gray-700 dark:text-gray-200">{completionPct}% complete</span>
-          <span>
-            {completed}/{items.length} items done
-          </span>
+          <span className="font-semibold text-gray-700 dark:text-gray-200">{completionPct}% marked done</span>
+          <span>{markedDoneCount(completed, items.length)}</span>
           {progress.missed > 0 && <span className="font-medium text-warning-700 dark:text-warning-400">{progress.missed} missed</span>}
           {weakAreas.length > 0 && (
             <span>
@@ -140,7 +140,8 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
                         <button
                           onClick={() => toggleItem(item.id, !item.completed)}
                           disabled={pendingId === item.id}
-                          aria-label={item.completed ? "Mark incomplete" : "Mark complete"}
+                          aria-label={tickLabel(item.completed, item.title)}
+                          title={tickLabel(item.completed, item.title)}
                           className={cn(
                             "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border transition-colors",
                             item.completed

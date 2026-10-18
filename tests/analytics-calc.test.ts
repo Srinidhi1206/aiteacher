@@ -3,6 +3,7 @@
 // against an in-memory database; no real database or network is involved. Needs Node's module mocking (--experimental-test-module-mocks, as in `npm run test:storage`).
 import { test, mock, before } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 const here = (p: string) => new URL(`../${p}`, import.meta.url).href;
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -361,33 +362,213 @@ test("a student can tick only their OWN plan tasks: someone else's task, or one 
   assert.equal(D.planItems[0].completed, false, "and it can be un-ticked");
 });
 
-// ---- the activity heatmap ---------------------------------------------------------------------------------------------------------------------------------------------------
-
-test("the heatmap counts submitted exams, handed-in assignments, completed planner tasks AND finished practice sessions, day by day, capped at 4, with real zeros between", async () => {
+// ---- the activity heatmap: Indian calendar days -------------------------------------------------------------------------------------------------------------------------------
+// The clock is fixed (18 Oct 2026, 13:34 IST = 08:04 UTC) so nothing here depends on when the tests run, and the suite is run with the server in several zones.
+import { dayStart, todayWindow } from "@/lib/calendar/day";
+const NOW_ISO = "2026-10-18T08:04:00Z";
+function withClock<T>(run: () => Promise<T>): Promise<T> {
+  mock.timers.enable({ apis: ["Date"], now: new Date(NOW_ISO) });
+  return run().finally(() => mock.timers.reset());
+}
+const heatmapReset = () => {
   reset();
   D.worksheetSubs.length = 0;
   D.plannerTasks.length = 0;
-  const now = new Date();
-  const daysAgo = (n: number) => new Date(now.getTime() - n * 86_400_000);
-  D.submissions.push({ id: "e1", studentId: "A", status: "SUBMITTED", submittedAt: daysAgo(1) });
-  D.worksheetSubs.push({ studentId: "A", submittedAt: daysAgo(1) });
-  D.plannerTasks.push({ studentId: "A", status: "COMPLETED", date: daysAgo(1) });
-  practice("A", "t1", true, daysAgo(1).toISOString()); // a practice session yesterday
-  for (let i = 0; i < 6; i++) practice("A", "t1", true, daysAgo(3).toISOString()); // six sessions three days ago: capped at 4
-  practice("B", "t1", true, daysAgo(2).toISOString()); // someone else's
-  const { days, hasAnyActivity } = await actions.getMyActivityHeatmap();
-  assert.equal(days.length, 84);
-  assert.equal(hasAnyActivity, true);
-  const nonZero = days.filter((d) => d.count > 0).map((d) => d.count);
-  assert.deepEqual(nonZero.sort(), [4, 4], "yesterday: exam + assignment + task + practice = 4; three days ago: six sessions capped at 4");
-  assert.ok(days.filter((d) => d.count === 0).length >= 80, "the other days are honest zeros - and B's session is not here");
+};
+const lit = (days: { date: string; count: number }[]) => Object.fromEntries(days.filter((d) => d.count > 0).map((d) => [d.date, d.count]));
+const attempt = (studentId: string, iso: string) => practice(studentId, "t1", true, iso);
+
+test("a practice session submitted at 13:34 IST on 18 Oct lights 18 Oct, and the page is not empty", async () => {
+  heatmapReset();
+  attempt("A", NOW_ISO);
+  const r = await withClock(() => actions.getMyActivityHeatmap());
+  assert.deepEqual(lit(r.days), { "2026-10-18": 1 });
+  assert.equal(r.hasAnyActivity, true);
 });
 
-test("a student with no activity gets an empty heatmap and says so, not made-up days", async () => {
-  reset();
-  D.worksheetSubs.length = 0;
-  D.plannerTasks.length = 0;
-  const { days, hasAnyActivity } = await actions.getMyActivityHeatmap();
-  assert.equal(hasAnyActivity, false);
-  assert.ok(days.every((d) => d.count === 0));
+test("the day changes at midnight INDIA time, not UTC: 23:59:59 IST on the 17th is the 17th, 00:00:00 IST on the 18th is the 18th", async () => {
+  heatmapReset();
+  attempt("A", "2026-10-17T18:29:59Z");
+  attempt("A", "2026-10-17T18:30:00Z");
+  attempt("A", "2026-10-17T21:30:00Z"); // 03:00 IST on the 18th - on a UTC server this used to land on the 17th
+  const r = await withClock(() => actions.getMyActivityHeatmap());
+  assert.deepEqual(lit(r.days), { "2026-10-17": 1, "2026-10-18": 2 });
+});
+
+test("exams and assignments are placed by the Indian day they were handed in, too", async () => {
+  heatmapReset();
+  D.submissions.push({ id: "e1", studentId: "A", status: "SUBMITTED", submittedAt: new Date("2026-10-17T21:30:00Z") });
+  D.worksheetSubs.push({ studentId: "A", submittedAt: new Date("2026-10-17T18:29:59Z") });
+  const r = await withClock(() => actions.getMyActivityHeatmap());
+  assert.deepEqual(lit(r.days), { "2026-10-17": 1, "2026-10-18": 1 });
+});
+
+// ---- planner tasks: the dashboard's day, in every server zone ---------------------------------------------------------------------------------------------------------------------
+// A planner task is stored as the start of its day in the SERVER's zone (lib/calendar/day.ts), and the dashboard's "Today's Planner" (todayWindow) finds today's tasks by the window
+// [start of the Indian date, start of the next] in that same zone. The heatmap must put a task on exactly the day the dashboard would show it on, so it reads the stored date the same
+// way - NOT as an Indian wall-clock time, which would disagree with the dashboard for any task not stored as a day start. The zone is switched inside each test, so the answer is shown
+// to be the same wherever the server runs (the whole suite is also run with TZ set to each of these).
+const ZONES = ["UTC", "Asia/Kolkata", "PST8PDT", "EST5EDT"];
+async function inZone<T>(tz: string, run: () => Promise<T>): Promise<T> {
+  const before = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return await run();
+  } finally {
+    if (before === undefined) delete process.env.TZ;
+    else process.env.TZ = before;
+  }
+}
+const planned = (date: Date, status = "COMPLETED", studentId = "A") => ({ studentId, status, date });
+const heat = () => withClock(() => actions.getMyActivityHeatmap());
+/** The Indian date whose dashboard "today" window (todayWindow) contains this moment, as the server in its current zone sees it. */
+const dashboardDay = (moment: Date): string | null => {
+  for (const d of ["2026-07-26", "2026-07-27", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19"]) {
+    const w = todayWindow(new Date(`${d}T06:30:00Z`)); // noon IST on that date
+    if (w.today === d && w.start.getTime() <= moment.getTime() && moment.getTime() < w.end.getTime()) return d;
+  }
+  return null;
+};
+
+test("a planner task stored as the start of its day lands on that day in every server zone, and only COMPLETED ones count", async () => {
+  for (const tz of ZONES) {
+    await inZone(tz, async () => {
+      heatmapReset();
+      D.plannerTasks.push(planned(dayStart("2026-10-17")), planned(dayStart("2026-10-18")), planned(dayStart("2026-10-16"), "TODO"), planned(dayStart("2026-10-15"), "SKIPPED"));
+      const r = await heat();
+      assert.deepEqual(lit(r.days), { "2026-10-17": 1, "2026-10-18": 1 }, tz);
+    });
+  }
+});
+
+test("a planner task between 00:00 and 05:30 IST is on the day the dashboard shows it on, in every server zone - and that day is pinned, zone by zone", async () => {
+  // 02:00 IST on 18 Oct is 20:30Z on the 17th: a server in UTC or the Americas holds it on its 17th, one in Kolkata on the 18th - the dashboard and the heatmap say the same thing either way.
+  const expected: Record<string, string> = { UTC: "2026-10-17", "Asia/Kolkata": "2026-10-18", PST8PDT: "2026-10-17", EST5EDT: "2026-10-17" };
+  const moments = ["2026-10-17T18:30:00Z", "2026-10-17T20:30:00Z", "2026-10-17T23:59:59Z", "2026-10-18T00:00:00Z", "2026-10-18T08:00:00Z"];
+  for (const tz of ZONES) {
+    for (const iso of moments) {
+      await inZone(tz, async () => {
+        heatmapReset();
+        D.plannerTasks.push(planned(new Date(iso)));
+        const lights = Object.keys(lit((await heat()).days));
+        assert.equal(lights.length, 1, `${tz} ${iso}`);
+        assert.equal(lights[0], dashboardDay(new Date(iso)), `${tz} ${iso}: the heatmap day is the dashboard's day`);
+      });
+    }
+    await inZone(tz, async () => {
+      heatmapReset();
+      D.plannerTasks.push(planned(new Date("2026-10-17T20:30:00Z")));
+      assert.deepEqual(Object.keys(lit((await heat()).days)), [expected[tz]], `${tz}: a task at 02:00 IST on the 18th`);
+    });
+  }
+});
+
+test("the day a task is stored as (the start of its day) is the day the dashboard shows it on, in every zone: no task is shifted by the server's zone", async () => {
+  for (const tz of ZONES) {
+    await inZone(tz, async () => {
+      for (const d of ["2026-10-16", "2026-10-17", "2026-10-18"]) {
+        heatmapReset();
+        D.plannerTasks.push(planned(dayStart(d)));
+        assert.equal(dashboardDay(dayStart(d)), d, `${tz} ${d}: the dashboard`);
+        assert.deepEqual(lit((await heat()).days), { [d]: 1 }, `${tz} ${d}: the heatmap`);
+      }
+    });
+  }
+});
+
+test("the window's lower bound and the day placement agree at the first day's midnight: nothing missed, nothing counted twice, in every server zone", async () => {
+  for (const tz of ZONES) {
+    await inZone(tz, async () => {
+      heatmapReset();
+      const firstStart = dayStart("2026-07-27");
+      D.plannerTasks.push(
+        planned(firstStart), //                                    the first day, stored as a day start
+        planned(new Date(firstStart.getTime() + 1)), //            a moment into it
+        planned(new Date(firstStart.getTime() - 1)), //            the last moment of the day before: outside
+        planned(dayStart("2026-07-26")) //                         the day before the window
+      );
+      assert.deepEqual(lit((await heat()).days), { "2026-07-27": 2 }, tz);
+      heatmapReset();
+      const today = dayStart("2026-10-18");
+      D.plannerTasks.push(planned(new Date(today.getTime() - 1)), planned(today));
+      const r = await heat();
+      assert.deepEqual(lit(r.days), { "2026-10-17": 1, "2026-10-18": 1 }, tz);
+      assert.equal(r.days.reduce((a, d) => a + d.count, 0), 2, "two tasks, two counts");
+    });
+  }
+});
+
+test("another student's planner task is never counted, whatever its time or the server's zone", async () => {
+  for (const tz of ZONES) {
+    await inZone(tz, async () => {
+      heatmapReset();
+      D.plannerTasks.push(planned(new Date("2026-10-17T20:30:00Z"), "COMPLETED", "B"), planned(dayStart("2026-10-18"), "COMPLETED", "B"));
+      const r = await heat();
+      assert.equal(r.hasAnyActivity, false, tz);
+    });
+  }
+});
+
+test("the window is exactly 84 Indian days ending today: 27 Jul to 18 Oct, consecutive, one cell per day", async () => {
+  heatmapReset();
+  const r = await withClock(() => actions.getMyActivityHeatmap());
+  assert.equal(r.days.length, 84);
+  assert.equal(r.days[0].date, "2026-07-27");
+  assert.equal(r.days[83].date, "2026-10-18");
+  const keys = r.days.map((d) => d.date);
+  assert.equal(new Set(keys).size, 84, "no day twice (daylight saving cannot repeat or skip one)");
+  for (let i = 1; i < keys.length; i++) assert.equal((Date.parse(keys[i]) - Date.parse(keys[i - 1])) / 86_400_000, 1, `${keys[i - 1]} -> ${keys[i]}`);
+});
+
+test("the first moment of the window is 00:00 IST on 27 Jul: a session 1 second earlier is outside, at that moment it is the first cell", async () => {
+  heatmapReset();
+  attempt("A", "2026-07-26T18:29:59Z");
+  attempt("A", "2026-07-26T18:30:00Z");
+  const r = await withClock(() => actions.getMyActivityHeatmap());
+  assert.deepEqual(lit(r.days), { "2026-07-27": 1 });
+});
+
+test("a session from 100 days ago is outside the window, and with nothing else the page is honestly empty", async () => {
+  heatmapReset();
+  attempt("A", "2026-07-10T08:00:00Z");
+  const r = await withClock(() => actions.getMyActivityHeatmap());
+  assert.deepEqual(lit(r.days), {});
+  assert.equal(r.hasAnyActivity, false);
+});
+
+test("a day's intensity is capped at 4 however many things happened, and the four kinds of activity add up", async () => {
+  heatmapReset();
+  for (let i = 0; i < 6; i++) attempt("A", NOW_ISO);
+  const first = await withClock(() => actions.getMyActivityHeatmap());
+  assert.deepEqual(lit(first.days), { "2026-10-18": 4 });
+  heatmapReset();
+  attempt("A", NOW_ISO);
+  D.submissions.push({ id: "e1", studentId: "A", status: "SUBMITTED", submittedAt: new Date(NOW_ISO) });
+  D.worksheetSubs.push({ studentId: "A", submittedAt: new Date(NOW_ISO) });
+  D.plannerTasks.push({ studentId: "A", status: "COMPLETED", date: dayStart("2026-10-18") });
+  const mixed = await withClock(() => actions.getMyActivityHeatmap());
+  assert.deepEqual(lit(mixed.days), { "2026-10-18": 4 });
+});
+
+test("only the signed-in student's own activity counts: another student's attempt, exam, assignment and planner task never light a cell", async () => {
+  heatmapReset();
+  attempt("B", NOW_ISO);
+  D.submissions.push({ id: "e2", studentId: "B", status: "SUBMITTED", submittedAt: new Date(NOW_ISO) });
+  D.worksheetSubs.push({ studentId: "B", submittedAt: new Date(NOW_ISO) });
+  D.plannerTasks.push({ studentId: "B", status: "COMPLETED", date: dayStart("2026-10-18") });
+  const r = await withClock(() => actions.getMyActivityHeatmap());
+  assert.deepEqual(lit(r.days), {});
+  assert.equal(r.hasAnyActivity, false);
+});
+
+test("a practice session that was started but never submitted leaves no attempt row, so it lights nothing", async () => {
+  heatmapReset();
+  const r = await withClock(() => actions.getMyActivityHeatmap());
+  assert.equal(r.hasAnyActivity, false);
+});
+
+test("the Performance card describes what is counted - including practice - and says Study Plan ticks are not", () => {
+  const page = fs.readFileSync(new URL("../app/(app)/performance/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /exams submitted, assignments handed in, practice sessions finished and planner tasks completed\. Study Plan ticks are not counted\./);
+  assert.ok(!/hidden sm:block">12 weeks/.test(page), "the description is no longer hidden on phones");
 });

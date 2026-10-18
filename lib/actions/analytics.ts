@@ -8,7 +8,7 @@ import { getSubjectProgressForStudent, getTopicProgressForStudent } from "@/lib/
 import { getWeakAreasForStudent } from "@/lib/analytics/weakness";
 import { getStrengthsForStudent } from "@/lib/analytics/strengths";
 import { generateLearningPath, getLearningPathForStudent, previewPlanAdvice, setLearningPathItemCompleted } from "@/lib/analytics/learning-path";
-import { localDateString } from "@/lib/calendar/day";
+import { addDays, dayStart, indiaDayStartInstant, localDateString, todayInIndia } from "@/lib/calendar/day";
 import type { ActionResult } from "./materials";
 
 async function requireOwnStudentId(): Promise<string> {
@@ -184,80 +184,69 @@ export async function getMyBloomPerformance(): Promise<BloomLevelPerformance[]> 
 }
 
 export interface HeatmapDayData {
-  date: string; // yyyy-mm-dd, server-local calendar day (see docs/STEP_3_5.md date-convention note)
+  date: string; // yyyy-mm-dd, the Indian calendar day (lib/calendar/day.ts)
   count: number; // 0-4, capped intensity - real event count that day, not fabricated
 }
 
 const HEATMAP_WINDOW_DAYS = 84; // 12 weeks, matching the existing mock Heatmap's stated range
 const MAX_HEATMAP_INTENSITY = 4;
 
-function localDayKey(d: Date): number {
-  const day = new Date(d);
-  day.setHours(0, 0, 0, 0);
-  return day.getTime();
-}
-
-function localDayLabel(timestamp: number): string {
-  const d = new Date(timestamp);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 /**
- * Real activity heatmap derived from four already-persisted, timestamped
- * signals (submitted exams, handed-in assignments, completed planner tasks, finished practice sessions) - no dedicated activity-log model exists or was added for this
- * (see docs/STEP_3_5.md "Stage H detail" for why that schema change was
- * judged unnecessary). Every day in the window is returned, including
- * zero-activity days - a real 0 is honest data, not fabrication.
+ * Real activity heatmap derived from four already-persisted, timestamped signals (submitted exams, handed-in assignments, completed planner tasks, finished practice sessions) -
+ * no dedicated activity-log model exists or was added for this (see docs/STEP_3_5.md "Stage H detail" for why that schema change was judged unnecessary). Every day in the
+ * window is returned, including zero-activity days - a real 0 is honest data, not fabrication.
+ *
+ * Days are INDIAN calendar days, like everything else the student sees (the plan, the next-exam countdown): the server runs on UTC, where a session submitted at 03:00 IST would
+ * otherwise land on the previous day. A submission or attempt is a moment in time, so it is placed on the Indian day it happened in.
+ *
+ * A planner task is different: it is stored as the start of its day in the server's own zone, and the dashboard's "Today's Planner" (todayWindow) finds a day's tasks by the window
+ * from the start of that Indian date to the start of the next, in that same zone. The heatmap reads the stored date the same way (the server-local date of the stored value), so a task
+ * is counted on exactly the day the dashboard shows it on, in any server zone. Reading it as an Indian wall-clock time instead would disagree with the dashboard for any task not
+ * stored as a day start. Study-plan ticks are not counted: the plan stores no time of completion.
  */
 export async function getMyActivityHeatmap(): Promise<{ days: HeatmapDayData[]; hasAnyActivity: boolean }> {
   const studentId = await requireOwnStudentId();
 
-  const windowStart = new Date();
-  windowStart.setHours(0, 0, 0, 0);
-  windowStart.setDate(windowStart.getDate() - (HEATMAP_WINDOW_DAYS - 1));
+  const today = todayInIndia();
+  const firstDay = addDays(today, -(HEATMAP_WINDOW_DAYS - 1));
+  const momentsFrom = indiaDayStartInstant(firstDay); // moments (submissions, attempts) from the first day's start in India
+  const plannerFrom = dayStart(firstDay); // planner tasks: from the start of the first day, the same boundary their day is read by below
 
   const [examSubmissions, worksheetSubmissions, completedTasks, practiceAttempts] = await Promise.all([
     prisma.examSubmission.findMany({
-      where: { studentId, submittedAt: { gte: windowStart, not: null } },
+      where: { studentId, submittedAt: { gte: momentsFrom, not: null } },
       select: { submittedAt: true },
     }),
     prisma.worksheetSubmission.findMany({
-      where: { studentId, submittedAt: { gte: windowStart, not: null } },
+      where: { studentId, submittedAt: { gte: momentsFrom, not: null } },
       select: { submittedAt: true },
     }),
     prisma.dailyPlannerTask.findMany({
-      where: { studentId, status: "COMPLETED", date: { gte: windowStart } },
+      where: { studentId, status: "COMPLETED", date: { gte: plannerFrom } },
       select: { date: true },
     }),
     // A finished practice session is activity on the day it was submitted. (Study-plan ticks are NOT counted: the plan stores no time of completion, only the day a task was
     // planned for, so a task ticked late would be credited to the wrong day - that needs a completion time in the schema.)
     prisma.attempt.findMany({
-      where: { studentId, createdAt: { gte: windowStart } },
+      where: { studentId, createdAt: { gte: momentsFrom } },
       select: { createdAt: true },
     }),
   ]);
 
-  const counts = new Map<number, number>();
-  const bump = (d: Date | null) => {
-    if (!d) return;
-    const key = localDayKey(d);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  };
-  examSubmissions.forEach((s) => bump(s.submittedAt));
-  worksheetSubmissions.forEach((s) => bump(s.submittedAt));
-  completedTasks.forEach((t) => bump(t.date));
-  practiceAttempts.forEach((a) => bump(a.createdAt));
+  const counts = new Map<string, number>();
+  const bump = (day: string) => counts.set(day, (counts.get(day) ?? 0) + 1);
+  examSubmissions.forEach((s) => s.submittedAt && bump(todayInIndia(s.submittedAt)));
+  worksheetSubmissions.forEach((s) => s.submittedAt && bump(todayInIndia(s.submittedAt)));
+  completedTasks.forEach((t) => bump(localDateString(t.date)));
+  practiceAttempts.forEach((a) => bump(todayInIndia(a.createdAt)));
 
   const days: HeatmapDayData[] = [];
   let hasAnyActivity = false;
   for (let i = 0; i < HEATMAP_WINDOW_DAYS; i++) {
-    const key = windowStart.getTime() + i * 86_400_000;
-    const count = Math.min(MAX_HEATMAP_INTENSITY, counts.get(key) ?? 0);
+    const date = addDays(firstDay, i);
+    const count = Math.min(MAX_HEATMAP_INTENSITY, counts.get(date) ?? 0);
     if (count > 0) hasAnyActivity = true;
-    days.push({ date: localDayLabel(key), count });
+    days.push({ date, count });
   }
 
   return { days, hasAnyActivity };

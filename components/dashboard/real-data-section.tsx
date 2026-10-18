@@ -24,6 +24,7 @@ import { RealPlannerTaskRow } from "./real-planner-task";
 import { GenerateLearningPathButton } from "./generate-learning-path-button";
 import { todayInIndia } from "@/lib/calendar/day";
 import { nextUpTask, planProgress } from "@/lib/study-plan/item-status";
+import { MARKED_DONE_BADGE, markedDoneCount } from "@/lib/study-plan/wording";
 
 async function loadData() {
   const [overview, plannerStats, weakAreas, strengths, learningPath, exams, results] = await Promise.all([
@@ -197,8 +198,8 @@ export async function RealDataSection() {
             ) : (
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-                  <span className="font-semibold text-gray-700 dark:text-gray-200">{pathCompletionPct}% complete</span>
-                  <span>{pathCompleted}/{pathItems.length} items done</span>
+                  <span className="font-semibold text-gray-700 dark:text-gray-200">{pathCompletionPct}% marked done</span>
+                  <span>{markedDoneCount(pathCompleted, pathItems.length)}</span>
                   <span>{pathProgress.ahead} to do</span>
                   {pathProgress.missed > 0 && <span className="font-medium text-warning-700 dark:text-warning-400">{pathProgress.missed} missed</span>}
                   {weakAreas.length > 0 && (
@@ -228,7 +229,7 @@ export async function RealDataSection() {
                       >
                         <Sparkles className="h-3 w-3" /> Ask Tutor
                       </Link>
-                      <Badge variant={item.completed ? "success" : "outline"}>{item.completed ? "Done" : item.kind}</Badge>
+                      <Badge variant={item.completed ? "success" : "outline"}>{item.completed ? MARKED_DONE_BADGE : item.kind}</Badge>
                     </div>
                   </div>
                 ))}
