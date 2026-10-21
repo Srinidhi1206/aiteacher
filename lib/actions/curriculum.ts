@@ -62,8 +62,8 @@ export async function listClassSubjectLinks(schoolClassId: string) {
 export async function listChaptersForSubject(subjectId: string) {
   return prisma.chapter.findMany({
     where: { subjectId },
-    orderBy: { order: "asc" },
-    include: { topics: { orderBy: { order: "asc" } } },
+    orderBy: [{ order: "asc" }, { id: "asc" }],
+    include: { topics: { orderBy: [{ order: "asc" }, { id: "asc" }] } },
   });
 }
 

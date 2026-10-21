@@ -5,17 +5,20 @@
 // nothing.
 import { RealLearningPathView } from "@/components/study-plan/real-learning-path-view";
 import type { getMyLearningPath, getMyWeakAreas } from "@/lib/actions/analytics";
+import type { LinkSubject } from "@/lib/study-plan/task-links";
 
 export function StudyPlanTabs({
   learningPath,
   weakAreas,
   planNotes = [],
   subjectLinks = {},
+  curriculum = [],
 }: {
   learningPath: Awaited<ReturnType<typeof getMyLearningPath>> | null;
   weakAreas: Awaited<ReturnType<typeof getMyWeakAreas>>;
   planNotes?: string[];
   subjectLinks?: Record<string, string>;
+  curriculum?: LinkSubject[];
 }) {
-  return <RealLearningPathView learningPath={learningPath} weakAreas={weakAreas} planNotes={planNotes} subjectLinks={subjectLinks} />;
+  return <RealLearningPathView learningPath={learningPath} weakAreas={weakAreas} planNotes={planNotes} subjectLinks={subjectLinks} curriculum={curriculum} />;
 }

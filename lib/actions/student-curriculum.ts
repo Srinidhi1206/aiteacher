@@ -17,6 +17,7 @@
 import { prisma } from "@/lib/prisma";
 import { requireRole, ForbiddenError } from "@/lib/auth/current-session";
 import { studentMaterialWhere } from "@/lib/materials/scope";
+import { parseIndexStatus } from "@/lib/rag/index-status";
 import type { Prisma } from "@prisma/client";
 
 async function requireStudentScope() {
@@ -94,6 +95,20 @@ export async function getMySubjects(): Promise<{ classLabel: string | null; boar
   return { classLabel, boardName, subjects };
 }
 
+/**
+ * The ids and names of the student's own subjects, chapters and topics - just enough for the Study Plan to link a task to the chapter or topic it is about
+ * (lib/study-plan/task-links.ts). Same scope as everything else here: only the subjects enabled for the student's own class.
+ */
+export async function getMyCurriculumLinks(): Promise<import("@/lib/study-plan/task-links").LinkSubject[]> {
+  const student = await requireStudentScope();
+  if (!student.schoolClassId) return [];
+  const links = await prisma.schoolClassSubject.findMany({
+    where: { schoolClassId: student.schoolClassId, isEnabled: true },
+    select: { subject: { select: { id: true, name: true, chapters: { orderBy: [{ order: "asc" }, { id: "asc" }], select: { id: true, name: true, topics: { orderBy: [{ order: "asc" }, { id: "asc" }], select: { id: true, name: true } } } } } } },
+  });
+  return links.map((l) => l.subject);
+}
+
 export interface MyMaterial {
   id: string;
   title: string;
@@ -102,6 +117,17 @@ export interface MyMaterial {
   /** null = a material for the whole subject (for example a complete textbook), not one chapter. */
   chapterId: string | null;
   topicId: string | null;
+}
+
+/**
+ * Where a chapter starts in a complete textbook the student's school has shared - only when that is KNOWN: the textbook is a whole-subject material that has been fully indexed, and its passages were
+ * linked to this chapter from verified chapter page ranges (lib/curriculum-import-data/chapter-page-maps.ts). `page` is the first PDF page with the chapter's text. Nothing is guessed: no verified link, no section.
+ */
+export interface MyTextbookSection {
+  materialId: string;
+  title: string;
+  fileUrl: string;
+  page: number;
 }
 
 export interface MySubjectDetail {
@@ -115,7 +141,34 @@ export interface MySubjectDetail {
     name: string;
     topics: { id: string; name: string; bloomLevel: string; status: "WEAK" | "DEVELOPING" | "STRONG" | null; mastery: number | null }[];
     materials: MyMaterial[];
+    /** Where the chapter starts in the textbook, when that is verified; null otherwise. */
+    textbook: MyTextbookSection | null;
   }[];
+}
+
+/**
+ * The verified textbook section of each given chapter: for every complete whole-subject textbook among `materials`, the first page whose passages were linked to the chapter. Only whole-subject textbooks count -
+ * a passage of a material filed under a chapter carries that chapter whatever its page, so only a material with NO chapter can have got its chapter links from the verified page ranges.
+ */
+async function textbookSections(
+  materials: { id: string; title: string; fileUrl: string; materialType: string; chapterId: string | null; indexError: string | null }[],
+  chapterIds: string[]
+): Promise<Map<string, MyTextbookSection>> {
+  const books = materials.filter((m) => m.materialType === "TEXTBOOK" && m.chapterId === null && parseIndexStatus(m.indexError)?.kind === "complete");
+  const out = new Map<string, MyTextbookSection>();
+  if (books.length === 0 || chapterIds.length === 0) return out;
+  const rows = await prisma.materialChunk.groupBy({
+    by: ["materialId", "chapterId"],
+    where: { materialId: { in: books.map((b) => b.id) }, chapterId: { in: chapterIds }, page: { not: null } },
+    _min: { page: true },
+  });
+  for (const book of books) {
+    for (const r of rows) {
+      if (r.materialId !== book.id || !r.chapterId || r._min.page === null || out.has(r.chapterId)) continue;
+      out.set(r.chapterId, { materialId: book.id, title: book.title, fileUrl: book.fileUrl, page: r._min.page });
+    }
+  }
+  return out;
 }
 
 export async function getMySubject(subjectId: string): Promise<MySubjectDetail | null> {
@@ -124,7 +177,7 @@ export async function getMySubject(subjectId: string): Promise<MySubjectDetail |
 
   const subject = await prisma.subject.findUnique({
     where: { id: subjectId },
-    include: { chapters: { orderBy: { order: "asc" }, include: { topics: { orderBy: { order: "asc" } } } } },
+    include: { chapters: { orderBy: [{ order: "asc" }, { id: "asc" }], include: { topics: { orderBy: [{ order: "asc" }, { id: "asc" }] } } } },
   });
   if (!subject) return null;
 
@@ -133,17 +186,19 @@ export async function getMySubject(subjectId: string): Promise<MySubjectDetail |
     topicIds.length ? prisma.studentTopicProgress.findMany({ where: { studentId: student.id, topicId: { in: topicIds } } }) : Promise.resolve([]),
     prisma.studyMaterial.findMany({
       where: materialsWhere(student, { subjectId }),
-      select: { id: true, title: true, fileUrl: true, materialType: true, chapterId: true, topicId: true },
+      select: { id: true, title: true, fileUrl: true, materialType: true, chapterId: true, topicId: true, indexError: true },
       orderBy: { uploadedAt: "desc" },
     }),
   ]);
   const progressByTopic = new Map(progressRows.map((p) => [p.topicId, p]));
+  const sections = await textbookSections(materials, subject.chapters.map((c) => c.id));
+  const visible: MyMaterial[] = materials.map(({ indexError: _indexError, ...m }) => m);
 
   return {
     id: subject.id,
     name: subject.name,
     classLabel: student.schoolClass?.label ?? null,
-    subjectMaterials: materials.filter((m) => m.chapterId === null),
+    subjectMaterials: visible.filter((m) => m.chapterId === null),
     chapters: subject.chapters.map((c) => ({
       id: c.id,
       name: c.name,
@@ -154,7 +209,8 @@ export async function getMySubject(subjectId: string): Promise<MySubjectDetail |
         status: progressByTopic.get(t.id)?.status ?? null,
         mastery: progressByTopic.get(t.id)?.mastery ?? null,
       })),
-      materials: materials.filter((m) => m.chapterId === c.id),
+      materials: visible.filter((m) => m.chapterId === c.id),
+      textbook: sections.get(c.id) ?? null,
     })),
   };
 }
@@ -167,6 +223,8 @@ export interface MyTopicDetail {
   status: "WEAK" | "DEVELOPING" | "STRONG" | null;
   mastery: number | null;
   materials: MyMaterial[];
+  /** Where this topic's CHAPTER starts in the textbook, when that is verified (a topic has no page of its own on record). */
+  chapterTextbook: MyTextbookSection | null;
 }
 
 export async function getMyTopic(subjectId: string, topicId: string): Promise<MyTopicDetail | null> {
@@ -180,7 +238,7 @@ export async function getMyTopic(subjectId: string, topicId: string): Promise<My
   // The topic must belong to the subject in the URL, which is in this student's class.
   if (!topic || topic.chapter.subjectId !== subjectId) return null;
 
-  const [progress, materials] = await Promise.all([
+  const [progress, materials, books] = await Promise.all([
     prisma.studentTopicProgress.findUnique({ where: { studentId_topicId: { studentId: student.id, topicId } } }),
     prisma.studyMaterial.findMany({
       // Materials filed under this topic, plus chapter-level ones with no topic.
@@ -188,7 +246,14 @@ export async function getMyTopic(subjectId: string, topicId: string): Promise<My
       select: { id: true, title: true, fileUrl: true, materialType: true, chapterId: true, topicId: true },
       orderBy: { uploadedAt: "desc" },
     }),
+    // The complete textbooks of the subject (no chapter), for where this chapter starts in them.
+    prisma.studyMaterial.findMany({
+      where: materialsWhere(student, { subjectId, chapterId: null, materialType: "TEXTBOOK" }),
+      select: { id: true, title: true, fileUrl: true, materialType: true, chapterId: true, indexError: true },
+      orderBy: { uploadedAt: "desc" },
+    }),
   ]);
+  const chapterTextbook = (await textbookSections(books, [topic.chapterId])).get(topic.chapterId) ?? null;
 
   return {
     subjectId,
@@ -198,5 +263,6 @@ export async function getMyTopic(subjectId: string, topicId: string): Promise<My
     status: progress?.status ?? null,
     mastery: progress?.mastery ?? null,
     materials,
+    chapterTextbook,
   };
 }

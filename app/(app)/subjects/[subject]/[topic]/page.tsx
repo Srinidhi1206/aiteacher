@@ -64,6 +64,15 @@ export default async function TopicDetailPage({ params }: { params: { subject: s
             ) : (
               <p className="text-xs text-gray-400">No mastery recorded yet. It appears here after you take a graded exam or a practice session on this topic.</p>
             )}
+            {data.chapterTextbook && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                This chapter starts on page {data.chapterTextbook.page} of{" "}
+                <a href={`${data.chapterTextbook.fileUrl}#page=${data.chapterTextbook.page}`} target="_blank" rel="noopener noreferrer" className="font-medium text-primary-600 hover:underline dark:text-primary-300">
+                  {data.chapterTextbook.title}
+                </a>
+                .
+              </p>
+            )}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <StartPracticeButton topicId={data.topic.id} />
               {/* The tutor opens with this topic's subject, chapter and the student's mastery as its context, and the question typed in, ready to send. */}

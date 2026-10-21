@@ -17,6 +17,8 @@ import { cn } from "@/lib/utils";
 import { todayInIndia } from "@/lib/calendar/day";
 import { formatDayKey, planProgress, taskState } from "@/lib/study-plan/item-status";
 import { TICK_HELPER_TEXT, markedDoneCount, tickLabel } from "@/lib/study-plan/wording";
+import { taskLink, taskScope, type LinkSubject } from "@/lib/study-plan/task-links";
+import { chapterScopeHref } from "@/lib/study-plan/chapter-scope";
 
 type LearningPath = Awaited<ReturnType<typeof getMyLearningPath>>;
 type WeakAreas = Awaited<ReturnType<typeof getMyWeakAreas>>;
@@ -29,7 +31,7 @@ const KIND_LABEL: Record<string, string> = {
   BUFFER: "Buffer",
 };
 
-export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], subjectLinks = {} }: { learningPath: LearningPath | null; weakAreas: WeakAreas; planNotes?: string[]; subjectLinks?: Record<string, string> }) {
+export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], subjectLinks = {}, curriculum = [] }: { learningPath: LearningPath | null; weakAreas: WeakAreas; planNotes?: string[]; curriculum?: LinkSubject[]; subjectLinks?: Record<string, string> }) {
   const router = useRouter();
   const [pendingId, setPendingId] = React.useState<string | null>(null);
   const [saveError, setSaveError] = React.useState<string | null>(null);
@@ -67,6 +69,10 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
           </CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
+          {/* Why nothing is planned (for example an exam whose syllabus has not been configured) is said here too, not only once there are tasks. */}
+          <div className="w-full max-w-xl text-left">
+            <PlanNotes notes={planNotes} />
+          </div>
           <p className="max-w-sm text-sm text-gray-500 dark:text-gray-400">
             No learning path yet. It&apos;s generated from your weak areas and upcoming exams - complete a graded exam first, or
             generate a general plan now.
@@ -170,11 +176,27 @@ export function RealLearningPathView({ learningPath, weakAreas, planNotes = [], 
                         </div>
                       </div>
                       <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-3">
-                        {subjectLinks[item.subject] && (
-                          <Link href={`/subjects/${subjectLinks[item.subject]}`} className="shrink-0 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400">
-                            Chapters &amp; materials
-                          </Link>
-                        )}
+                        {(() => {
+                          // A task that is about one chapter or topic keeps that scope: "Chapters & materials" opens THAT chapter (not the whole subject), and a topic task also links to its topic.
+                          // A task with no reliable chapter (a whole-subject revision, a mock test, an ambiguous name) opens the whole subject, as before.
+                          const scope = taskScope(item, curriculum);
+                          const target = taskLink(item, curriculum);
+                          const materialsHref = scope ? chapterScopeHref(scope.subjectId, [scope.chapterId]) : subjectLinks[item.subject] ? `/subjects/${subjectLinks[item.subject]}` : null;
+                          return (
+                            <>
+                              {target && target.href !== materialsHref && (
+                                <Link href={target.href} className="shrink-0 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400">
+                                  {target.label}
+                                </Link>
+                              )}
+                              {materialsHref && (
+                                <Link href={materialsHref} className="shrink-0 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400">
+                                  Chapters &amp; materials
+                                </Link>
+                              )}
+                            </>
+                          );
+                        })()}
                         <Link
                           href={`/ai-tutor?prefill=${encodeURIComponent(`Help me with: ${item.title} (${item.subject}).`)}`}
                           className="flex shrink-0 items-center gap-1 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400"
